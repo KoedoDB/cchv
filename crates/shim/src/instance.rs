@@ -10,7 +10,7 @@ use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use containerd_shimkit::sandbox::instance::{Instance, InstanceConfig};
+use containerd_shimkit::sandbox::instance::{ExecConfig, Instance, InstanceConfig};
 use containerd_shimkit::sandbox::sync::WaitableCell;
 use containerd_shimkit::sandbox::Error;
 use log::info;
@@ -18,6 +18,7 @@ use log::info;
 use crate::config::{load_config, load_shim_limits};
 use crate::daemon_client::{AcquireRequest, DaemonClient};
 use crate::erofs_cache::{CacheConfig, Lease};
+use crate::exec::ExecProc;
 use crate::vmsize::{check_size, limits_from_spec, vm_size, PodLimits};
 
 /// Milliseconds since Unix epoch for TIMING logs.
@@ -125,6 +126,10 @@ pub struct CloudHvInstance {
     exit: Arc<WaitableCell<(u32, DateTime<Utc>)>>,
     /// What containerd gave this instance, including the pipes for its stdout and stderr (the container's output is written to them).
     cfg: InstanceConfig,
+    /// The exec processes of this container, by exec id (see `exec.rs`).
+    execs: Mutex<HashMap<String, Arc<ExecProc>>>,
+    /// The forwarding of the stdin pipe to the container's terminal, for a container that has both (`kubectl run -it`, `attach`).
+    init_input: Mutex<Option<Arc<ExecProc>>>,
 }
 
 impl Instance for CloudHvInstance {
@@ -147,6 +152,8 @@ impl Instance for CloudHvInstance {
             bundle: cfg.bundle.clone(),
             exit: Arc::new(WaitableCell::new()),
             cfg: cfg.clone(),
+            execs: Mutex::default(),
+            init_input: Mutex::default(),
         })
     }
 
@@ -239,6 +246,9 @@ impl Instance for CloudHvInstance {
 
     async fn delete(&self) -> Result<(), Error> {
         info!("CloudHvInstance::delete id={}", self.id);
+        if let Some(p) = self.init_input.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            p.stop();
+        }
         let t_total = std::time::Instant::now();
 
         if let Some(vm_state) = get_vm(&self.sandbox_id) {
@@ -300,6 +310,89 @@ impl Instance for CloudHvInstance {
             );
             result
         }
+    }
+
+    async fn resize_pty(&self, width: u32, height: u32) -> Result<(), Error> {
+        let vm = get_vm(&self.sandbox_id)
+            .filter(|v| !v.daemon_vm_id.is_empty())
+            .ok_or_else(|| Error::FailedPrecondition("the container has no VM".into()))?;
+        DaemonClient::new(&vm.daemon_socket)
+            .exec_resize(&vm.daemon_vm_id, &self.id, crate::exec::INIT_EXEC_ID, width, height)
+            .await
+            .map_err(Error::Any)
+    }
+
+    async fn close_stdin(&self) -> Result<(), Error> {
+        let input = self.init_input.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        match input {
+            Some(p) => p.close_stdin().await,
+            None => Ok(()),
+        }
+    }
+
+    async fn exec_create(&self, cfg: &ExecConfig) -> Result<(), Error> {
+        if self.id == self.sandbox_id {
+            return Err(Error::FailedPrecondition(
+                "the sandbox (pause) container cannot run an exec process".into(),
+            ));
+        }
+        let vm = get_vm(&self.sandbox_id)
+            .filter(|v| !v.daemon_vm_id.is_empty())
+            .ok_or_else(|| Error::FailedPrecondition("the container has no VM".into()))?;
+        let proc = ExecProc::new(
+            cfg.clone(),
+            DaemonClient::new(&vm.daemon_socket),
+            vm.daemon_vm_id.clone(),
+            self.id.clone(),
+        );
+        proc.create().await?;
+        self.execs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(cfg.exec_id.clone(), proc);
+        Ok(())
+    }
+
+    async fn exec_start(&self, exec_id: &str) -> Result<u32, Error> {
+        self.exec_proc(exec_id)?.start().await
+    }
+
+    async fn exec_kill(&self, exec_id: &str, signal: u32) -> Result<(), Error> {
+        self.exec_proc(exec_id)?.kill(signal).await
+    }
+
+    async fn exec_wait(&self, exec_id: &str) -> Result<(u32, DateTime<Utc>), Error> {
+        self.exec_proc(exec_id)?.wait().await
+    }
+
+    async fn exec_delete(&self, exec_id: &str) -> Result<(), Error> {
+        let proc = self.exec_proc(exec_id)?;
+        let res = proc.delete().await;
+        self.execs.lock().unwrap_or_else(|e| e.into_inner()).remove(exec_id);
+        res
+    }
+
+    async fn exec_resize(&self, exec_id: &str, width: u32, height: u32) -> Result<(), Error> {
+        self.exec_proc(exec_id)?.resize(width, height).await
+    }
+
+    async fn exec_close_stdin(&self, exec_id: &str) -> Result<(), Error> {
+        self.exec_proc(exec_id)?.close_stdin().await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Exec (the task service in shimkit keeps the order of the calls; see exec.rs)
+// ---------------------------------------------------------------------------
+
+impl CloudHvInstance {
+    fn exec_proc(&self, exec_id: &str) -> Result<Arc<ExecProc>, Error> {
+        self.execs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(exec_id)
+            .cloned()
+            .ok_or_else(|| Error::NotFound(format!("exec process {exec_id}")))
     }
 }
 
@@ -499,6 +592,7 @@ impl CloudHvInstance {
                     container_id,
                     &config_json,
                     &volumes,
+                    self.cfg.terminal,
                 )
                 .await
                 .ctx("daemon add_container")?;
@@ -519,6 +613,7 @@ impl CloudHvInstance {
                     memory_mb: vm_state.memory_mb,
                     vcpus: vm_state.vcpus,
                     volumes: &volumes,
+                    terminal: self.cfg.terminal,
                 })
                 .await
                 .ctx("daemon acquire")?;
@@ -636,6 +731,19 @@ impl CloudHvInstance {
             tokio::spawn(async move {
                 pump_logs(cfg, daemon_socket, daemon_vm_id, cid).await;
             });
+        }
+
+        // A container with a terminal and a stdin pipe (the client has input: `kubectl run -it`, `kubectl attach -i`): forward what is
+        // written to the pipe to the container's terminal. (Without a terminal the container's stdin is /dev/null in the guest.)
+        if self.cfg.terminal && !self.cfg.stdin.as_os_str().is_empty() {
+            let input = ExecProc::for_init(
+                container_id,
+                self.cfg.stdin.clone(),
+                DaemonClient::new(&active_state.daemon_socket),
+                active_state.daemon_vm_id.clone(),
+            );
+            input.start_input_only();
+            *self.init_input.lock().unwrap_or_else(|e| e.into_inner()) = Some(input);
         }
 
         active_state.container_count.fetch_add(1, Ordering::SeqCst);

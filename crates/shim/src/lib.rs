@@ -1,6 +1,7 @@
 pub mod cachekey;
 pub mod config;
 pub mod daemon_client;
+pub mod exec;
 pub mod erofs_cache;
 pub mod instance;
 pub mod netns;

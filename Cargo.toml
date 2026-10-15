@@ -21,7 +21,7 @@ repository = "https://github.com/devigned/containerd-cloudhypervisor"
 tokio = { version = "1", features = ["rt", "net", "time", "io-util", "sync", "macros", "signal", "process", "fs"] }
 
 # RPC
-ttrpc = { version = "0.8", features = ["async"] }
+ttrpc = { version = "0.10", features = ["async"] }
 protobuf = "3"
 
 # Error handling

@@ -39,3 +39,66 @@ The key is made from what is mounted at the container's `rootfs` (`src/cachekey.
 `lowerdir`s in stacking order, for another mount the file system, device and directory, for a plain directory its device, inode and
 times; plus the image's digest if containerd gives one. If none of that can be read the container does not start. Two pods of one image
 share a key; a tag that was moved cannot put one image's files under another's key.
+
+## Exec (`kubectl exec`, exec probes)
+
+containerd's `Exec` task calls are served by the vendored shimkit (`third_party/containerd-shimkit`, see its `KOEDODB.md`): it keeps the
+exec table of each task with a small state machine (created, starting, started, exited, deleting), checks the order of the calls, and
+publishes `TaskExecAdded`, `TaskExecStarted` and `TaskExit` (with the exec id as `id`). It calls the optional `exec_*` methods of
+the `Instance`; this shim implements them in `crates/shim/src/exec.rs` by asking the daemon, which asks the guest agent. The process
+runs in the guest, in the container's own root file system, namespaces and cgroup.
+
+**The daemon's JSON-line contract.** Every request has `vm_id`, `container_id` (the pod container the exec belongs to) and `exec_id`.
+Ids are `[A-Za-z0-9_-]{1,64}` (the shimkit accepts `.` and up to 128 characters in an exec id; the daemon may be stricter).
+
+| Method | Extra request fields | Answer |
+|---|---|---|
+| `ExecCreate` | `process_json` (base64 of the OCI `Process`), `terminal` | `{}` |
+| `ExecStart` | | `{"pid": N}` |
+| `ExecKill` | `signal` | `{}` |
+| `ExecWait` | | blocks until the process exits: `{"exit_status": N, "exited_at_unix_nanos": N}` (no RPC timeout) |
+| `ExecDelete` | | `{}` |
+| `ExecWrite` | `data` (base64) | `{"written": N}` |
+| `ExecCloseStdin` | | `{}` |
+| `ExecRead` | `stdout_offset`, `stderr_offset`, `max` | `{"stdout", "stderr"` (base64)`, "stdout_offset", "stderr_offset", "eof", "dropped"}` |
+| `ExecResize` | `width`, `height` | `{}` |
+
+An error is `{"error": "..."}`. The offsets of `ExecRead` are cumulative byte positions and acknowledge what the caller has taken (as
+for `ReadLogs`); with a terminal all output is on `stdout`.
+
+**Streams.** After `ExecStart` the shim polls `ExecRead` (right away while data flows, then every 20 ms doubling up to 100 ms) and writes
+to the stdout and stderr pipes containerd made, with the same timeouts as the log pump; a stream with no pipe is read and dropped. What
+containerd's client writes to the stdin pipe is forwarded with `ExecWrite`; the end of input is `CloseIO`, which first forwards what
+is in the pipe and then sends `ExecCloseStdin`. An exec whose stdin pipe has no writer (a probe) does not wait for input. When the
+process exits, the shim reads until `eof`, and only then reports the exit to containerd (which takes it as the end of the streams).
+
+**Limits.** At most 64 exec processes per task; process spec at most 1 MiB; each read or write at most 64 KiB; `Exec` is refused for a task
+that is not running and for the sandbox (pause) container.
+
+**Not done.** `ExecRead` is polled, not streamed, so an interactive terminal has up to 100 ms of latency when idle; `Pids` does not list
+exec processes; the exec's resource limits are those of the container.
+
+## Terminals (`tty: true`)
+
+A container whose process has a terminal (`tty: true` in the pod; `kubectl run -it`, `kubectl attach`) is created with the task's
+`terminal` flag; the shim sends it as the boolean `terminal` in `AcquireSandbox` and `AddContainer`, the daemon puts it in the
+agent's `CreateContainerRequest.terminal`, and the agent forces `process.terminal` in the container's spec to it (the request's flag
+decides, not the JSON's, as for an exec) and starts the container with `crun run --console-socket`. crun makes the pty and sends its
+master over the socket (SCM_RIGHTS) before the process runs; the agent keeps the master.
+
+- **Output**: read from the master into the container's log buffer, as the **stdout** stream (a terminal has no stderr), and carried to the
+  stdout pipe containerd made by `pump_logs` as before: `kubectl logs` of a tty container works. The end of the output is reported after
+  what was written to the terminal has been read (up to 3 s after the process exits).
+- **Input**: if containerd made a stdin pipe (the pod has `stdin: true`), the shim forwards what is written to it with `ExecWrite`, and
+  `CloseIO` with the daemon's `ExecCloseStdin` (a terminal has no end of input: accepted, nothing done; the client sends ^D). A pod with
+  `tty: true` and no stdin (the common case) has no stdin pipe, and nothing is forwarded.
+- **Size**: `ResizePty` of the task is `ExecResize`; the size is set with `TIOCSWINSZ` on the master. Refused for a task with no
+  terminal or one that is not running.
+- **The reserved exec id `init`** names the container's own process in `ExecWrite`, `ExecCloseStdin` and `ExecResize`, so that no new
+  calls were added between shim, daemon and agent. `ExecCreate` refuses the id in the daemon and in the agent; `ExecStart`, `ExecKill`,
+  `ExecWait`, `ExecDelete` and `ExecRead` mean nothing for it, and the hardening of exec processes is unchanged.
+
+**Attach.** `kubectl attach` does not talk to the shim: containerd's CRI plugin attaches clients to the FIFOs it made at Create (it reads
+the stdout FIFO for the log file and the attached clients, and writes the stdin FIFO for them). So it works exactly as far as the FIFOs do:
+the container needs `stdin: true` for a client to send input, and `tty: true` for a terminal. Not tested with a real client in this tree.
+

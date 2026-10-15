@@ -13,7 +13,7 @@ path = "src/main.rs"
 cloudhv-common = { workspace = true }
 
 # containerd shim protocol (via shimkit, without libcontainer/libseccomp/dbus)
-containerd-shimkit = { git = "https://github.com/devigned/runwasi.git", rev = "faee81b62728f235a28c81f6db71c4e7f6db1d4a", default-features = false }
+containerd-shimkit = { path = "../../third_party/containerd-shimkit", default-features = false }
 
 # containerd gRPC client (for image digest resolution)
 containerd-client = "0.8.0"
