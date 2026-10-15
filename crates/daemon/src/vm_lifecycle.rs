@@ -84,7 +84,7 @@ pub async fn boot_vm_sized(
     if serial {
         crate::fsutil::create_new(&console_log).context("create console.log")?;
     }
-    let ch_pid = spawn_ch(config, state_dir).await?;
+    let ch_pid = spawn_ch(config, state_dir, memory_mb, vcpus).await?;
     let api_socket = state_dir.join("api.sock");
 
     let steps = async {
@@ -170,34 +170,41 @@ pub async fn boot_vm_sized(
 
 /// Spawn a Cloud Hypervisor process. Returns PID. Records it where only root can (`ctl.rs`). If rootless, the VM gets a user of its own
 /// first, who owns the state directory (and `console.log`, if it is there already). A failure leaves no user and no record behind.
-pub async fn spawn_ch(config: &DaemonConfig, state_dir: &Path) -> Result<u32> {
-    match spawn_ch_inner(config, state_dir).await {
+pub async fn spawn_ch(config: &DaemonConfig, state_dir: &Path, memory_mb: u64, vcpus: u32) -> Result<u32> {
+    match spawn_ch_inner(config, state_dir, memory_mb, vcpus).await {
         Ok(pid) => Ok(pid),
         Err(e) => {
             crate::rootless::release(state_dir).await;
+            crate::rootless::drop_outbox(state_dir);
             crate::ctl::remove(state_dir);
             Err(e)
         }
     }
 }
 
-async fn spawn_ch_inner(config: &DaemonConfig, state_dir: &Path) -> Result<u32> {
+async fn spawn_ch_inner(config: &DaemonConfig, state_dir: &Path, memory_mb: u64, vcpus: u32) -> Result<u32> {
     let api_socket = state_dir.join("api.sock");
+
+    crate::ctl::create(state_dir)?;
+    let user = crate::rootless::alloc_for(state_dir)?;
+    if user.is_some() {
+        crate::rootless::give(state_dir, state_dir)?;
+        let console = state_dir.join("console.log");
+        if console.exists() {
+            crate::rootless::give(&console, state_dir)?;
+        }
+    }
+    if let (Some(ids), true) = (user, crate::rootless::confined()) {
+        return spawn_confined(config, state_dir, &api_socket, ids, memory_mb, vcpus).await;
+    }
+
     let mut cmd = Command::new(&config.cloud_hypervisor_binary);
     cmd.arg("--api-socket")
         .arg(&api_socket)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-
-    crate::ctl::create(state_dir)?;
-    let user = crate::rootless::alloc_for(state_dir)?;
     if let Some((uid, gid)) = user {
-        crate::rootless::give(state_dir, state_dir)?;
-        let console = state_dir.join("console.log");
-        if console.exists() {
-            crate::rootless::give(&console, state_dir)?;
-        }
         // std clears the supplementary groups when it drops from root; the group is the one that may open /dev/kvm.
         cmd.uid(uid).gid(gid);
     }
@@ -209,13 +216,7 @@ async fn spawn_ch_inner(config: &DaemonConfig, state_dir: &Path) -> Result<u32> 
     let max_processes = config.ch_max_processes;
     unsafe {
         cmd.pre_exec(move || {
-            let mut set: libc::sigset_t = std::mem::zeroed();
-            if libc::sigemptyset(&mut set) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::sigprocmask(libc::SIG_SETMASK, &set, std::ptr::null_mut()) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
+            reset_signal_mask()?;
             // No core file: it would hold the guest's memory.
             let no_core = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
             if libc::setrlimit(libc::RLIMIT_CORE, &no_core) != 0 {
@@ -256,6 +257,138 @@ async fn spawn_ch_inner(config: &DaemonConfig, state_dir: &Path) -> Result<u32> 
     Ok(pid)
 }
 
+fn reset_signal_mask() -> std::io::Result<()> {
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        if libc::sigemptyset(&mut set) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::sigprocmask(libc::SIG_SETMASK, &set, std::ptr::null_mut()) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// Start a confined Cloud Hypervisor (see `confine.rs`): the daemon's own binary as the launcher, given the instructions on its standard
+/// input. The pid returned and recorded is the launcher's, the supervisor of Cloud Hypervisor: it is the process that is signalled and
+/// waited for, and it ends when Cloud Hypervisor does.
+async fn spawn_confined(
+    config: &DaemonConfig,
+    state_dir: &Path,
+    api_socket: &Path,
+    ids: (u32, u32),
+    memory_mb: u64,
+    vcpus: u32,
+) -> Result<u32> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    use tokio::io::AsyncWriteExt;
+
+    let vm_name = state_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let out_dir = crate::rootless::make_outbox(state_dir)?;
+
+    // The cgroup, with its limits. Where it cannot be had the VM runs without (said once at start) unless it is required.
+    let limits = crate::cgroup::limits_for(
+        memory_mb,
+        vcpus,
+        config.ch_memory_overhead_mib,
+        config.ch_max_processes,
+        config.ch_cpu_limit,
+    );
+    let cgroup = match crate::cgroup::create(&vm_name, &limits) {
+        Ok(c) => c,
+        Err(e) if config.ch_require_cgroup => return Err(e.context("the VM's cgroup (ch_require_cgroup is set)")),
+        Err(e) => {
+            warn!("VM {vm_name} runs without cgroup limits: {e:#}");
+            None
+        }
+    };
+
+    // Where the new root is built: a directory of root's, in the registry.
+    let ctl = crate::ctl::create(state_dir)?;
+    let new_root = ctl.join("root");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .recursive(true)
+        .create(&new_root)
+        .with_context(|| format!("create {}", new_root.display()))?;
+    std::fs::set_permissions(&new_root, std::fs::Permissions::from_mode(0o700))?;
+
+    let spec = crate::confine::build_spec(
+        &config.cloud_hypervisor_binary,
+        vec!["--api-socket".to_string(), api_socket.display().to_string()],
+        ids,
+        crate::rootless::gid(),
+        &new_root,
+        state_dir,
+        &out_dir,
+        &config.kernel_path,
+        &config.rootfs_path,
+        &config.erofs_cache_dir,
+        &config.ch_extra_ro_paths,
+        &crate::confine::SYSTEM_LIB_DIRS,
+        cgroup.as_deref(),
+        config.ch_max_processes,
+        &vm_name,
+    );
+    crate::confine::validate_spec(&spec).map_err(|e| anyhow::anyhow!("the confinement of {vm_name}: {e}"))?;
+
+    let exe = std::env::current_exe().context("the daemon's own path (the launcher)")?;
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode_0600()
+        .open(ctl.join("launcher.log"))
+        .context("open the launcher log")?;
+    let mut cmd = Command::new(exe);
+    cmd.arg("--ch-launcher")
+        // Not read by the launcher: it makes the process's command line name the VM's API socket, which is how the daemon knows whose
+        // process it is (`ctl::cmdline_is_ch_of`).
+        .arg("--api-socket")
+        .arg(api_socket)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(log));
+    unsafe {
+        cmd.pre_exec(reset_signal_mask);
+    }
+    let mut child = cmd.spawn().context("spawn the launcher")?;
+    let pid = child.id().context("get the launcher's pid")?;
+    let wrote = async {
+        let mut stdin = child.stdin.take().context("the launcher's standard input")?;
+        stdin.write_all(&serde_json::to_vec(&spec)?).await?;
+        stdin.shutdown().await?;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    if let Err(e) = wrote.and_then(|_| crate::ctl::write_pid(state_dir, pid)) {
+        let _ = child.start_kill();
+        tokio::spawn(async move {
+            let _ = child.wait().await;
+        });
+        return Err(e.context("instruct the launcher"));
+    }
+    tokio::spawn(async move {
+        let _ = child.wait().await;
+    });
+    Ok(pid)
+}
+
+trait Mode0600 {
+    fn mode_0600(&mut self) -> &mut Self;
+}
+
+impl Mode0600 for std::fs::OpenOptions {
+    fn mode_0600(&mut self) -> &mut Self {
+        use std::os::unix::fs::OpenOptionsExt;
+        self.mode(0o600)
+    }
+}
+
 /// Wait for the CH API socket to become ready.
 pub async fn wait_ch_ready(api_socket: &Path) -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -265,7 +398,24 @@ pub async fn wait_ch_ready(api_socket: &Path) -> Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    anyhow::bail!("CH API socket not ready: {}", api_socket.display())
+    anyhow::bail!(
+        "CH API socket not ready: {}{}",
+        api_socket.display(),
+        launcher_log_tail(api_socket)
+    )
+}
+
+/// What the launcher of a confined VM said (it says something only when it could not build the confinement or start Cloud Hypervisor).
+fn launcher_log_tail(api_socket: &Path) -> String {
+    let Some(state_dir) = api_socket.parent() else { return String::new() };
+    let log = crate::ctl::dir_of(state_dir).join("launcher.log");
+    match std::fs::read(&log) {
+        Ok(b) if !b.is_empty() => {
+            let tail = &b[b.len().saturating_sub(600)..];
+            format!(" (launcher: {})", String::from_utf8_lossy(tail).trim())
+        }
+        _ => String::new(),
+    }
 }
 
 /// Connect to the guest agent via vsock and verify it responds.
@@ -317,11 +467,22 @@ pub async fn resume_vm(api_socket: &Path) -> Result<()> {
 /// writes it, so it owns the directory meanwhile. What is in the directory afterwards is the VM's work and is not trusted: the caller
 /// must destroy the VM (`shutdown_and_destroy`) and then `rootless::hand_over_snapshot` before it reads or uses any of it.
 pub async fn snapshot_vm(api_socket: &Path, dest_dir: &Path) -> Result<()> {
-    if let Some(state_dir) = api_socket.parent() {
-        crate::rootless::give(dest_dir, state_dir)?;
-    }
+    let state_dir = api_socket.parent();
+    // A confined VM sees no directory but its own, so it writes into its outbox (`rootless::make_outbox`); the caller moves that to
+    // `dest_dir` after the VM is dead (`rootless::collect_outbox`). Otherwise the VM writes into `dest_dir`, which it is given.
+    let target = match state_dir {
+        Some(sd) if crate::rootless::confined() => {
+            crate::rootless::keep_outbox(sd);
+            crate::confine::out_dir_of(sd)
+        }
+        Some(sd) => {
+            crate::rootless::give(dest_dir, sd)?;
+            dest_dir.to_path_buf()
+        }
+        None => dest_dir.to_path_buf(),
+    };
     let body = serde_json::json!({
-        "destination_url": format!("file://{}", dest_dir.display()),
+        "destination_url": format!("file://{}", target.display()),
     });
     api_request_timeout(
         api_socket,
@@ -493,6 +654,7 @@ pub async fn shutdown_and_destroy(_api_socket: &Path, ch_pid: u32, state_dir: &P
 
     // Rootless: every other process of the VM's user goes too, and only then is the user free for another VM.
     crate::rootless::release(state_dir).await;
+    crate::rootless::drop_outbox(state_dir);
     crate::ctl::remove(state_dir);
     let _ = std::fs::remove_dir_all(state_dir);
     info!("VM {} destroyed in {}ms", ch_pid, t0.elapsed().as_millis());

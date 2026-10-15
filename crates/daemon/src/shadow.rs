@@ -126,7 +126,7 @@ impl SnapshotManager {
             }
         };
 
-        let ch_pid = vm_lifecycle::spawn_ch(&self.config, state_dir).await?;
+        let ch_pid = vm_lifecycle::spawn_ch(&self.config, state_dir, self.config.default_memory_mb, self.config.default_vcpus).await?;
         let api_socket = state_dir.join("api.sock");
         let steps = async {
             // Rootless: the VM may read the two big files of this snapshot (hard links of the cached ones) and the image, and nothing
@@ -215,11 +215,22 @@ impl SnapshotManager {
             .shadow_steps(&pool_vm, image_key, erofs_path, &snap_dir)
             .await;
         let released = self.pool.release(&pool_vm.vm_id).await;
+        let vm_dir = pool_vm.api_socket.parent().map(|p| p.to_path_buf());
         if let Err(e) = steps {
+            if let Some(d) = &vm_dir {
+                crate::rootless::discard_outbox(d);
+            }
             let _ = std::fs::remove_dir_all(&snap_dir);
             return Err(e);
         }
         released.context("destroy the shadow VM")?;
+        // A confined VM wrote its snapshot into its outbox: it is moved to where it will live, still untrusted until handed over.
+        if let Some(d) = &vm_dir {
+            if let Err(e) = crate::rootless::collect_outbox(d, &snap_dir) {
+                let _ = std::fs::remove_dir_all(&snap_dir);
+                return Err(e);
+            }
+        }
 
         // 6. The VM is gone. Now the directory is root's: hand it over (links and the like are removed), then it can be read.
         let cached = (|| -> Result<()> {

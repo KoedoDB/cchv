@@ -110,6 +110,45 @@ pub struct DaemonConfig {
     /// The most processes (threads count) the user of a rootless Cloud Hypervisor may have (`RLIMIT_NPROC`).
     #[serde(default = "default_ch_max_processes")]
     pub ch_max_processes: u64,
+
+    /// With `ch_rootless`: also confine each Cloud Hypervisor (default on). It then runs in a mount namespace whose root holds only what it
+    /// needs, in PID, network (empty), IPC and UTS namespaces of its own, in a cgroup of its own with limits, and with a group of its own
+    /// (see `confine.rs`). Off: only a user of its own, as before.
+    #[serde(default = "default_true")]
+    pub ch_confine: bool,
+
+    /// The cgroup (v2) directory under which each confined VM gets a cgroup of its own. The daemon makes it, and turns on the memory and
+    /// pids controllers for it where it can.
+    #[serde(default = "default_ch_cgroup_root")]
+    pub ch_cgroup_root: String,
+
+    /// Refuse to start (or to start a VM) when the cgroup cannot be made or limited; off, the VM runs without cgroup limits and the daemon
+    /// says so once.
+    #[serde(default)]
+    pub ch_require_cgroup: bool,
+
+    /// What a VM's cgroup allows beyond the guest's memory (Cloud Hypervisor's own, the page cache of the snapshot it reads), in MiB.
+    #[serde(default = "default_ch_memory_overhead_mib")]
+    pub ch_memory_overhead_mib: u64,
+
+    /// Limit a VM's CPU time to its vCPUs plus one (`cpu.max`). Off by default: a pod's own limits already size the VM.
+    #[serde(default)]
+    pub ch_cpu_limit: bool,
+
+    /// Paths made visible, read-only, in the confined root of every Cloud Hypervisor, besides what it is known to need (its binary and,
+    /// if that is dynamically linked, the system libraries; the kernel, the base rootfs, the images, its own directories, /dev/kvm).
+    #[serde(default)]
+    pub ch_extra_ro_paths: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_ch_cgroup_root() -> String {
+    "/sys/fs/cgroup/cloudhv".to_string()
+}
+fn default_ch_memory_overhead_mib() -> u64 {
+    256
 }
 
 fn default_erofs_cache_dir() -> String {

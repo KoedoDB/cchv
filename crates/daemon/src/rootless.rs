@@ -86,7 +86,13 @@ impl UidPool {
 
 struct State {
     uids: UidPool,
+    /// The group of `/dev/kvm` (`ch_gid`): the group of the base snapshot, and the one group a confined VM has besides its own.
     gid: u32,
+    /// Whether each VM is also confined (`ch_confine`): then it has a group of its own (the same number as its user) and a cgroup, a
+    /// mount namespace, and the rest (see `confine.rs`).
+    confine: bool,
+    /// The VMs whose outbox (where a confined VM wrote a snapshot) is kept when the VM is destroyed, until it is collected.
+    kept_outboxes: HashSet<String>,
     /// The user of each VM, by the name of its state directory. The truth is here, in the daemon's memory; the registry file
     /// (`ch.uid`) is for the sweep after a restart.
     by_vm: HashMap<String, u32>,
@@ -174,6 +180,8 @@ pub fn init(config: &DaemonConfig) -> Result<()> {
     let _ = STATE.set(Some(Mutex::new(State {
         uids: UidPool::new(config.ch_uid_base, config.ch_uid_count, start),
         gid,
+        confine: config.ch_confine,
+        kept_outboxes: HashSet::new(),
         by_vm: HashMap::new(),
         erofs_root: PathBuf::from(&config.erofs_cache_dir),
         snapshot_root: config.snapshot_cache_dir(),
@@ -196,7 +204,8 @@ fn vm_name(state_dir: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// A user for the VM whose state directory this is: (uid, gid). None when rootless is off. Recorded in the daemon's memory and in the
+/// A user for the VM whose state directory this is: (uid, gid); the group is the user's own number when VMs are confined, else the group
+/// of `/dev/kvm`. None when rootless is off. Recorded in the daemon's memory and in the
 /// VM's registry directory.
 pub fn alloc_for(state_dir: &Path) -> Result<Option<(u32, u32)>> {
     let Some(m) = state() else { return Ok(None) };
@@ -207,7 +216,7 @@ pub fn alloc_for(state_dir: &Path) -> Result<Option<(u32, u32)>> {
             .alloc()
             .ok_or_else(|| anyhow::anyhow!("no free user for a VM: all {} are in use", s.uids.count))?;
         s.by_vm.insert(vm_name(state_dir), uid);
-        (uid, s.gid)
+        (uid, if s.confine { uid } else { s.gid })
     };
     if let Err(e) = crate::ctl::write(state_dir, "ch.uid", &uid.to_string()) {
         let mut s = m.lock().unwrap();
@@ -218,8 +227,29 @@ pub fn alloc_for(state_dir: &Path) -> Result<Option<(u32, u32)>> {
     Ok(Some((uid, gid)))
 }
 
-fn gid() -> u32 {
+/// The group of `/dev/kvm`.
+pub fn gid() -> u32 {
     state().map(|m| m.lock().unwrap().gid).unwrap_or(0)
+}
+
+/// Whether VMs are confined (`ch_rootless` and `ch_confine`).
+pub fn confined() -> bool {
+    state().map(|m| m.lock().unwrap().confine).unwrap_or(false)
+}
+
+/// The group a VM of this user runs as.
+fn group_of(uid: u32) -> u32 {
+    match state() {
+        Some(m) => {
+            let s = m.lock().unwrap();
+            if s.confine {
+                uid
+            } else {
+                s.gid
+            }
+        }
+        None => 0,
+    }
 }
 
 /// The user of the VM whose state directory this is: from the daemon's memory, else from its registry directory (after a restart).
@@ -239,11 +269,103 @@ pub fn give(path: &Path, state_dir: &Path) -> Result<()> {
     let fd = fsutil::open_nosymlinks(path, libc::O_RDONLY | libc::O_NONBLOCK)
         .with_context(|| format!("open {}", path.display()))?;
     let st = fsutil::fstat(fd.as_raw_fd())?;
-    fsutil::fchown(fd.as_raw_fd(), uid, gid())?;
+    fsutil::fchown(fd.as_raw_fd(), uid, group_of(uid))?;
     if fsutil::is_dir(&st) {
         fsutil::fchmod(fd.as_raw_fd(), 0o700)?;
     }
     Ok(())
+}
+
+/// The outbox of a confined VM: a directory of its own, outside its state directory, where it writes a snapshot. A confined VM sees no
+/// directory but its own, so a snapshot cannot be written to where it will live; root moves it there once the VM is dead
+/// (`collect_outbox`), and only then looks at it.
+pub fn make_outbox(state_dir: &Path) -> Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let out = crate::confine::out_dir_of(state_dir);
+    if let Some(parent) = out.parent() {
+        match std::fs::DirBuilder::new().mode(0o700).create(parent) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e).with_context(|| format!("create {}", parent.display())),
+        }
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+    }
+    // Nothing of an earlier VM of the same name.
+    remove_outbox_dir(&out);
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&out)
+        .with_context(|| format!("create {}", out.display()))?;
+    give(&out, state_dir)?;
+    Ok(out)
+}
+
+fn remove_outbox_dir(out: &Path) {
+    let (Some(parent), Some(name)) = (out.parent(), out.file_name().and_then(|n| n.to_str())) else { return };
+    let Ok(dir) = fsutil::open_nosymlinks(parent, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NONBLOCK) else { return };
+    if let Ok(st) = fsutil::fstatat_nofollow(dir.as_raw_fd(), name) {
+        if let Err(e) = fsutil::remove_entry(dir.as_raw_fd(), name, &st) {
+            warn!("could not remove {}: {e}", out.display());
+        }
+    }
+}
+
+/// The VM took a snapshot into its outbox: keep the outbox when the VM is destroyed, until it is collected.
+pub fn keep_outbox(state_dir: &Path) {
+    if let Some(m) = state() {
+        m.lock().unwrap().kept_outboxes.insert(vm_name(state_dir));
+    }
+}
+
+/// The snapshot in the outbox is not wanted (the steps that made it failed): it goes.
+pub fn discard_outbox(state_dir: &Path) {
+    if let Some(m) = state() {
+        m.lock().unwrap().kept_outboxes.remove(&vm_name(state_dir));
+    }
+    remove_outbox_dir(&crate::confine::out_dir_of(state_dir));
+}
+
+/// The VM is destroyed: its outbox goes with it, unless it holds a snapshot that is about to be collected.
+pub fn drop_outbox(state_dir: &Path) {
+    let Some(m) = state() else { return };
+    if m.lock().unwrap().kept_outboxes.contains(&vm_name(state_dir)) {
+        return;
+    }
+    remove_outbox_dir(&crate::confine::out_dir_of(state_dir));
+}
+
+/// After the VM that took a snapshot is destroyed: its outbox becomes `dest` (which is removed first; it is an empty directory made for
+/// the snapshot). The caller then hands the directory over (`hand_over_snapshot`) before it reads anything in it. A VM that is not
+/// confined wrote into `dest` itself, and nothing is done.
+pub fn collect_outbox(state_dir: &Path, dest: &Path) -> Result<()> {
+    let Some(m) = state() else { return Ok(()) };
+    if !m.lock().unwrap().kept_outboxes.remove(&vm_name(state_dir)) {
+        return Ok(());
+    }
+    let out = crate::confine::out_dir_of(state_dir);
+    match std::fs::remove_dir(dest) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            remove_outbox_dir(&out);
+            return Err(e).with_context(|| format!("{} is not an empty directory", dest.display()));
+        }
+    }
+    let r = std::fs::rename(&out, dest).with_context(|| format!("move {} to {}", out.display(), dest.display()));
+    if r.is_err() {
+        remove_outbox_dir(&out);
+    }
+    r
+}
+
+/// At start: the outboxes of an earlier daemon's VMs go.
+pub fn sweep_outboxes(state_root: &Path) {
+    let dir = state_root.join(crate::confine::OUT_DIR);
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for e in entries.flatten() {
+            remove_outbox_dir(&e.path());
+        }
+    }
 }
 
 /// How deep a snapshot directory may go: it is a directory of files (`config.json`, `state.json`, `memory-ranges`).
@@ -386,6 +508,9 @@ async fn kill_all_of(uid: u32) -> bool {
 /// user that still has a process is quarantined and not given out again. Call before the registry directory is removed.
 pub async fn release(state_dir: &Path) {
     let Some(uid) = uid_of(state_dir) else { return };
+    // A confined VM has a cgroup: everything in it ends there, whatever it made and wherever (this is the sure way); the scan for the
+    // user's processes that follows is for the VM that has none, and for what the cgroup did not hold.
+    crate::cgroup::kill_and_remove(&vm_name(state_dir)).await;
     let clear = kill_all_of(uid).await;
     if let Some(list) = crate::ctl::read(state_dir, "acl.list") {
         let (erofs_root, snapshot_root) = roots();

@@ -323,6 +323,12 @@ impl Pool {
         vm_lifecycle::shutdown_and_destroy(&api_socket, ch_pid, &state_dir).await;
 
         if let Err(e) = steps {
+            crate::rootless::discard_outbox(&state_dir);
+            let _ = std::fs::remove_dir_all(base_dir);
+            return Err(e);
+        }
+        // A confined VM wrote its snapshot into its outbox: it is moved to where it will live, still untrusted until handed over.
+        if let Err(e) = crate::rootless::collect_outbox(&state_dir, base_dir) {
             let _ = std::fs::remove_dir_all(base_dir);
             return Err(e);
         }
@@ -372,7 +378,7 @@ impl Pool {
         let t_prepare = t0.elapsed().as_millis();
 
         // 2. Spawn CH process
-        let ch_pid = match vm_lifecycle::spawn_ch(&self.config, &state_dir).await {
+        let ch_pid = match vm_lifecycle::spawn_ch(&self.config, &state_dir, self.config.default_memory_mb, self.config.default_vcpus).await {
             Ok(p) => p,
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&state_dir);
@@ -453,6 +459,10 @@ impl Pool {
         let ctl = root.join(crate::ctl::CTL_DIR);
         std::fs::create_dir_all(&ctl)?;
         std::fs::set_permissions(&ctl, std::fs::Permissions::from_mode(0o700))?;
+        // The images' directory is made by the shim; a confined VM has it bound into its root, so it has to exist.
+        if self.config.ch_rootless && self.config.ch_confine {
+            std::fs::create_dir_all(&self.config.erofs_cache_dir)?;
+        }
         Ok(())
     }
 

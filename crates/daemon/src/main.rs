@@ -5,7 +5,9 @@ use anyhow::Result;
 use log::info;
 
 mod api;
+mod cgroup;
 mod config;
+mod confine;
 mod ctl;
 mod fsutil;
 mod imagekey;
@@ -16,8 +18,18 @@ pub mod shadow;
 mod validate;
 mod vm_lifecycle;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // The launcher of a confined Cloud Hypervisor is this same binary: it must not start a runtime (it forks and unshares).
+    if std::env::args().nth(1).as_deref() == Some("--ch-launcher") {
+        confine::launcher_main();
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(daemon_main())
+}
+
+async fn daemon_main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let config_path = std::env::args()
@@ -38,6 +50,7 @@ async fn main() -> Result<()> {
 
     let config = config::DaemonConfig::load(&config_path)?;
     rootless::init(&config)?;
+    cgroup::init(&config)?;
     info!(
         "pool_size: {}, memory: {}MiB, vcpus: {}",
         config.pool_size, config.default_memory_mb, config.default_vcpus
@@ -58,8 +71,10 @@ async fn main() -> Result<()> {
         }
         // Rootless: what an earlier daemon left of its VMs' users (processes, ACL entries on the images) goes before any user is given
         // out.
+        cgroup::sweep().await;
         rootless::sweep_processes(&config).await;
         rootless::sweep_acls(&config);
+        rootless::sweep_outboxes(std::path::Path::new(&config.state_dir));
         // The workload snapshots of an earlier daemon are unknown to this one (its cache is empty) and were made by VMs it can no longer
         // vouch for: they go. The base snapshot is reused only if the daemon marked it complete (see `Pool::base_snapshot_valid`).
         if let Ok(entries) = std::fs::read_dir(config.snapshot_cache_dir()) {

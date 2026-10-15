@@ -734,13 +734,66 @@ delete and re-create any file in its VM's state directory, so root never trusts,
 Restore with **`OnDemand`** (userfaultfd) needs `vm.unprivileged_userfaultfd=1` for a process without `CAP_SYS_PTRACE`; the default `Copy`
 mode does not.
 
-**Not done (follow-ups).** The Cloud Hypervisor still runs in the host's network, PID and mount namespaces, in the host's cgroup, and
-all VMs share one group (the one of `/dev/kvm`, which also reads the base snapshot). After an escape it can reach what the host's
-namespaces show a non-root user (127.0.0.1 services, world-readable files) and what that group may read. Each of these is feasible
-because the TAP descriptor is passed in: its own network namespace (nothing to reach), mount namespace with `pivot_root` (only its
-directory), PID namespace (no other process visible), a group per VM, and a cgroup per VM with memory and pids limits (also
-`cgroup.kill` to clear a user instead of scanning `/proc`). Until then `RLIMIT_NPROC` bounds its processes, `RLIMIT_CORE` is 0, and
-its serial console is off by default (`serial_console`), because the file would be in memory (`/run`) with no size limit.
+### Confinement (`ch_confine`, on by default with `ch_rootless`)
+
+A user of its own with no capabilities still sees the host: its network (127.0.0.1 services, the management network), its processes,
+every world-readable file, and the group of `/dev/kvm` shared by all VMs. So each Cloud Hypervisor is started by a **launcher**, a mode
+of the daemon's own binary (`cloudhv-sandbox-daemon --ch-launcher`; `confine.rs`), which is given its instructions as JSON on standard
+input (the program, the user, the paths to show it, the cgroup) and puts the Cloud Hypervisor in:
+
+- **its own mount namespace, with a root of its own.** A new tmpfs, read-only after the `pivot_root`, holding only: the Cloud
+  Hypervisor binary (and the system libraries `/lib`, `/lib64`, `/usr/lib` if it is dynamically linked), the kernel and the base rootfs
+  (read-only), the directory of container images `erofs_cache_dir` (read-only; the files in it are 0600 and readable only by the VM
+  given them), the VM's own state directory and its outbox (read-write), `/dev/kvm`, `/dev/null`, `/dev/zero`, `/dev/urandom`, a new
+  `/proc`, and a 16 MiB `/tmp`. Paths are the same as on the host, because the VM's configuration names host paths. More read-only paths
+  can be added with `ch_extra_ro_paths`. It cannot see the other VMs' directories, the registry (`.ctl`), the snapshot caches, the
+  daemon's socket, `/home`, `/etc`;
+- **its own PID namespace**: it is process 1 there and sees nothing else; when it ends, everything in the namespace ends;
+- **its own network namespace with no interface**: the TAP descriptor is passed over the API socket, which names the device whatever
+  namespace the opener is in (checked: `vm.add-net` with the descriptor works in an empty namespace, and the TAP stays where the daemon
+  put it, then moves to the pod's namespace as before). 127.0.0.1 services and the management network are unreachable;
+- **its own IPC and UTS namespaces**;
+- **a cgroup of its own** (`cgroup.rs`), `<ch_cgroup_root>/<vm_id>`: `memory.max` = the guest's memory + `ch_memory_overhead_mib`
+  (256), `memory.swap.max` 0, `pids.max` = `ch_max_processes`, and (`ch_cpu_limit`) `cpu.max` of the vCPUs plus one thread. The launcher
+  joins it before it starts anything. Destroying a VM writes `cgroup.kill` (Linux 5.14; each pid in `cgroup.procs` otherwise) and removes
+  it; the scan for the processes of the VM's user remains as the second way. If the cgroup cannot be made (no cgroup v2, or the memory
+  and pids controllers cannot be turned on in a parent that has processes of its own) the daemon says so once at start and VMs run
+  without limits, unless `ch_require_cgroup` is set;
+- **a group of its own** (the number of its user), with the group of `/dev/kvm` as the only supplementary group: that opens `/dev/kvm`
+  and reads the base snapshot (0640 root:kvm), the two things all VMs share. Everything else a VM makes is its own user's and group's;
+- no capability (the bounding set is emptied), `no_new_privs`, `RLIMIT_CORE` 0, `RLIMIT_NPROC`, an empty environment, and Cloud
+  Hypervisor's own seccomp filter.
+
+**The supervisor.** The process the daemon starts, signals and waits for is the launcher, not Cloud Hypervisor: a process that makes a
+PID namespace stays outside it, and its first child is process 1 inside. The launcher drops to the VM's user as soon as it has forked
+Cloud Hypervisor and then only supervises, in a single thread (`signalfd` and `poll`; a process that has made a PID namespace cannot
+make threads): it forwards `SIGTERM`/`SIGINT`/`SIGHUP`/`SIGQUIT` to Cloud Hypervisor, copies what Cloud Hypervisor writes on standard
+error into `<state_dir>/.ctl/<vm_id>/launcher.log` (the first 64 KiB; the rest is discarded), and exits with its status. If the
+launcher is killed, the kernel kills Cloud Hypervisor (parent-death signal, set after the change of user, which would clear it).
+The launcher's command line carries `--api-socket <the VM's socket>`, which is how the daemon checks that a pid is a VM's before it
+signals it. If a VM does not start, `wait_ch_ready` adds the log to the error.
+
+**Snapshots through an outbox.** A confined VM sees no directory but its own, so it cannot write a snapshot to where it will live.
+`vm.snapshot` goes to the VM's **outbox**, `<state_dir>/.out/<vm_id>/` (owned by the VM's user, bound read-write into its root).
+After the VM is destroyed, the daemon moves the outbox to the snapshot's place (`collect_outbox`: a rename inside the state
+directory), and only then hands it over and reads it, as before. An outbox that is not collected goes with the VM; at start all are removed.
+
+Checked on the development machine with the real daemon (`scripts/test-ch-confinement.sh`, 68 checks): each Cloud Hypervisor has
+its own mount, PID, network, IPC and UTS namespaces; a user and a group of its own and only the kvm group besides; `CapEff` and
+`CapBnd` 0; `NoNewPrivs`; the root holds `dev proc tmp` and the bound paths only (no `/home`, `/etc/shadow`, other VMs, `.ctl`); the
+root is read-only; it is process 1 and sees one process; the network namespace has only `lo` and 127.0.0.1 services are unreachable;
+it is in a cgroup with `memory.max` and `pids.max`; SIGTERM to the launcher ends both; stopping the daemon leaves no launcher, no process
+of the VMs' users, no cgroup, no VM directory, no outbox; the base snapshot is 0640. And by hand with a pod's network namespace: a
+confined VM got its TAP as a descriptor in an empty network namespace, TC redirects were set in the pod's namespace, the guest was
+configured and a container started; the shadow VM made a workload snapshot through its outbox (0600 root), and a second pod was
+restored from it **warm, confined, with read access by ACL to that VM's user only**; after release the ACL entries were gone.
+
+**Not done.** `/sys` is not shown (nothing needed it with Cloud Hypervisor v54.0; add what a newer version needs with
+`ch_extra_ro_paths`); no user namespace (the launcher needs real root to build the root and the namespaces, and the VM's user is a real
+user of the host, kept apart by the user ID range, the groups, the ACLs and the namespaces); no `landlock` (Cloud Hypervisor v54 can
+take rules for itself; the mount namespace does the same job); the cgroup root is not delegated by systemd (the unit should have
+`Delegate=yes` and the cgroup root should be below the unit's cgroup, or the controllers turned on in a parent without processes);
+the serial console stays off by default (a file in memory with no size limit).
 
 ## Hardening of the API
 
@@ -767,6 +820,12 @@ The daemon is root and its socket is the one door:
 | `ch_uid_base`, `ch_uid_count` | `200000`, `60000` | the users of the VMs; must be 1000 or more, must not overflow, must not contain a user of `/etc/passwd` |
 | `ch_gid` | group of `/dev/kvm` | the group of the Cloud Hypervisors |
 | `ch_max_processes` | `1024` | `RLIMIT_NPROC` of a rootless Cloud Hypervisor's user (threads count) |
+| `ch_confine` | `true` | with `ch_rootless`: also the namespaces, the cgroup, the group of its own and the root of its own described above. `false` returns to a user of its own and nothing more |
+| `ch_cgroup_root` | `/sys/fs/cgroup/cloudhv` | the cgroup (v2) directory under which each VM gets one; must be below `/sys/fs/cgroup` |
+| `ch_require_cgroup` | `false` | refuse to start when the cgroup limits cannot be had |
+| `ch_memory_overhead_mib` | `256` | what a VM's cgroup allows beyond the guest's memory |
+| `ch_cpu_limit` | `false` | limit a VM's CPU time to its vCPUs plus one thread |
+| `ch_extra_ro_paths` | `[]` | paths shown read-only in every confined root |
 | `serial_console` | `true`, `false` with `ch_rootless` | write the guest's serial console to `console.log` in the VM's directory (in memory, no size limit) |
 | `erofs_cache_dir` | `/run/cloudhv/erofs-cache` | where the shim keeps the images; must be the shim's `EROFS_CACHE_DIR` |
 | `max_memory_mb`, `max_vcpus` | `65536`, `64` | the most a request may ask for |
@@ -775,4 +834,4 @@ The daemon is root and its socket is the one door:
 | `max_request_bytes` | `8388608` | the longest request line (volumes of a pod are in it; the agent's own limit is 4 MiB) |
 | `max_connections` | `64` | |
 
-The daemon keeps its records in `<state_dir>/.ctl/` (0700 root); the state directory is made 0711.
+The daemon keeps its records in `<state_dir>/.ctl/` (0700 root), the outboxes of confined VMs in `<state_dir>/.out/` (0700 root; each VM's own is its user's), and the state directory is made 0711.
