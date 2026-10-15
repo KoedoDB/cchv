@@ -12,9 +12,10 @@ FROM rust:1.89-bookworm AS ch-builder
 
 ARG TARGETARCH
 ARG CH_REPO=https://github.com/cloud-hypervisor/cloud-hypervisor.git
-# Pin to a specific commit for reproducible builds. Update this SHA when
-# a new CH release includes userfaultfd OnDemand restore (PR #7800).
-ARG CH_COMMIT=main
+# Pinned to the commit of the v54.0 tag, never a branch: this image runs privileged on the host, so what it
+# builds must not change with the repository. To update, change the SHA to the commit of a release tag
+# (`git ls-remote <repo> 'refs/tags/vN.M^{}'`), after reading that release's notes and advisories.
+ARG CH_COMMIT=038ce5a72d761380a02f714a4eb4ca63e0ea073d
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential pkg-config libssl-dev musl-tools git && \
@@ -24,6 +25,7 @@ RUN git clone ${CH_REPO} /build/cloud-hypervisor
 
 WORKDIR /build/cloud-hypervisor
 RUN git checkout ${CH_COMMIT} && \
+    test "$(git rev-parse HEAD)" = "${CH_COMMIT}" && \
     if [ "$TARGETARCH" = "arm64" ]; then \
       RUST_TARGET=aarch64-unknown-linux-musl; \
     else \
