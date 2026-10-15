@@ -18,6 +18,7 @@ mod container;
 mod disks;
 mod mount;
 mod reaper;
+mod seccomp;
 mod server;
 mod spec;
 mod volumes;

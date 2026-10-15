@@ -166,7 +166,7 @@ fn union_paths(spec_list: Option<&Value>, defaults: &[&str]) -> Value {
 }
 
 /// The `linux` section: the namespaces the guest wants, a cgroup of the container's own with its limits and the device rules, the
-/// masked and read-only paths, and the seccomp profile if the pod has one. Device nodes, sysctls, ID mappings, and the rest of what the
+/// masked and read-only paths, and the seccomp profile (the pod's with the guest's denials on top, or the default one). Device nodes, sysctls, ID mappings, and the rest of what the
 /// spec could carry are dropped.
 fn sanitize_linux(linux: &Map<String, Value>, cgroup_id: &str) -> Value {
     let mut out = Map::new();
@@ -195,13 +195,9 @@ fn sanitize_linux(linux: &Map<String, Value>, cgroup_id: &str) -> Value {
     );
     out.insert("rootfsPropagation".to_string(), json!("rprivate"));
 
-    if let Some(Value::Object(seccomp)) = linux.get("seccomp") {
-        // A listener path would make crun connect, as root in the guest, to a socket the spec names.
-        let mut seccomp = seccomp.clone();
-        seccomp.remove("listenerPath");
-        seccomp.remove("listenerMetadata");
-        out.insert("seccomp".to_string(), Value::Object(seccomp));
-    }
+    // Every container has a seccomp profile: the spec's, with the guest's denials on top, or the default one (see seccomp.rs). The
+    // listener fields of a profile are removed there: crun would connect, as root in the guest, to a socket the spec names.
+    out.insert("seccomp".to_string(), crate::seccomp::enforce(linux.get("seccomp")));
     Value::Object(out)
 }
 
