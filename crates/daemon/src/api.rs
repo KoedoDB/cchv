@@ -107,6 +107,7 @@ async fn handle_connection(
             "AddContainer" => handle_add_container(pool, agents, &request).await,
             "KillContainer" => handle_kill_container(agents, &request).await,
             "WaitContainer" => handle_wait_container(agents, &request).await,
+            "ReadLogs" => handle_read_logs(agents, &request).await,
             "DeleteContainer" => handle_delete_container(agents, &request).await,
             "Status" => handle_status(pool, snapshots).await,
             _ => serde_json::json!({"error": format!("unknown method: {}", method)}),
@@ -542,6 +543,56 @@ async fn handle_wait_container(
             "exited_at": "",
             "error": format!("wait_container: {e}"),
         }),
+    }
+}
+
+/// Carry a container's new output from the guest agent to the shim (which writes it to the pipes containerd gave it). The offsets are
+/// the caller's: what is before them has been taken and the agent drops it. The bytes go as base64 in the JSON line.
+async fn handle_read_logs(
+    agents: &AgentRegistry,
+    request: &serde_json::Value,
+) -> serde_json::Value {
+    use base64::Engine;
+    let vm_id = request.get("vm_id").and_then(|v| v.as_str()).unwrap_or("");
+    let container_id = request
+        .get("container_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let agent = match agents.lock().await.get(vm_id).cloned() {
+        Some(a) => a,
+        None => return serde_json::json!({"error": format!("no agent for VM {vm_id}")}),
+    };
+
+    let mut req = cloudhv_proto::ReadLogsRequest::new();
+    req.container_id = container_id.to_string();
+    req.stdout_offset = request
+        .get("stdout_offset")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    req.stderr_offset = request
+        .get("stderr_offset")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    req.max_bytes = request
+        .get("max_bytes")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let ctx = ttrpc::context::with_duration(std::time::Duration::from_secs(10));
+
+    match agent.read_logs(ctx, &req).await {
+        Ok(resp) => {
+            let b64 = base64::engine::general_purpose::STANDARD;
+            serde_json::json!({
+                "stdout": b64.encode(&resp.stdout),
+                "stderr": b64.encode(&resp.stderr),
+                "stdout_offset": resp.stdout_offset,
+                "stderr_offset": resp.stderr_offset,
+                "eof": resp.eof,
+                "stdout_dropped": resp.stdout_dropped,
+                "stderr_dropped": resp.stderr_dropped,
+            })
+        }
+        Err(e) => serde_json::json!({"error": format!("read_logs: {e}")}),
     }
 }
 

@@ -50,12 +50,87 @@ pub enum ContainerState {
     Stopped,
 }
 
+/// The most output the agent keeps for each stream of a container that nobody reads. The guest has little memory (128 MiB), and
+/// a container that prints without end would otherwise fill it. When the buffer is full the oldest bytes go (and are counted).
+pub const MAX_LOG_BUFFER: usize = 1024 * 1024;
+
 /// Captured container output (buffered for streaming via RPC).
 #[derive(Debug, Default)]
 pub struct ContainerLogs {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub eof: bool,
+    /// Absolute position in the stream of stdout[0] / stderr[0] (what has been taken or dropped before it).
+    pub stdout_base: u64,
+    pub stderr_base: u64,
+    /// Bytes dropped because the buffer was full, in all.
+    pub stdout_dropped: u64,
+    pub stderr_dropped: u64,
+}
+
+impl ContainerLogs {
+    /// Append output to stdout, dropping the oldest bytes if the buffer would pass MAX_LOG_BUFFER.
+    pub fn push_stdout(&mut self, data: &[u8]) {
+        Self::push(&mut self.stdout, &mut self.stdout_base, &mut self.stdout_dropped, data);
+    }
+
+    /// Append output to stderr (see push_stdout).
+    pub fn push_stderr(&mut self, data: &[u8]) {
+        Self::push(&mut self.stderr, &mut self.stderr_base, &mut self.stderr_dropped, data);
+    }
+
+    fn push(buf: &mut Vec<u8>, base: &mut u64, dropped: &mut u64, data: &[u8]) {
+        buf.extend_from_slice(data);
+        if buf.len() > MAX_LOG_BUFFER {
+            let excess = buf.len() - MAX_LOG_BUFFER;
+            buf.drain(..excess);
+            *base += excess as u64;
+            *dropped += excess as u64;
+        }
+    }
+
+    /// Take from one stream: acknowledge (drop) what is before `offset`, return up to `max` bytes from `offset` on, and the position after them.
+    /// An offset before the buffer's start (bytes were dropped) starts at the buffer's start.
+    fn take(buf: &mut Vec<u8>, base: &mut u64, offset: u64, max: usize) -> (Vec<u8>, u64) {
+        let end = *base + buf.len() as u64;
+        let from = offset.clamp(*base, end);
+        let ack = (from - *base) as usize;
+        if ack > 0 {
+            buf.drain(..ack);
+            *base = from;
+        }
+        let n = buf.len().min(max);
+        (buf[..n].to_vec(), *base + n as u64)
+    }
+
+    /// The new output of both streams since the given offsets, for the ReadLogs call (see proto/agent.proto).
+    pub fn read(&mut self, stdout_offset: u64, stderr_offset: u64, max: usize) -> LogRead {
+        let (stdout, stdout_next) = Self::take(&mut self.stdout, &mut self.stdout_base, stdout_offset, max);
+        let (stderr, stderr_next) = Self::take(&mut self.stderr, &mut self.stderr_base, stderr_offset, max);
+        let drained = self.stdout_base + self.stdout.len() as u64 <= stdout_next
+            && self.stderr_base + self.stderr.len() as u64 <= stderr_next;
+        LogRead {
+            stdout,
+            stderr,
+            stdout_next,
+            stderr_next,
+            eof: self.eof && drained,
+            stdout_dropped: self.stdout_dropped,
+            stderr_dropped: self.stderr_dropped,
+        }
+    }
+}
+
+/// The result of ContainerLogs::read.
+#[derive(Debug, PartialEq)]
+pub struct LogRead {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub stdout_next: u64,
+    pub stderr_next: u64,
+    pub eof: bool,
+    pub stdout_dropped: u64,
+    pub stderr_dropped: u64,
 }
 
 /// Manages container lifecycle via crun.
@@ -506,7 +581,7 @@ impl ContainerManager {
                     match reader.read(&mut buf).await {
                         Ok(0) => break,
                         Ok(n) => {
-                            log_buf_out.lock().await.stdout.extend_from_slice(&buf[..n]);
+                            log_buf_out.lock().await.push_stdout(&buf[..n]);
                         }
                         Err(_) => break,
                     }
@@ -525,7 +600,7 @@ impl ContainerManager {
                     match reader.read(&mut buf).await {
                         Ok(0) => break,
                         Ok(n) => {
-                            log_buf_err.lock().await.stderr.extend_from_slice(&buf[..n]);
+                            log_buf_err.lock().await.push_stderr(&buf[..n]);
                         }
                         Err(_) => break,
                     }
@@ -929,5 +1004,73 @@ async fn wait_for_exit_pidfd(pid: u32, mut child: tokio::process::Child) -> i32 
     match child.wait().await {
         Ok(status) => status.code().unwrap_or(137),
         Err(_) => 137,
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::*;
+
+    #[test]
+    fn each_stream_has_its_own_offset_and_a_short_one_loses_nothing() {
+        let mut logs = ContainerLogs::default();
+        logs.push_stdout(&[b'o'; 100]);
+        logs.push_stderr(b"err1");
+        let a = logs.read(0, 0, 1 << 20);
+        assert_eq!((a.stdout.len(), a.stderr.len()), (100, 4));
+        assert_eq!((a.stdout_next, a.stderr_next), (100, 4));
+        // More stderr arrives while stdout stays where it was: with one shared offset (the older call) this tail would be skipped.
+        logs.push_stderr(b"err2");
+        let b = logs.read(a.stdout_next, a.stderr_next, 1 << 20);
+        assert_eq!(b.stdout, b"");
+        assert_eq!(b.stderr, b"err2");
+        assert_eq!(b.stderr_next, 8);
+    }
+
+    #[test]
+    fn what_the_caller_took_is_dropped_and_asking_again_returns_the_rest_only() {
+        let mut logs = ContainerLogs::default();
+        logs.push_stdout(b"hello world");
+        let a = logs.read(0, 0, 5);
+        assert_eq!(a.stdout, b"hello");
+        assert_eq!(a.stdout_next, 5);
+        let b = logs.read(a.stdout_next, 0, 1 << 20);
+        assert_eq!(b.stdout, b" world");
+        // Everything before offset 5 was acknowledged and is gone from the buffer.
+        assert_eq!(logs.stdout.len(), 6);
+        assert_eq!(logs.stdout_base, 5);
+        let c = logs.read(b.stdout_next, 0, 1 << 20);
+        assert_eq!(c.stdout, b"");
+        assert_eq!(logs.stdout.len(), 0);
+    }
+
+    #[test]
+    fn the_buffer_is_bounded_and_the_loss_is_counted() {
+        let mut logs = ContainerLogs::default();
+        let chunk = vec![b'x'; 4096];
+        for _ in 0..(MAX_LOG_BUFFER / 4096 + 10) {
+            logs.push_stdout(&chunk);
+        }
+        assert_eq!(logs.stdout.len(), MAX_LOG_BUFFER);
+        assert_eq!(logs.stdout_dropped, 10 * 4096);
+        // A caller at 0 (too slow) is moved to the start of what is left, and told how much is gone.
+        let r = logs.read(0, 0, 1 << 20);
+        assert_eq!(r.stdout.len(), MAX_LOG_BUFFER);
+        assert_eq!(r.stdout_dropped, 10 * 4096);
+        assert_eq!(r.stdout_next, (MAX_LOG_BUFFER as u64) + 10 * 4096);
+    }
+
+    #[test]
+    fn eof_is_reported_only_when_the_container_has_exited_and_everything_was_returned() {
+        let mut logs = ContainerLogs::default();
+        logs.push_stdout(b"abc");
+        logs.eof = true;
+        let a = logs.read(0, 0, 2);
+        assert!(!a.eof, "one byte of stdout is still to come");
+        let b = logs.read(a.stdout_next, a.stderr_next, 1 << 20);
+        assert_eq!(b.stdout, b"c");
+        assert!(b.eof);
+        let c = ContainerLogs::default().read(0, 0, 10);
+        assert!(!c.eof, "a running container with no output yet is not at its end");
     }
 }

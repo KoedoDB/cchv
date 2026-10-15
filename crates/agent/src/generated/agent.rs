@@ -3409,6 +3409,412 @@ impl ::protobuf::reflect::ProtobufValue for GetContainerLogsResponse {
     type RuntimeType = ::protobuf::reflect::rt::RuntimeTypeMessage<Self>;
 }
 
+// @@protoc_insertion_point(message:cloudhv.agent.ReadLogsRequest)
+#[derive(PartialEq,Clone,Default,Debug)]
+pub struct ReadLogsRequest {
+    // message fields
+    // @@protoc_insertion_point(field:cloudhv.agent.ReadLogsRequest.container_id)
+    pub container_id: ::std::string::String,
+    // @@protoc_insertion_point(field:cloudhv.agent.ReadLogsRequest.stdout_offset)
+    pub stdout_offset: u64,
+    // @@protoc_insertion_point(field:cloudhv.agent.ReadLogsRequest.stderr_offset)
+    pub stderr_offset: u64,
+    // @@protoc_insertion_point(field:cloudhv.agent.ReadLogsRequest.max_bytes)
+    pub max_bytes: u32,
+    // special fields
+    // @@protoc_insertion_point(special_field:cloudhv.agent.ReadLogsRequest.special_fields)
+    pub special_fields: ::protobuf::SpecialFields,
+}
+
+impl<'a> ::std::default::Default for &'a ReadLogsRequest {
+    fn default() -> &'a ReadLogsRequest {
+        <ReadLogsRequest as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl ReadLogsRequest {
+    pub fn new() -> ReadLogsRequest {
+        ::std::default::Default::default()
+    }
+
+    fn generated_message_descriptor_data() -> ::protobuf::reflect::GeneratedMessageDescriptorData {
+        let mut fields = ::std::vec::Vec::with_capacity(4);
+        let mut oneofs = ::std::vec::Vec::with_capacity(0);
+        fields.push(::protobuf::reflect::rt::v2::make_simpler_field_accessor::<_, _>(
+            "container_id",
+            |m: &ReadLogsRequest| { &m.container_id },
+            |m: &mut ReadLogsRequest| { &mut m.container_id },
+        ));
+        fields.push(::protobuf::reflect::rt::v2::make_simpler_field_accessor::<_, _>(
+            "stdout_offset",
+            |m: &ReadLogsRequest| { &m.stdout_offset },
+            |m: &mut ReadLogsRequest| { &mut m.stdout_offset },
+        ));
+        fields.push(::protobuf::reflect::rt::v2::make_simpler_field_accessor::<_, _>(
+            "stderr_offset",
+            |m: &ReadLogsRequest| { &m.stderr_offset },
+            |m: &mut ReadLogsRequest| { &mut m.stderr_offset },
+        ));
+        fields.push(::protobuf::reflect::rt::v2::make_simpler_field_accessor::<_, _>(
+            "max_bytes",
+            |m: &ReadLogsRequest| { &m.max_bytes },
+            |m: &mut ReadLogsRequest| { &mut m.max_bytes },
+        ));
+        ::protobuf::reflect::GeneratedMessageDescriptorData::new_2::<ReadLogsRequest>(
+            "ReadLogsRequest",
+            fields,
+            oneofs,
+        )
+    }
+}
+
+impl ::protobuf::Message for ReadLogsRequest {
+    const NAME: &'static str = "ReadLogsRequest";
+
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream<'_>) -> ::protobuf::Result<()> {
+        while let Some(tag) = is.read_raw_tag_or_eof()? {
+            match tag {
+                10 => {
+                    self.container_id = is.read_string()?;
+                },
+                16 => {
+                    self.stdout_offset = is.read_uint64()?;
+                },
+                24 => {
+                    self.stderr_offset = is.read_uint64()?;
+                },
+                32 => {
+                    self.max_bytes = is.read_uint32()?;
+                },
+                tag => {
+                    ::protobuf::rt::read_unknown_or_skip_group(tag, is, self.special_fields.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u64 {
+        let mut my_size = 0;
+        if !self.container_id.is_empty() {
+            my_size += ::protobuf::rt::string_size(1, &self.container_id);
+        }
+        if self.stdout_offset != 0 {
+            my_size += ::protobuf::rt::uint64_size(2, self.stdout_offset);
+        }
+        if self.stderr_offset != 0 {
+            my_size += ::protobuf::rt::uint64_size(3, self.stderr_offset);
+        }
+        if self.max_bytes != 0 {
+            my_size += ::protobuf::rt::uint32_size(4, self.max_bytes);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.special_fields.unknown_fields());
+        self.special_fields.cached_size().set(my_size as u32);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream<'_>) -> ::protobuf::Result<()> {
+        if !self.container_id.is_empty() {
+            os.write_string(1, &self.container_id)?;
+        }
+        if self.stdout_offset != 0 {
+            os.write_uint64(2, self.stdout_offset)?;
+        }
+        if self.stderr_offset != 0 {
+            os.write_uint64(3, self.stderr_offset)?;
+        }
+        if self.max_bytes != 0 {
+            os.write_uint32(4, self.max_bytes)?;
+        }
+        os.write_unknown_fields(self.special_fields.unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn special_fields(&self) -> &::protobuf::SpecialFields {
+        &self.special_fields
+    }
+
+    fn mut_special_fields(&mut self) -> &mut ::protobuf::SpecialFields {
+        &mut self.special_fields
+    }
+
+    fn new() -> ReadLogsRequest {
+        ReadLogsRequest::new()
+    }
+
+    fn clear(&mut self) {
+        self.container_id.clear();
+        self.stdout_offset = 0;
+        self.stderr_offset = 0;
+        self.max_bytes = 0;
+        self.special_fields.clear();
+    }
+
+    fn default_instance() -> &'static ReadLogsRequest {
+        static instance: ReadLogsRequest = ReadLogsRequest {
+            container_id: ::std::string::String::new(),
+            stdout_offset: 0,
+            stderr_offset: 0,
+            max_bytes: 0,
+            special_fields: ::protobuf::SpecialFields::new(),
+        };
+        &instance
+    }
+}
+
+impl ::protobuf::MessageFull for ReadLogsRequest {
+    fn descriptor() -> ::protobuf::reflect::MessageDescriptor {
+        static descriptor: ::protobuf::rt::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::rt::Lazy::new();
+        descriptor.get(|| file_descriptor().message_by_package_relative_name("ReadLogsRequest").unwrap()).clone()
+    }
+}
+
+impl ::std::fmt::Display for ReadLogsRequest {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        ::protobuf::text_format::fmt(self, f)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for ReadLogsRequest {
+    type RuntimeType = ::protobuf::reflect::rt::RuntimeTypeMessage<Self>;
+}
+
+// @@protoc_insertion_point(message:cloudhv.agent.ReadLogsResponse)
+#[derive(PartialEq,Clone,Default,Debug)]
+pub struct ReadLogsResponse {
+    // message fields
+    // @@protoc_insertion_point(field:cloudhv.agent.ReadLogsResponse.stdout)
+    pub stdout: ::std::vec::Vec<u8>,
+    // @@protoc_insertion_point(field:cloudhv.agent.ReadLogsResponse.stderr)
+    pub stderr: ::std::vec::Vec<u8>,
+    // @@protoc_insertion_point(field:cloudhv.agent.ReadLogsResponse.stdout_offset)
+    pub stdout_offset: u64,
+    // @@protoc_insertion_point(field:cloudhv.agent.ReadLogsResponse.stderr_offset)
+    pub stderr_offset: u64,
+    // @@protoc_insertion_point(field:cloudhv.agent.ReadLogsResponse.eof)
+    pub eof: bool,
+    // @@protoc_insertion_point(field:cloudhv.agent.ReadLogsResponse.stdout_dropped)
+    pub stdout_dropped: u64,
+    // @@protoc_insertion_point(field:cloudhv.agent.ReadLogsResponse.stderr_dropped)
+    pub stderr_dropped: u64,
+    // special fields
+    // @@protoc_insertion_point(special_field:cloudhv.agent.ReadLogsResponse.special_fields)
+    pub special_fields: ::protobuf::SpecialFields,
+}
+
+impl<'a> ::std::default::Default for &'a ReadLogsResponse {
+    fn default() -> &'a ReadLogsResponse {
+        <ReadLogsResponse as ::protobuf::Message>::default_instance()
+    }
+}
+
+impl ReadLogsResponse {
+    pub fn new() -> ReadLogsResponse {
+        ::std::default::Default::default()
+    }
+
+    fn generated_message_descriptor_data() -> ::protobuf::reflect::GeneratedMessageDescriptorData {
+        let mut fields = ::std::vec::Vec::with_capacity(7);
+        let mut oneofs = ::std::vec::Vec::with_capacity(0);
+        fields.push(::protobuf::reflect::rt::v2::make_simpler_field_accessor::<_, _>(
+            "stdout",
+            |m: &ReadLogsResponse| { &m.stdout },
+            |m: &mut ReadLogsResponse| { &mut m.stdout },
+        ));
+        fields.push(::protobuf::reflect::rt::v2::make_simpler_field_accessor::<_, _>(
+            "stderr",
+            |m: &ReadLogsResponse| { &m.stderr },
+            |m: &mut ReadLogsResponse| { &mut m.stderr },
+        ));
+        fields.push(::protobuf::reflect::rt::v2::make_simpler_field_accessor::<_, _>(
+            "stdout_offset",
+            |m: &ReadLogsResponse| { &m.stdout_offset },
+            |m: &mut ReadLogsResponse| { &mut m.stdout_offset },
+        ));
+        fields.push(::protobuf::reflect::rt::v2::make_simpler_field_accessor::<_, _>(
+            "stderr_offset",
+            |m: &ReadLogsResponse| { &m.stderr_offset },
+            |m: &mut ReadLogsResponse| { &mut m.stderr_offset },
+        ));
+        fields.push(::protobuf::reflect::rt::v2::make_simpler_field_accessor::<_, _>(
+            "eof",
+            |m: &ReadLogsResponse| { &m.eof },
+            |m: &mut ReadLogsResponse| { &mut m.eof },
+        ));
+        fields.push(::protobuf::reflect::rt::v2::make_simpler_field_accessor::<_, _>(
+            "stdout_dropped",
+            |m: &ReadLogsResponse| { &m.stdout_dropped },
+            |m: &mut ReadLogsResponse| { &mut m.stdout_dropped },
+        ));
+        fields.push(::protobuf::reflect::rt::v2::make_simpler_field_accessor::<_, _>(
+            "stderr_dropped",
+            |m: &ReadLogsResponse| { &m.stderr_dropped },
+            |m: &mut ReadLogsResponse| { &mut m.stderr_dropped },
+        ));
+        ::protobuf::reflect::GeneratedMessageDescriptorData::new_2::<ReadLogsResponse>(
+            "ReadLogsResponse",
+            fields,
+            oneofs,
+        )
+    }
+}
+
+impl ::protobuf::Message for ReadLogsResponse {
+    const NAME: &'static str = "ReadLogsResponse";
+
+    fn is_initialized(&self) -> bool {
+        true
+    }
+
+    fn merge_from(&mut self, is: &mut ::protobuf::CodedInputStream<'_>) -> ::protobuf::Result<()> {
+        while let Some(tag) = is.read_raw_tag_or_eof()? {
+            match tag {
+                10 => {
+                    self.stdout = is.read_bytes()?;
+                },
+                18 => {
+                    self.stderr = is.read_bytes()?;
+                },
+                24 => {
+                    self.stdout_offset = is.read_uint64()?;
+                },
+                32 => {
+                    self.stderr_offset = is.read_uint64()?;
+                },
+                40 => {
+                    self.eof = is.read_bool()?;
+                },
+                48 => {
+                    self.stdout_dropped = is.read_uint64()?;
+                },
+                56 => {
+                    self.stderr_dropped = is.read_uint64()?;
+                },
+                tag => {
+                    ::protobuf::rt::read_unknown_or_skip_group(tag, is, self.special_fields.mut_unknown_fields())?;
+                },
+            };
+        }
+        ::std::result::Result::Ok(())
+    }
+
+    // Compute sizes of nested messages
+    #[allow(unused_variables)]
+    fn compute_size(&self) -> u64 {
+        let mut my_size = 0;
+        if !self.stdout.is_empty() {
+            my_size += ::protobuf::rt::bytes_size(1, &self.stdout);
+        }
+        if !self.stderr.is_empty() {
+            my_size += ::protobuf::rt::bytes_size(2, &self.stderr);
+        }
+        if self.stdout_offset != 0 {
+            my_size += ::protobuf::rt::uint64_size(3, self.stdout_offset);
+        }
+        if self.stderr_offset != 0 {
+            my_size += ::protobuf::rt::uint64_size(4, self.stderr_offset);
+        }
+        if self.eof != false {
+            my_size += 1 + 1;
+        }
+        if self.stdout_dropped != 0 {
+            my_size += ::protobuf::rt::uint64_size(6, self.stdout_dropped);
+        }
+        if self.stderr_dropped != 0 {
+            my_size += ::protobuf::rt::uint64_size(7, self.stderr_dropped);
+        }
+        my_size += ::protobuf::rt::unknown_fields_size(self.special_fields.unknown_fields());
+        self.special_fields.cached_size().set(my_size as u32);
+        my_size
+    }
+
+    fn write_to_with_cached_sizes(&self, os: &mut ::protobuf::CodedOutputStream<'_>) -> ::protobuf::Result<()> {
+        if !self.stdout.is_empty() {
+            os.write_bytes(1, &self.stdout)?;
+        }
+        if !self.stderr.is_empty() {
+            os.write_bytes(2, &self.stderr)?;
+        }
+        if self.stdout_offset != 0 {
+            os.write_uint64(3, self.stdout_offset)?;
+        }
+        if self.stderr_offset != 0 {
+            os.write_uint64(4, self.stderr_offset)?;
+        }
+        if self.eof != false {
+            os.write_bool(5, self.eof)?;
+        }
+        if self.stdout_dropped != 0 {
+            os.write_uint64(6, self.stdout_dropped)?;
+        }
+        if self.stderr_dropped != 0 {
+            os.write_uint64(7, self.stderr_dropped)?;
+        }
+        os.write_unknown_fields(self.special_fields.unknown_fields())?;
+        ::std::result::Result::Ok(())
+    }
+
+    fn special_fields(&self) -> &::protobuf::SpecialFields {
+        &self.special_fields
+    }
+
+    fn mut_special_fields(&mut self) -> &mut ::protobuf::SpecialFields {
+        &mut self.special_fields
+    }
+
+    fn new() -> ReadLogsResponse {
+        ReadLogsResponse::new()
+    }
+
+    fn clear(&mut self) {
+        self.stdout.clear();
+        self.stderr.clear();
+        self.stdout_offset = 0;
+        self.stderr_offset = 0;
+        self.eof = false;
+        self.stdout_dropped = 0;
+        self.stderr_dropped = 0;
+        self.special_fields.clear();
+    }
+
+    fn default_instance() -> &'static ReadLogsResponse {
+        static instance: ReadLogsResponse = ReadLogsResponse {
+            stdout: ::std::vec::Vec::new(),
+            stderr: ::std::vec::Vec::new(),
+            stdout_offset: 0,
+            stderr_offset: 0,
+            eof: false,
+            stdout_dropped: 0,
+            stderr_dropped: 0,
+            special_fields: ::protobuf::SpecialFields::new(),
+        };
+        &instance
+    }
+}
+
+impl ::protobuf::MessageFull for ReadLogsResponse {
+    fn descriptor() -> ::protobuf::reflect::MessageDescriptor {
+        static descriptor: ::protobuf::rt::Lazy<::protobuf::reflect::MessageDescriptor> = ::protobuf::rt::Lazy::new();
+        descriptor.get(|| file_descriptor().message_by_package_relative_name("ReadLogsResponse").unwrap()).clone()
+    }
+}
+
+impl ::std::fmt::Display for ReadLogsResponse {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        ::protobuf::text_format::fmt(self, f)
+    }
+}
+
+impl ::protobuf::reflect::ProtobufValue for ReadLogsResponse {
+    type RuntimeType = ::protobuf::reflect::rt::RuntimeTypeMessage<Self>;
+}
+
 // @@protoc_insertion_point(message:cloudhv.agent.ConfigureNetworkRequest)
 #[derive(PartialEq,Clone,Default,Debug)]
 pub struct ConfigureNetworkRequest {
@@ -4165,39 +4571,50 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     set\"t\n\x18GetContainerLogsResponse\x12\x16\n\x06stdout\x18\x01\x20\x01\
     (\x0cR\x06stdout\x12\x16\n\x06stderr\x18\x02\x20\x01(\x0cR\x06stderr\x12\
     \x16\n\x06offset\x18\x03\x20\x01(\x04R\x06offset\x12\x10\n\x03eof\x18\
-    \x04\x20\x01(\x08R\x03eof\"\x9b\x01\n\x17ConfigureNetworkRequest\x12\x1d\
-    \n\nip_address\x18\x01\x20\x01(\tR\tipAddress\x12\x18\n\x07gateway\x18\
-    \x02\x20\x01(\tR\x07gateway\x12\x1d\n\nprefix_len\x18\x03\x20\x01(\rR\tp\
-    refixLen\x12\x16\n\x06device\x18\x04\x20\x01(\tR\x06device\x12\x10\n\x03\
-    mac\x18\x05\x20\x01(\tR\x03mac\"\x1a\n\x18ConfigureNetworkResponse\"k\n\
-    \x15AdoptContainerRequest\x12(\n\x10old_container_id\x18\x01\x20\x01(\tR\
-    \x0eoldContainerId\x12(\n\x10new_container_id\x18\x02\x20\x01(\tR\x0enew\
-    ContainerId\"*\n\x16AdoptContainerResponse\x12\x10\n\x03pid\x18\x01\x20\
-    \x01(\rR\x03pid*'\n\nVolumeType\x12\x0e\n\nFILESYSTEM\x10\0\x12\t\n\x05B\
-    LOCK\x10\x01*P\n\x0eContainerState\x12\x0b\n\x07UNKNOWN\x10\0\x12\x0b\n\
-    \x07CREATED\x10\x01\x12\x0b\n\x07RUNNING\x10\x02\x12\x0b\n\x07STOPPED\
-    \x10\x03\x12\n\n\x06PAUSED\x10\x042\xf8\x08\n\x0cAgentService\x12`\n\x0f\
-    CreateContainer\x12%.cloudhv.agent.CreateContainerRequest\x1a&.cloudhv.a\
-    gent.CreateContainerResponse\x12]\n\x0eStartContainer\x12$.cloudhv.agent\
-    .StartContainerRequest\x1a%.cloudhv.agent.StartContainerResponse\x12\\\n\
-    \x0cRunContainer\x12%.cloudhv.agent.CreateContainerRequest\x1a%.cloudhv.\
-    agent.StartContainerResponse\x12Z\n\rKillContainer\x12#.cloudhv.agent.Ki\
-    llContainerRequest\x1a$.cloudhv.agent.KillContainerResponse\x12`\n\x0fDe\
-    leteContainer\x12%.cloudhv.agent.DeleteContainerRequest\x1a&.cloudhv.age\
-    nt.DeleteContainerResponse\x12Z\n\rWaitContainer\x12#.cloudhv.agent.Wait\
-    ContainerRequest\x1a$.cloudhv.agent.WaitContainerResponse\x12T\n\x0bExec\
-    Process\x12!.cloudhv.agent.ExecProcessRequest\x1a\".cloudhv.agent.ExecPr\
-    ocessResponse\x12]\n\x0eStateContainer\x12$.cloudhv.agent.StateContainer\
-    Request\x1a%.cloudhv.agent.StateContainerResponse\x12Q\n\nGetMemInfo\x12\
-    \x20.cloudhv.agent.GetMemInfoRequest\x1a!.cloudhv.agent.GetMemInfoRespon\
-    se\x12c\n\x10GetContainerLogs\x12&.cloudhv.agent.GetContainerLogsRequest\
-    \x1a'.cloudhv.agent.GetContainerLogsResponse\x12c\n\x10ConfigureNetwork\
-    \x12&.cloudhv.agent.ConfigureNetworkRequest\x1a'.cloudhv.agent.Configure\
-    NetworkResponse\x12]\n\x0eAdoptContainer\x12$.cloudhv.agent.AdoptContain\
-    erRequest\x1a%.cloudhv.agent.AdoptContainerResponse2S\n\rHealthService\
-    \x12B\n\x05Check\x12\x1b.cloudhv.agent.CheckRequest\x1a\x1c.cloudhv.agen\
-    t.CheckResponseB6Z4github.com/devigned/containerd-cloudhypervisor/protob\
-    \x06proto3\
+    \x04\x20\x01(\x08R\x03eof\"\x9b\x01\n\x0fReadLogsRequest\x12!\n\x0cconta\
+    iner_id\x18\x01\x20\x01(\tR\x0bcontainerId\x12#\n\rstdout_offset\x18\x02\
+    \x20\x01(\x04R\x0cstdoutOffset\x12#\n\rstderr_offset\x18\x03\x20\x01(\
+    \x04R\x0cstderrOffset\x12\x1b\n\tmax_bytes\x18\x04\x20\x01(\rR\x08maxByt\
+    es\"\xec\x01\n\x10ReadLogsResponse\x12\x16\n\x06stdout\x18\x01\x20\x01(\
+    \x0cR\x06stdout\x12\x16\n\x06stderr\x18\x02\x20\x01(\x0cR\x06stderr\x12#\
+    \n\rstdout_offset\x18\x03\x20\x01(\x04R\x0cstdoutOffset\x12#\n\rstderr_o\
+    ffset\x18\x04\x20\x01(\x04R\x0cstderrOffset\x12\x10\n\x03eof\x18\x05\x20\
+    \x01(\x08R\x03eof\x12%\n\x0estdout_dropped\x18\x06\x20\x01(\x04R\rstdout\
+    Dropped\x12%\n\x0estderr_dropped\x18\x07\x20\x01(\x04R\rstderrDropped\"\
+    \x9b\x01\n\x17ConfigureNetworkRequest\x12\x1d\n\nip_address\x18\x01\x20\
+    \x01(\tR\tipAddress\x12\x18\n\x07gateway\x18\x02\x20\x01(\tR\x07gateway\
+    \x12\x1d\n\nprefix_len\x18\x03\x20\x01(\rR\tprefixLen\x12\x16\n\x06devic\
+    e\x18\x04\x20\x01(\tR\x06device\x12\x10\n\x03mac\x18\x05\x20\x01(\tR\x03\
+    mac\"\x1a\n\x18ConfigureNetworkResponse\"k\n\x15AdoptContainerRequest\
+    \x12(\n\x10old_container_id\x18\x01\x20\x01(\tR\x0eoldContainerId\x12(\n\
+    \x10new_container_id\x18\x02\x20\x01(\tR\x0enewContainerId\"*\n\x16Adopt\
+    ContainerResponse\x12\x10\n\x03pid\x18\x01\x20\x01(\rR\x03pid*'\n\nVolum\
+    eType\x12\x0e\n\nFILESYSTEM\x10\0\x12\t\n\x05BLOCK\x10\x01*P\n\x0eContai\
+    nerState\x12\x0b\n\x07UNKNOWN\x10\0\x12\x0b\n\x07CREATED\x10\x01\x12\x0b\
+    \n\x07RUNNING\x10\x02\x12\x0b\n\x07STOPPED\x10\x03\x12\n\n\x06PAUSED\x10\
+    \x042\xc5\t\n\x0cAgentService\x12`\n\x0fCreateContainer\x12%.cloudhv.age\
+    nt.CreateContainerRequest\x1a&.cloudhv.agent.CreateContainerResponse\x12\
+    ]\n\x0eStartContainer\x12$.cloudhv.agent.StartContainerRequest\x1a%.clou\
+    dhv.agent.StartContainerResponse\x12\\\n\x0cRunContainer\x12%.cloudhv.ag\
+    ent.CreateContainerRequest\x1a%.cloudhv.agent.StartContainerResponse\x12\
+    Z\n\rKillContainer\x12#.cloudhv.agent.KillContainerRequest\x1a$.cloudhv.\
+    agent.KillContainerResponse\x12`\n\x0fDeleteContainer\x12%.cloudhv.agent\
+    .DeleteContainerRequest\x1a&.cloudhv.agent.DeleteContainerResponse\x12Z\
+    \n\rWaitContainer\x12#.cloudhv.agent.WaitContainerRequest\x1a$.cloudhv.a\
+    gent.WaitContainerResponse\x12T\n\x0bExecProcess\x12!.cloudhv.agent.Exec\
+    ProcessRequest\x1a\".cloudhv.agent.ExecProcessResponse\x12]\n\x0eStateCo\
+    ntainer\x12$.cloudhv.agent.StateContainerRequest\x1a%.cloudhv.agent.Stat\
+    eContainerResponse\x12Q\n\nGetMemInfo\x12\x20.cloudhv.agent.GetMemInfoRe\
+    quest\x1a!.cloudhv.agent.GetMemInfoResponse\x12c\n\x10GetContainerLogs\
+    \x12&.cloudhv.agent.GetContainerLogsRequest\x1a'.cloudhv.agent.GetContai\
+    nerLogsResponse\x12K\n\x08ReadLogs\x12\x1e.cloudhv.agent.ReadLogsRequest\
+    \x1a\x1f.cloudhv.agent.ReadLogsResponse\x12c\n\x10ConfigureNetwork\x12&.\
+    cloudhv.agent.ConfigureNetworkRequest\x1a'.cloudhv.agent.ConfigureNetwor\
+    kResponse\x12]\n\x0eAdoptContainer\x12$.cloudhv.agent.AdoptContainerRequ\
+    est\x1a%.cloudhv.agent.AdoptContainerResponse2S\n\rHealthService\x12B\n\
+    \x05Check\x12\x1b.cloudhv.agent.CheckRequest\x1a\x1c.cloudhv.agent.Check\
+    ResponseB6Z4github.com/devigned/containerd-cloudhypervisor/protob\x06pro\
+    to3\
 ";
 
 /// `FileDescriptorProto` object which was a source for this generated file
@@ -4215,7 +4632,7 @@ pub fn file_descriptor() -> &'static ::protobuf::reflect::FileDescriptor {
     file_descriptor.get(|| {
         let generated_file_descriptor = generated_file_descriptor_lazy.get(|| {
             let mut deps = ::std::vec::Vec::with_capacity(0);
-            let mut messages = ::std::vec::Vec::with_capacity(26);
+            let mut messages = ::std::vec::Vec::with_capacity(28);
             messages.push(CreateContainerRequest::generated_message_descriptor_data());
             messages.push(VolumeMount::generated_message_descriptor_data());
             messages.push(InlineFile::generated_message_descriptor_data());
@@ -4238,6 +4655,8 @@ pub fn file_descriptor() -> &'static ::protobuf::reflect::FileDescriptor {
             messages.push(GetMemInfoResponse::generated_message_descriptor_data());
             messages.push(GetContainerLogsRequest::generated_message_descriptor_data());
             messages.push(GetContainerLogsResponse::generated_message_descriptor_data());
+            messages.push(ReadLogsRequest::generated_message_descriptor_data());
+            messages.push(ReadLogsResponse::generated_message_descriptor_data());
             messages.push(ConfigureNetworkRequest::generated_message_descriptor_data());
             messages.push(ConfigureNetworkResponse::generated_message_descriptor_data());
             messages.push(AdoptContainerRequest::generated_message_descriptor_data());

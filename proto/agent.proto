@@ -37,6 +37,12 @@ service AgentService {
     // GetContainerLogs returns buffered stdout/stderr from a container.
     rpc GetContainerLogs(GetContainerLogsRequest) returns (GetContainerLogsResponse);
 
+    // ReadLogs returns the output a container has written since the offsets the caller gives, for each stream on its own,
+    // and drops what the caller has taken (the offsets are acknowledgements). The shim uses it to carry a container's stdout
+    // and stderr to the pipes containerd gave it (so that `kubectl logs` shows them). GetContainerLogs is the older call: one
+    // offset for both streams (a stream shorter than the other loses its tail) and a buffer that never shrinks.
+    rpc ReadLogs(ReadLogsRequest) returns (ReadLogsResponse);
+
     // ConfigureNetwork sets up a network interface inside the guest VM.
     // Used after snapshot-restore when a TAP device is hot-plugged and the
     // guest kernel needs its interface configured with the pod's IP address.
@@ -242,6 +248,23 @@ message GetContainerLogsResponse {
     bytes stderr = 2;
     uint64 offset = 3;   // new offset after this read
     bool eof = 4;         // true if container exited and all output captured
+}
+
+message ReadLogsRequest {
+    string container_id = 1;
+    uint64 stdout_offset = 2;  // absolute position in the stdout stream to read from; everything before it is dropped
+    uint64 stderr_offset = 3;  // the same for stderr
+    uint32 max_bytes = 4;      // most bytes to return for each stream in one reply (0: 256 KiB)
+}
+
+message ReadLogsResponse {
+    bytes stdout = 1;
+    bytes stderr = 2;
+    uint64 stdout_offset = 3;  // position after the returned stdout; the next call starts here
+    uint64 stderr_offset = 4;
+    bool eof = 5;              // the container has exited and everything it wrote has been returned
+    uint64 stdout_dropped = 6; // bytes lost before stdout_offset because the buffer was full (the caller was too slow), cumulative
+    uint64 stderr_dropped = 7;
 }
 
 // --- ConfigureNetwork ---

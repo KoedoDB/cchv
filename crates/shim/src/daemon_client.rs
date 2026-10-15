@@ -136,6 +136,40 @@ impl DaemonClient {
         Ok((exit_code, exited_at))
     }
 
+    /// Read what a container has written since the given offsets (see `ReadLogs` in proto/agent.proto). The caller's offsets
+    /// acknowledge what it has taken, so the guest drops it.
+    pub async fn read_logs(
+        &self,
+        vm_id: &str,
+        container_id: &str,
+        stdout_offset: u64,
+        stderr_offset: u64,
+    ) -> Result<LogChunk> {
+        use base64::Engine;
+        let resp = self
+            .rpc(&serde_json::json!({
+                "method": "ReadLogs",
+                "vm_id": vm_id,
+                "container_id": container_id,
+                "stdout_offset": stdout_offset,
+                "stderr_offset": stderr_offset,
+            }))
+            .await?;
+        Self::check_error(&resp, "ReadLogs")?;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let decode = |key: &str| -> Result<Vec<u8>> {
+            b64.decode(resp[key].as_str().unwrap_or(""))
+                .with_context(|| format!("decode {key}"))
+        };
+        Ok(LogChunk {
+            stdout: decode("stdout")?,
+            stderr: decode("stderr")?,
+            stdout_offset: resp["stdout_offset"].as_u64().unwrap_or(stdout_offset),
+            stderr_offset: resp["stderr_offset"].as_u64().unwrap_or(stderr_offset),
+            eof: resp["eof"].as_bool().unwrap_or(false),
+        })
+    }
+
     /// Delete a stopped container inside a VM.
     pub async fn delete_container(&self, vm_id: &str, container_id: &str) -> Result<()> {
         let resp = self
@@ -202,4 +236,16 @@ impl DaemonClient {
         }
         Ok(())
     }
+}
+
+/// New output of a container, from `DaemonClient::read_logs`.
+#[derive(Debug)]
+pub struct LogChunk {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    /// Where the next call starts.
+    pub stdout_offset: u64,
+    pub stderr_offset: u64,
+    /// The container has exited and everything it wrote has been returned.
+    pub eof: bool,
 }

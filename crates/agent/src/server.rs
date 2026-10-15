@@ -288,6 +288,42 @@ impl AgentService for AgentServiceHandler {
         Ok(resp)
     }
 
+    async fn read_logs(
+        &self,
+        _ctx: &TtrpcContext,
+        req: ReadLogsRequest,
+    ) -> ttrpc::Result<ReadLogsResponse> {
+        let max = if req.max_bytes == 0 {
+            256 * 1024
+        } else {
+            req.max_bytes as usize
+        };
+        let log_buf = {
+            let mgr = self.container_manager.lock().await;
+            mgr.get_log_buffer(&req.container_id)
+        };
+
+        let mut resp = ReadLogsResponse::new();
+        match log_buf {
+            Some(buf) => {
+                let read = buf
+                    .lock()
+                    .await
+                    .read(req.stdout_offset, req.stderr_offset, max);
+                resp.stdout = read.stdout;
+                resp.stderr = read.stderr;
+                resp.stdout_offset = read.stdout_next;
+                resp.stderr_offset = read.stderr_next;
+                resp.eof = read.eof;
+                resp.stdout_dropped = read.stdout_dropped;
+                resp.stderr_dropped = read.stderr_dropped;
+            }
+            // No such container (never started, or deleted): nothing more will come.
+            None => resp.eof = true,
+        }
+        Ok(resp)
+    }
+
     async fn configure_network(
         &self,
         _ctx: &TtrpcContext,

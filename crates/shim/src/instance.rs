@@ -81,6 +81,8 @@ pub struct CloudHvInstance {
     sandbox_id: String,
     bundle: PathBuf,
     exit: Arc<WaitableCell<(u32, DateTime<Utc>)>>,
+    /// What containerd gave this instance, including the pipes for its stdout and stderr (the container's output is written to them).
+    cfg: InstanceConfig,
 }
 
 impl Instance for CloudHvInstance {
@@ -102,6 +104,7 @@ impl Instance for CloudHvInstance {
             sandbox_id,
             bundle: cfg.bundle.clone(),
             exit: Arc::new(WaitableCell::new()),
+            cfg: cfg.clone(),
         })
     }
 
@@ -473,6 +476,18 @@ impl CloudHvInstance {
             });
         }
 
+        // Carry the container's stdout and stderr from the guest to the pipes containerd gave us. Without this the output
+        // reaches nobody and `kubectl logs` is empty.
+        {
+            let cfg = self.cfg.clone();
+            let daemon_socket = active_state.daemon_socket.clone();
+            let daemon_vm_id = active_state.daemon_vm_id.clone();
+            let cid = container_id.to_string();
+            tokio::spawn(async move {
+                pump_logs(cfg, daemon_socket, daemon_vm_id, cid).await;
+            });
+        }
+
         active_state.container_count.fetch_add(1, Ordering::SeqCst);
 
         info!(
@@ -493,6 +508,93 @@ impl CloudHvInstance {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Copy a container's output from the guest to the stdout and stderr pipes containerd made for it, until the container has exited and
+/// all its output has been written. The pipes are closed when this returns, which is how containerd (and the log file of the
+/// kubelet) learns that there is no more.
+///
+/// The guest keeps the output only until it is taken (the offsets of each call acknowledge what came before), and keeps at most
+/// 1 MiB for a stream nobody reads. Opening a pipe for writing waits for a reader, so it is done on a thread of its own. A
+/// container with no pipes (an empty path) has nowhere to write, and nothing is read.
+async fn pump_logs(
+    cfg: InstanceConfig,
+    daemon_socket: String,
+    vm_id: String,
+    container_id: String,
+) {
+    use tokio::io::AsyncWriteExt;
+
+    let open = |cfg: InstanceConfig, stderr: bool| async move {
+        tokio::task::spawn_blocking(move || {
+            if stderr {
+                cfg.open_stderr()
+            } else {
+                cfg.open_stdout()
+            }
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .map(tokio::fs::File::from_std)
+    };
+    let mut out = open(cfg.clone(), false).await;
+    let mut err = open(cfg, true).await;
+    if out.is_none() && err.is_none() {
+        return;
+    }
+
+    let client = DaemonClient::new(&daemon_socket);
+    let (mut stdout_offset, mut stderr_offset) = (0u64, 0u64);
+    let mut failures = 0u32;
+    let mut wait = std::time::Duration::from_millis(20);
+    loop {
+        match client
+            .read_logs(&vm_id, &container_id, stdout_offset, stderr_offset)
+            .await
+        {
+            Ok(chunk) => {
+                failures = 0;
+                let got = !chunk.stdout.is_empty() || !chunk.stderr.is_empty();
+                // A pipe whose reader has gone (a write fails) is dropped; the other stream goes on.
+                if !chunk.stdout.is_empty() {
+                    if let Some(f) = out.as_mut() {
+                        if f.write_all(&chunk.stdout).await.is_err() || f.flush().await.is_err() {
+                            out = None;
+                        }
+                    }
+                }
+                if !chunk.stderr.is_empty() {
+                    if let Some(f) = err.as_mut() {
+                        if f.write_all(&chunk.stderr).await.is_err() || f.flush().await.is_err() {
+                            err = None;
+                        }
+                    }
+                }
+                stdout_offset = chunk.stdout_offset;
+                stderr_offset = chunk.stderr_offset;
+                if chunk.eof || (out.is_none() && err.is_none()) {
+                    break;
+                }
+                if got {
+                    wait = std::time::Duration::from_millis(20);
+                } else {
+                    // Nothing new: ask less often, up to 100 ms (a short wait keeps the end of the output from lagging behind the exit).
+                    wait = (wait * 2).min(std::time::Duration::from_millis(100));
+                    tokio::time::sleep(wait).await;
+                }
+            }
+            Err(e) => {
+                // The VM may be gone (the pod was deleted): a few tries, then stop.
+                failures += 1;
+                if failures >= 5 {
+                    log::warn!("log pump for {container_id} stops: {e:#}");
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
+    }
+}
 
 struct SandboxSpec {
     netns: Option<String>,
