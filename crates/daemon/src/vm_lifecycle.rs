@@ -202,14 +202,23 @@ pub async fn snapshot_vm(api_socket: &Path, dest_dir: &Path) -> Result<()> {
     .await
 }
 
-/// Restore a VM from a snapshot directory.
-/// Uses `OnDemand` memory restore mode (userfaultfd) for lazy page loading.
-/// Requires Cloud Hypervisor >= v51.0 (PR #7800).
+/// The memory restore mode of `vm.restore`: `OnDemand` (userfaultfd, lazy) or `Copy` (the snapshot is read into guest RAM before the
+/// resume). Cloud Hypervisor has `memory_restore_mode` from v52 (the change, cloud-hypervisor#7800, came after v51.1). The daemon asks for
+/// `OnDemand`; `CLOUDHV_MEMORY_RESTORE_MODE=Copy` asks for the other. With v53.0 `Copy` leaves a restored VM at about 40 MiB resident,
+/// `OnDemand` at about 137 MiB of a 128 MiB guest (measured 2026-10-15): the opposite of what lazy loading is for.
+fn memory_restore_mode() -> &'static str {
+    match std::env::var("CLOUDHV_MEMORY_RESTORE_MODE").as_deref() {
+        Ok("Copy") | Ok("copy") => "Copy",
+        _ => "OnDemand",
+    }
+}
+
+/// Restore a VM from a snapshot directory (see `memory_restore_mode`).
 pub async fn restore_vm(api_socket: &Path, source_dir: &Path) -> Result<()> {
     let body = serde_json::json!({
         "source_url": format!("file://{}", source_dir.display()),
         "prefault": false,
-        "memory_restore_mode": "OnDemand",
+        "memory_restore_mode": memory_restore_mode(),
     });
     api_request(
         api_socket,
