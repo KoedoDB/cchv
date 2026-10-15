@@ -12,11 +12,11 @@
 #   hacks/build-dev-image.sh [--remote <ssh-host>] [--owner <ghcr-owner>]
 #
 # Examples:
-#   # Build on the dev VM and push to ghcr.io/devigned/cloudhv-installer-dev
-#   hacks/build-dev-image.sh --remote hl-dev --owner devigned
+#   # Build on the dev VM and push to ghcr.io/koedodb/cloudhv-installer-dev
+#   hacks/build-dev-image.sh --remote hl-dev --owner koedodb
 #
 #   # Build locally (requires Docker, Alpine cross-build support)
-#   hacks/build-dev-image.sh --owner devigned
+#   hacks/build-dev-image.sh --owner koedodb
 #
 # The script will:
 #   1. Determine the current git SHA
@@ -32,7 +32,7 @@
 set -euo pipefail
 
 REMOTE=""
-OWNER="devigned"
+OWNER="koedodb"
 SCRIPT_DIR="$(cd "$(dirname "$0")"; pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.."; pwd)"
 
@@ -110,7 +110,7 @@ chmod +x /tmp/image-root/opt/cloudhv/install.sh
 
 # Use a simple dev Dockerfile (skip CH source build)
 cat > /tmp/image-root/Dockerfile << 'DEVEOF'
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY opt/cloudhv/ /opt/cloudhv/
 ENTRYPOINT ["/opt/cloudhv/install.sh"]
@@ -136,13 +136,13 @@ echo ""
 echo "  # Install (first time):"
 echo "  helm install cloudhv-installer \\"
 echo "    oci://ghcr.io/${OWNER}/charts/cloudhv-installer \\"
-echo "    --version 0.5.3 --namespace kube-system \\"
+echo "    --version 0.5.3 (a release of the chart; the image tag is set below) --namespace kube-system \\"
 echo "    --set image.repository=ghcr.io/${OWNER}/cloudhv-installer-dev \\"
 echo "    --set image.tag=${SHA}"
 echo ""
-echo "  # Or update existing:"
+echo "  # Or update existing (the installer is the init container \"install\"):"
 echo "  kubectl set image daemonset/cloudhv-installer -n kube-system \\"
-echo "    installer=${IMAGE}"
+echo "    install=${IMAGE}"
 echo ""
 echo "  # If private image, create pull secret first:"
 echo "  kubectl create secret docker-registry ghcr-secret \\"

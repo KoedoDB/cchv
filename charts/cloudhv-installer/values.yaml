@@ -1,7 +1,19 @@
+# The installer image. It runs privileged on every selected node, so it is deployed by digest:
+# the release workflow puts the digest of the release's image here (and in the packaged chart).
+# Set either `digest` (preferred) or `tag`; the chart refuses to render with neither (no default tag, no "latest").
+# With a digest the pull policy defaults to IfNotPresent, with only a tag to Always.
 image:
-  repository: ghcr.io/devigned/cloudhv-installer
-  tag: ""  # Defaults to appVersion
-  pullPolicy: IfNotPresent
+  repository: ghcr.io/koedodb/cloudhv-installer
+  tag: ""
+  digest: ""
+  pullPolicy: ""
+
+# What stays on the node's pod after the installer has finished: an unprivileged pause container, so that the
+# DaemonSet pod stays Running. Pinned by digest.
+idleImage:
+  repository: registry.k8s.io/pause
+  tag: "3.10"
+  digest: "sha256:ee6521f290b2168b6e0935a181d4cff9be1ac3f505666ef0e3c98fae8199917a"
 
 imagePullSecrets: []
 # For dev images from a private GHCR repo:
@@ -14,6 +26,7 @@ nodeSelector:
 tolerations:
   - operator: "Exists"
 
+# The installer (init container)
 resources:
   requests:
     cpu: "100m"
@@ -21,6 +34,14 @@ resources:
   limits:
     cpu: "1"
     memory: "1Gi"
+
+# The pause container
+idleResources:
+  requests:
+    cpu: "1m"
+    memory: "8Mi"
+  limits:
+    memory: "16Mi"
 
 runtimeClass:
   enabled: true

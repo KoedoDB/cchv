@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+# Read-only token; build and test code never sees a credential (checkouts do not persist one).
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -13,21 +17,23 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  CH_VERSION: "v51.1"
-  KERNEL_SERIES: "6.18"
+  # Versions of everything the build downloads are in hacks/versions.env (checksums in hacks/checksums.txt).
 
 jobs:
   lint:
     name: Lint & Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch
+        with:
+          toolchain: stable
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -39,32 +45,44 @@ jobs:
 
       - name: Clippy
         run: |
-          cargo clippy --workspace --lib -- -D warnings
-          cd crates/agent && cargo clippy --all-targets -- -D warnings
+          cargo clippy --locked --workspace --lib -- -D warnings
+          cd crates/agent && cargo clippy --locked --all-targets -- -D warnings
 
       - name: Test installer
         run: bash installer/test-install.sh
+
+      - name: Smoke-test the installer (stubbed node in a container)
+        run: bash installer/smoke-test.sh
+
+      - name: Check the pinned downloads against upstream
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash hacks/check-upstream.sh
 
   unit-test:
     name: Unit Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Run unit tests
         run: |
-          cargo test --workspace --lib --bins
-          cd crates/agent && cargo test
+          cargo test --locked --workspace --lib --bins
+          cd crates/agent && cargo test --locked
 
       - name: Check benchmarks compile
-        run: cargo bench -p containerd-shim-cloudhv --bench vm_overhead --no-run
+        run: cargo bench --locked -p containerd-shim-cloudhv --bench vm_overhead --no-run
 
   build:
     name: Build for ${{ matrix.arch }}
@@ -79,17 +97,19 @@ jobs:
             arch: aarch64
             alt_arch: arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - name: Fetch latest kernel release version (for cache key)
+      - name: Pinned kernel version (for cache key)
         id: kernel-version
         run: |
-          source hacks/util.inc
-          echo "kernel_version=$(latest_kernel_release "$KERNEL_SERIES")" | tee -a "$GITHUB_OUTPUT"
+          source hacks/versions.env
+          echo "kernel_version=${KERNEL_VERSION}" | tee -a "$GITHUB_OUTPUT"
 
       - name: Cache guest kernel
         id: kernel-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ./vmlinux
@@ -114,7 +134,7 @@ jobs:
           bash hacks/build-sysext.sh
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: build-${{ matrix.arch }}
           path: |
@@ -138,16 +158,19 @@ jobs:
             arch: aarch64
             target: aarch64-unknown-linux-musl
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Install sysext test dependencies
         run: sudo apt-get update && sudo apt-get install -y qemu-system python3
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: integration
           targets: ${{ matrix.target }}
@@ -174,17 +197,19 @@ jobs:
       - name: Install Cloud Hypervisor
         if: env.KVM_AVAILABLE == 'true'
         run: |
-          # Build CH from source (need main branch for OnDemand restore)
+          # The release pinned in hacks/versions.env, built from source (checked against its commit), not the head of main.
+          source hacks/versions.env
           sudo apt-get install -y libssl-dev
-          git clone --depth 1 https://github.com/cloud-hypervisor/cloud-hypervisor.git /tmp/ch-build
+          git clone --depth 1 --branch "${CH_VERSION}" https://github.com/cloud-hypervisor/cloud-hypervisor.git /tmp/ch-build
           cd /tmp/ch-build
-          cargo build --release --bin cloud-hypervisor
+          test "$(git rev-parse HEAD)" = "${CH_COMMIT}"
+          cargo build --locked --release --bin cloud-hypervisor
           sudo install -m 755 target/release/cloud-hypervisor /usr/local/bin/cloud-hypervisor
           cloud-hypervisor --version
 
       - name: Download build artifacts
         if: env.KVM_AVAILABLE == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: build-x86_64
 
@@ -193,7 +218,7 @@ jobs:
         timeout-minutes: 10
         run: |
           # Build daemon
-          cargo build --release -p cloudhv-sandbox-daemon
+          cargo build --locked --release -p cloudhv-sandbox-daemon
 
           # Write daemon config
           sudo mkdir -p /opt/cloudhv /run/cloudhv/daemon
@@ -230,7 +255,7 @@ jobs:
           sudo -E env "PATH=$PATH" \
             DAEMON_SOCKET="/run/cloudhv/daemon.sock" \
             WARMUP_SECS=5 \
-            cargo test -p cloudhv-sandbox-daemon --test integration -- --nocapture --test-threads=1
+            cargo test --locked -p cloudhv-sandbox-daemon --test integration -- --nocapture --test-threads=1
 
           # Stop daemon
           sudo kill $DAEMON_PID 2>/dev/null || true

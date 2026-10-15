@@ -12,8 +12,6 @@ set -euo pipefail
 scriptdir="$(cd "$(dirname "$0")"; pwd)"
 source "${scriptdir}/util.inc"
 
-EROFS_VERSION="1.9.1"
-
 # Runs inside the container
 build() {
   host_user_group="$1"
@@ -23,13 +21,18 @@ build() {
   apk add --no-cache build-base \
       autoconf automake libtool lz4-dev util-linux-dev \
       util-linux-static zlib-dev zlib-static zstd-static lz4-static xz-static \
-      openssl-dev openssl-libs-static
+      openssl-dev openssl-libs-static git
 
   mkdir /opt/build-host-deps
   cd /opt/build-host-deps
-  wget "https://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git/snapshot/erofs-utils-${EROFS_VERSION}.tar.gz"
-  tar xzf "erofs-utils-${EROFS_VERSION}.tar.gz"
-  cd "erofs-utils-${EROFS_VERSION}"
+  # The tag, and then the commit it must point to (versions.env): a snapshot tarball is generated on request and has no stable hash.
+  git clone --quiet --depth 1 --branch "v${EROFS_UTILS_VERSION}" \
+      https://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git "erofs-utils-${EROFS_UTILS_VERSION}"
+  cd "erofs-utils-${EROFS_UTILS_VERSION}"
+  if [ "$(git rev-parse HEAD)" != "${EROFS_UTILS_COMMIT}" ] ; then
+    echo "ERROR: erofs-utils v${EROFS_UTILS_VERSION} is $(git rev-parse HEAD), expected ${EROFS_UTILS_COMMIT} (versions.env)" >&2
+    exit 1
+  fi
 
   autoreconf -fiv
   CFLAGS='--static --static -Wl,-static' LDFLAGS="-static --static -Wl,-static" \

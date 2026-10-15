@@ -1,6 +1,11 @@
 #!/bin/sh
 # vim: et ts=2 sw=2 syn=sh
 
+# Pinned versions (container image digest, CH, CNI, kernel, ...) and checksum-checked downloads.
+# The sourcing script sets $scriptdir to this directory.
+. "${scriptdir}/versions.env"
+. "${scriptdir}/verify-download.sh"
+
 translate_arch() {
   local arch="${1:-$(uname -m)}"
   case "$arch" in
@@ -40,16 +45,8 @@ docker_platform() {
 }
 # --
 
-latest_kernel_release() {
-  local series="${1}"
-
-  curl -sSL https://www.kernel.org/releases.json \
-    | jq -r ".releases[] | select(.version | startswith(\"${series}\") ) | \"\(.version)\""
-}
-# --
-
 docker_wrapper() {
-  local uid gid scriptname platform arch
+  local uid gid scriptname platform arch git_mask
   uid="$(id -u)"
   gid="$(id -g)"
   scriptname="$(basename "$0")"
@@ -60,9 +57,26 @@ docker_wrapper() {
   fi
   platform="$(docker_platform "$arch")"
 
-  docker run --rm -i -v $(pwd):/host \
+  # The build runs code we did not write (every build.rs of every crate, the kernel's build system) with the checkout mounted
+  # read-write, because the artifacts are written back into it. Keep the git directory (credentials in .git/config, hooks) out of
+  # its reach: an empty tmpfs over it. A worktree's .git is a file: mask that with /dev/null.
+  git_mask=""
+  if [ -d .git ] ; then
+    git_mask="--mount type=tmpfs,destination=/host/.git"
+  elif [ -e .git ] ; then
+    git_mask="-v /dev/null:/host/.git:ro"
+  fi
+
+  # The container is root inside (apk add and the chown of the artifacts need it) but gets only the capabilities those need,
+  # cannot gain more (no-new-privileges), and runs the image pinned in versions.env. It keeps the network (crates, apk).
+  # shellcheck disable=SC2086
+  docker run --rm -i -v "$(pwd):/host" \
+      $git_mask \
+      --security-opt no-new-privileges \
+      --cap-drop ALL \
+      --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add FSETID --cap-add SETUID --cap-add SETGID \
       $platform \
-      alpine \
+      "${ALPINE_IMAGE}" \
       "/host/hacks/${scriptname}" "build" "$uid:$gid" ${@}
 }
 # --

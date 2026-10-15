@@ -35,18 +35,41 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      # No Kubernetes API access: neither container uses it.
+      automountServiceAccountToken: false
+      # hostPID: the installer enters the node's namespaces with nsenter --target 1.
+      # hostNetwork: the package managers it runs on the node use the pod's network namespace (nsenter does not enter the node's).
       hostNetwork: true
       hostPID: true
-      containers:
-        - name: installer
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default (printf "v%s" .Chart.AppVersion) }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+      initContainers:
+        # The privileged part. It does its work and exits; nothing privileged stays running.
+        - name: install
+          image: {{ include "cloudhv-installer.image" (dict "image" .Values.image) | quote }}
+          imagePullPolicy: {{ include "cloudhv-installer.pullPolicy" .Values.image }}
           securityContext:
             privileged: true
           volumeMounts:
             - name: host-root
               mountPath: /host
           {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      containers:
+        - name: idle
+          image: {{ include "cloudhv-installer.image" (dict "image" .Values.idleImage) | quote }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65535
+            runAsGroup: 65535
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          {{- with .Values.idleResources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}

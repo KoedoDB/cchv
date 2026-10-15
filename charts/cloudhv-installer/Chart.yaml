@@ -10,8 +10,8 @@ keywords:
   - microvm
   - vm-isolation
   - kata
-home: https://github.com/devigned/containerd-cloudhypervisor
+home: https://github.com/KoedoDB/containerd-cloudhypervisor
 sources:
-  - https://github.com/devigned/containerd-cloudhypervisor
+  - https://github.com/KoedoDB/containerd-cloudhypervisor
 maintainers:
-  - name: devigned
+  - name: KoedoDB

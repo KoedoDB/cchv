@@ -4,12 +4,44 @@ After=containerd.service
 Requires=containerd.service
 
 [Service]
-ExecStartPre=/bin/mkdir -p /run/cloudhv/daemon
+ExecStartPre=/bin/mkdir -p -m 0711 /run/cloudhv/daemon
 Environment=RUST_LOG=info
 ExecStart=/usr/bin/cloudhv-sandbox-daemon /opt/cloudhv/daemon.json
 Restart=always
 RestartSec=5
 MemoryMax=4G
+
+# Hardening. The daemon runs as root: it makes TAP devices, enters pod network namespaces, sets up tc, and starts the
+# Cloud Hypervisor processes (as users of their own with ch_rootless). Cloud Hypervisor is its child and inherits every
+# limit below, so what Cloud Hypervisor itself needs is in the lists too. Not tested under systemd on a real node yet.
+NoNewPrivileges=yes
+# NET_ADMIN: TAP, tc, links. SYS_ADMIN: setns into the pods' network namespaces. CHOWN, FOWNER, DAC_OVERRIDE: ownership,
+# modes and ACLs of the per-VM files (ch_rootless). SETUID, SETGID: starting Cloud Hypervisor as its VM's user. KILL: stopping
+# those processes. SYS_PTRACE: userfaultfd (OnDemand restore) when unprivileged userfaultfd is off. SYS_RESOURCE, IPC_LOCK: memory limits and locking.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID CAP_KILL CAP_SYS_RESOURCE CAP_SYS_PTRACE CAP_IPC_LOCK
+ProtectSystem=strict
+ReadWritePaths=/run/cloudhv
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+# AF_INET: Cloud Hypervisor brings a TAP it opens by name up with an ioctl on an inet socket.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_VSOCK AF_INET
+SystemCallArchitectures=native
+DevicePolicy=closed
+DeviceAllow=/dev/kvm rw
+DeviceAllow=/dev/net/tun rw
+DeviceAllow=/dev/userfaultfd rw
+# /run/cloudhv is 0711 and not 0700 on purpose: with ch_rootless each Cloud Hypervisor runs as its own user and has to reach
+# its own directory below it (nothing can list it). Kept across restarts of the daemon: the shim's erofs cache is in it.
+# No UMask=: the daemon sets the modes it needs itself, and a stricter umask would hide the per-VM files from those users.
+RuntimeDirectory=cloudhv
+RuntimeDirectoryMode=0711
+RuntimeDirectoryPreserve=yes
 
 [Install]
 WantedBy=multi-user.target

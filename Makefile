@@ -3,6 +3,7 @@
 .PHONY: sync remote-build remote-test remote-integration
 
 # Configuration
+# Every cargo build/test uses --locked: the committed Cargo.lock (also crates/agent/Cargo.lock) is what is built.
 PREFIX    ?= /usr/local
 BINDIR    ?= $(PREFIX)/bin
 RELEASE   ?= 1
@@ -30,10 +31,10 @@ endif
 build: build-shim build-agent  ## Build both shim and agent
 
 build-shim:  ## Build the containerd shim (native)
-	cargo build $(CARGO_FLAGS) -p containerd-shim-cloudhv
+	cargo build --locked $(CARGO_FLAGS) -p containerd-shim-cloudhv
 
 build-agent:  ## Build the guest agent (static musl)
-	cd crates/agent && cargo build $(CARGO_FLAGS) --target $(MUSL_TARGET)
+	cd crates/agent && cargo build --locked $(CARGO_FLAGS) --target $(MUSL_TARGET)
 
 clean:  ## Clean build artifacts
 	cargo clean
@@ -50,12 +51,12 @@ fmt-check:  ## Check formatting
 	cd crates/agent && cargo fmt -- --check
 
 clippy:  ## Run clippy
-	cargo clippy --workspace --lib -- -D warnings
-	cd crates/agent && cargo clippy --all-targets -- -D warnings
+	cargo clippy --locked --workspace --lib -- -D warnings
+	cd crates/agent && cargo clippy --locked --all-targets -- -D warnings
 
 test:  ## Run unit tests
-	cargo test --workspace
-	cd crates/agent && cargo test
+	cargo test --locked --workspace
+	cd crates/agent && cargo test --locked
 
 ## Install
 
@@ -111,7 +112,7 @@ remote-integration: sync  ## Run integration tests on Azure VM
 	ssh $(REMOTE_HOST) "cd $(REMOTE_DIR) && sudo make integration-test"
 
 integration-test: build build-kernel build-rootfs  ## Run integration tests (on Linux with KVM)
-	cargo test -p containerd-shim-cloudhv --test integration -- --nocapture
+	cargo test --locked -p containerd-shim-cloudhv --test integration -- --nocapture
 
 ## Help
 

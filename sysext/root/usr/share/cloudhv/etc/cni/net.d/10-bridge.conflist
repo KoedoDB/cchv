@@ -1,4 +1,5 @@
 {
+  "_comment": "SAMPLE FOR TESTS AND THE DEMO ONLY. A plain bridge with masquerading: pods on it can reach each other, the node and its other networks, and nothing isolates one pod from another. Do not use it for pods of different tenants; use a CNI with network policy (Cilium, ...).",
   "cniVersion": "1.0.0",
   "name": "bridge",
   "plugins": [

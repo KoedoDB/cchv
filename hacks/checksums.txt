@@ -1,0 +1,18 @@
+# SHA-256 of every file the build downloads. Format: "<sha256>  <name>", read by hacks/verify-download.sh.
+# A download whose name is not listed here fails the build.
+#
+# Provenance of each entry (see docs/supply-chain.md; `hacks/check-upstream.sh` re-runs the upstream checks):
+#   cloud-hypervisor-*   equal to the sha256 digest GitHub publishes for the release asset (API field "digest")
+#   cni-plugins-*        equal to the .sha256 file published in the same release
+#   linux-*.tar.xz       equal to kernel.org's sha256sums.asc, whose signature is made by the kernel.org
+#                        checksum autosigner key B8868C80BA62A1FFFAF5FDA9632D3A06589DA6B1
+#   crun-*               the release's detached .asc signature verifies against the maintainer's key
+#                        AC404C1C0BF735C63FF4D562263D6DF2E163E1EA (signing subkey AF60FCA3CDAA6DEAD157EA3A67E38F7A8BA21772);
+#                        the key itself was fetched from a key server: trust on first use
+4f4f98a3d661a40f3e5272627cc895a1b2e525f2f6bedf5f895f9cd21ba5c65b  cloud-hypervisor-v54.0-static
+e8a6d9786ea678e739f1a386682846e93742dcb9c7b6e3e0c62e3bda6cff0ef3  cloud-hypervisor-v54.0-static-aarch64
+b98f74a0f8522f0a83867178729c1aa70f2158f90c45a2ca8fa791db1c76b303  cni-plugins-linux-amd64-v1.9.1.tgz
+56171987d3947707c3563db2f4001bccaf50fd63468611b9f3cbecb1375ee7ec  cni-plugins-linux-arm64-v1.9.1.tgz
+5bd9acdc82ec5efc3790ae840e5aaa40dfde7efff261cf6dde902dc570acf98c  linux-6.18.57.tar.xz
+ff8407185ec474d7c60f697032b7b1fc1fb028fbd0bf13c7d5da9a7d9a479e38  crun-1.20-linux-amd64-disable-systemd
+1e06f605dd8f07c640c59113ed161143ef7786962b11e44804918070e374d5ea  crun-1.20-linux-arm64-disable-systemd

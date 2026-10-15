@@ -1,101 +1,120 @@
 #!/usr/bin/env bash
-set -uo pipefail
+set -euo pipefail
 
-# CloudHV installer — runs inside the DaemonSet pod with the host
-# filesystem mounted at /host. Copies shim + daemon artifacts, configures
-# the runtime handler, starts the sandbox daemon, and restarts containerd.
+# CloudHV installer. Runs as the init container of the DaemonSet (privileged, host PID namespace, the host
+# filesystem at /host) and exits when it is done; what stays on the pod afterwards is an unprivileged pause
+# container. It copies the shim, daemon, Cloud Hypervisor and guest artifacts to the node, writes the configs and
+# the daemon's unit, registers the runtime handler with containerd and starts the daemon.
+#
+# It is safe to run again: files are replaced atomically, containerd is restarted only when its config changed,
+# and containerd's config is not touched (nor containerd restarted) unless everything it will point at is in place.
 
-ARTIFACTS=/opt/cloudhv
-HOST=/host
+ARTIFACTS="${ARTIFACTS:-/opt/cloudhv}"
+HOST="${HOST:-/host}"
+# Overridable for tests (installer/smoke-test.sh).
+CONTAINERD_CONFIG="${CONTAINERD_CONFIG:-$HOST/etc/containerd/config.toml}"
+
+log() { echo "[cloudhv] $*"; }
+die() { echo "[cloudhv] ERROR: $*" >&2; exit 1; }
+
+# Run a command in the host's namespaces (mount, uts, ipc, pid). Not the network namespace: the pod is on the
+# host network (hostNetwork), which is what the package managers below use.
+host() { nsenter --target 1 --mount --uts --ipc --pid -- "$@"; }
 
 HOST_ARCH="$(uname -m)"
 case "${HOST_ARCH}" in
     x86_64)  KERNEL_CONSOLE="console=ttyS0" ;;
     aarch64) KERNEL_CONSOLE="console=ttyAMA0" ;;
-    *)
-        echo "[cloudhv] ERROR: unsupported architecture: ${HOST_ARCH}"
-        exit 1
-        ;;
+    *) die "unsupported architecture: ${HOST_ARCH}" ;;
 esac
 
-echo "[cloudhv] Installing on $(cat /host/etc/hostname) (${HOST_ARCH})..."
+# 0. Preflight: everything we are going to install is here, and the host is what we expect.
+for f in containerd-shim-cloudhv-v1 cloudhv-sandbox-daemon cloud-hypervisor vmlinux rootfs.erofs; do
+  [ -s "$ARTIFACTS/$f" ] || die "artifact missing or empty: $ARTIFACTS/$f"
+done
+{ [ -d "$HOST/tmp" ] && [ -d "$HOST/etc/systemd/system" ] && [ -r "$HOST/etc/hostname" ]; } \
+  || die "the host filesystem is not mounted at $HOST as expected"
+[ -f "$CONTAINERD_CONFIG" ] \
+  || die "$CONTAINERD_CONFIG not found: cannot register the runtime handler, so nothing is installed"
 
-# 1. Ensure tc (traffic control) is available for VM TAP networking
-if ! nsenter --target 1 --mount -- sh -c 'command -v tc' >/dev/null 2>&1; then
-  echo "[cloudhv] tc not found, installing iproute-tc..."
-  cat > "$HOST/tmp/cloudhv-install-tc.sh" << 'TCEOF'
+log "Installing on $(cat "$HOST/etc/hostname") (${HOST_ARCH})..."
+
+# A private directory on the host for the scripts we run there (mktemp -d: created with a random name, mode 0700,
+# so no one else on the node can plant a link or a file at a name we use).
+WORK="$(mktemp -d "$HOST/tmp/cloudhv-install.XXXXXX")"
+HOST_WORK="/tmp/$(basename "$WORK")"
+NEW_CONFIG=""
+cleanup() { rm -rf "$WORK"; if [ -n "$NEW_CONFIG" ]; then rm -f "$NEW_CONFIG"; fi; }
+trap cleanup EXIT
+
+cat > "$WORK/pkg.sh" << 'PKG'
 #!/bin/sh
+# usage: pkg.sh <apt packages> <tdnf/dnf packages>
+set -e
 if command -v tdnf >/dev/null 2>&1; then
-  tdnf install -y iproute-tc
+  tdnf install -y $2
 elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y iproute-tc
+  dnf install -y $2
 elif command -v apt-get >/dev/null 2>&1; then
-  apt-get update -qq && apt-get install -y iproute2
+  apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $1
 else
   echo "No supported package manager found" >&2
   exit 1
 fi
-TCEOF
-  chmod +x "$HOST/tmp/cloudhv-install-tc.sh"
-  if nsenter --target 1 --mount --uts --ipc --pid -- /tmp/cloudhv-install-tc.sh 2>&1 | tail -5; then
-    echo "[cloudhv] iproute-tc installed"
-  else
-    echo "[cloudhv] ERROR: tc is required but could not be installed"
-    rm -f "$HOST/tmp/cloudhv-install-tc.sh"
-    exit 1
-  fi
-  rm -f "$HOST/tmp/cloudhv-install-tc.sh"
-fi
+PKG
+chmod 700 "$WORK/pkg.sh"
 
-# 2. Load erofs kernel module and install erofs-utils
-nsenter --target 1 --mount -- modprobe erofs 2>/dev/null || true
-if ! nsenter --target 1 --mount -- sh -c 'command -v mkfs.erofs' >/dev/null 2>&1; then
-  echo "[cloudhv] mkfs.erofs not found, installing erofs-utils..."
-  cat > "$HOST/tmp/cloudhv-install-erofs.sh" << 'EROFSEOF'
-#!/bin/sh
-if command -v tdnf >/dev/null 2>&1; then
-  tdnf install -y erofs-utils
-elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y erofs-utils
-elif command -v apt-get >/dev/null 2>&1; then
-  apt-get update -qq && apt-get install -y erofs-utils
-else
-  echo "No supported package manager found" >&2
-  exit 1
-fi
-EROFSEOF
-  chmod +x "$HOST/tmp/cloudhv-install-erofs.sh"
-  if nsenter --target 1 --mount --uts --ipc --pid -- /tmp/cloudhv-install-erofs.sh 2>&1 | tail -5; then
-    echo "[cloudhv] erofs-utils installed"
-  else
-    echo "[cloudhv] ERROR: mkfs.erofs is required but could not be installed"
-    rm -f "$HOST/tmp/cloudhv-install-erofs.sh"
-    exit 1
+# Install a host package for a command that is missing. Only what is needed, from the distribution's own
+# (signed) repositories; the version is the distribution's.
+need_command() { # command, apt packages, rpm packages
+  if host sh -c "command -v $1" >/dev/null 2>&1; then
+    return 0
   fi
-  rm -f "$HOST/tmp/cloudhv-install-erofs.sh"
-fi
+  log "$1 not found, installing ($2)..."
+  host sh "$HOST_WORK/pkg.sh" "$2" "$3" 2>&1 | tail -5 || die "$1 is required but could not be installed"
+  host sh -c "command -v $1" >/dev/null 2>&1 || die "$1 is still missing after the install"
+}
 
-# 3. Stop existing daemon (if running) before clearing caches
-nsenter --target 1 --mount --uts --ipc --pid -- \
-  systemctl stop cloudhv-sandbox-daemon 2>/dev/null || true
+# 1. tc (traffic control) for the VM TAP networking; 2. mkfs.erofs and the erofs kernel module
+need_command tc iproute2 iproute-tc
+host modprobe erofs 2>/dev/null || true
+need_command mkfs.erofs erofs-utils erofs-utils
+
+# 3. Stop the daemon (if running) before clearing its state
+host systemctl stop cloudhv-sandbox-daemon 2>/dev/null || true
 
 # 4. Clear stale caches from previous installs
-echo "[cloudhv] Clearing caches from previous install..."
-nsenter --target 1 --mount -- rm -rf /run/cloudhv/erofs-cache /run/cloudhv/daemon
-nsenter --target 1 --mount -- mkdir -p /run/cloudhv/daemon
+log "Clearing caches from previous install..."
+host rm -rf /run/cloudhv/erofs-cache /run/cloudhv/daemon
+host mkdir -p -m 0711 /run/cloudhv/daemon
 
-# 5. Copy binaries and guest artifacts
-echo "[cloudhv] Copying binaries and guest artifacts..."
-install -D -m 755 "$ARTIFACTS/containerd-shim-cloudhv-v1" "$HOST/usr/local/bin/containerd-shim-cloudhv-v1"
-install -m 755 "$ARTIFACTS/cloudhv-sandbox-daemon" "$HOST/usr/local/bin/cloudhv-sandbox-daemon"
-install -m 755 "$ARTIFACTS/cloud-hypervisor" "$HOST/usr/local/bin/cloud-hypervisor"
-mkdir -p "$HOST/opt/cloudhv"
-install -m 644 "$ARTIFACTS/vmlinux" "$HOST/opt/cloudhv/vmlinux"
-install -m 644 "$ARTIFACTS/rootfs.erofs" "$HOST/opt/cloudhv/rootfs.erofs"
+# 5. Copy binaries and guest artifacts. Each is copied beside its final name, compared, then renamed over it (atomic:
+# a running shim keeps the old file, the next one starts the new).
+put() { # source, destination (under $HOST), mode
+  install -D -m "$3" "$1" "$2.new"
+  cmp -s "$1" "$2.new" || { rm -f "$2.new"; die "the copy of $1 to $2 is not identical"; }
+  mv -f "$2.new" "$2"
+}
+log "Copying binaries and guest artifacts..."
+put "$ARTIFACTS/containerd-shim-cloudhv-v1" "$HOST/usr/local/bin/containerd-shim-cloudhv-v1" 755
+put "$ARTIFACTS/cloudhv-sandbox-daemon"     "$HOST/usr/local/bin/cloudhv-sandbox-daemon"     755
+put "$ARTIFACTS/cloud-hypervisor"           "$HOST/usr/local/bin/cloud-hypervisor"           755
+put "$ARTIFACTS/vmlinux"                    "$HOST/opt/cloudhv/vmlinux"                      644
+put "$ARTIFACTS/rootfs.erofs"               "$HOST/opt/cloudhv/rootfs.erofs"                 644
 
-# 6. Write shim runtime config (with daemon_socket)
-echo "[cloudhv] Writing runtime config..."
-cat > "$HOST/opt/cloudhv/config.json" << CONFIG
+# Everything the runtime handler and the unit point at exists and runs, seen from the host.
+for f in /usr/local/bin/containerd-shim-cloudhv-v1 /usr/local/bin/cloudhv-sandbox-daemon /usr/local/bin/cloud-hypervisor; do
+  host test -x "$f" || die "$f is not executable on the host"
+done
+host /usr/local/bin/cloud-hypervisor --version >/dev/null 2>&1 \
+  || die "cloud-hypervisor does not run on this host (wrong architecture or a missing library?)"
+for f in /opt/cloudhv/vmlinux /opt/cloudhv/rootfs.erofs; do
+  host test -s "$f" || die "$f is missing on the host"
+done
+
+# 6. Shim runtime config (with daemon_socket)
+log "Writing runtime config..."
+cat > "$HOST/opt/cloudhv/config.json.new" << CONFIG
 {
   "cloud_hypervisor_binary": "/usr/local/bin/cloud-hypervisor",
   "kernel_path": "/opt/cloudhv/vmlinux",
@@ -111,10 +130,11 @@ cat > "$HOST/opt/cloudhv/config.json" << CONFIG
   "daemon_socket": "/run/cloudhv/daemon.sock"
 }
 CONFIG
+mv -f "$HOST/opt/cloudhv/config.json.new" "$HOST/opt/cloudhv/config.json"
 
-# 7. Write daemon config
-echo "[cloudhv] Writing daemon config..."
-cat > "$HOST/opt/cloudhv/daemon.json" << DAEMON
+# 7. Daemon config
+log "Writing daemon config..."
+cat > "$HOST/opt/cloudhv/daemon.json.new" << DAEMON
 {
   "pool_size": 3,
   "kernel_path": "/opt/cloudhv/vmlinux",
@@ -126,10 +146,13 @@ cat > "$HOST/opt/cloudhv/daemon.json" << DAEMON
   "state_dir": "/run/cloudhv/daemon"
 }
 DAEMON
+mv -f "$HOST/opt/cloudhv/daemon.json.new" "$HOST/opt/cloudhv/daemon.json"
 
-# 8. Install systemd unit for the sandbox daemon
-echo "[cloudhv] Installing sandbox daemon service..."
-cat > "$HOST/etc/systemd/system/cloudhv-sandbox-daemon.service" << 'UNIT'
+# 8. systemd unit for the sandbox daemon. It runs as root (TAP devices, network namespaces, tc, and starting the
+# Cloud Hypervisor processes), so it gets only the capabilities that needs; Cloud Hypervisor, its child, inherits
+# the same limits. The notes on each directive are in sysext/.../cloudhv-sandbox-daemon.service.
+log "Installing sandbox daemon service..."
+cat > "$HOST/etc/systemd/system/cloudhv-sandbox-daemon.service.new" << 'UNIT'
 [Unit]
 Description=CloudHV Sandbox Daemon
 After=containerd.service
@@ -137,73 +160,113 @@ Requires=containerd.service
 
 [Service]
 Type=simple
-ExecStartPre=/bin/mkdir -p /run/cloudhv/daemon
+ExecStartPre=/bin/mkdir -p -m 0711 /run/cloudhv/daemon
 ExecStart=/usr/local/bin/cloudhv-sandbox-daemon /opt/cloudhv/daemon.json
 Restart=always
 RestartSec=5
 Environment=RUST_LOG=info
 MemoryMax=4G
 
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_SETUID CAP_SETGID CAP_KILL CAP_SYS_RESOURCE CAP_SYS_PTRACE CAP_IPC_LOCK
+ProtectSystem=strict
+ReadWritePaths=/run/cloudhv
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_VSOCK AF_INET
+SystemCallArchitectures=native
+DevicePolicy=closed
+DeviceAllow=/dev/kvm rw
+DeviceAllow=/dev/net/tun rw
+DeviceAllow=/dev/userfaultfd rw
+RuntimeDirectory=cloudhv
+RuntimeDirectoryMode=0711
+RuntimeDirectoryPreserve=yes
+
 [Install]
 WantedBy=multi-user.target
 UNIT
+mv -f "$HOST/etc/systemd/system/cloudhv-sandbox-daemon.service.new" "$HOST/etc/systemd/system/cloudhv-sandbox-daemon.service"
 
-nsenter --target 1 --mount --uts --ipc --pid -- \
-  systemctl daemon-reload
-nsenter --target 1 --mount --uts --ipc --pid -- \
-  systemctl enable cloudhv-sandbox-daemon
+host systemctl daemon-reload
+host systemctl enable cloudhv-sandbox-daemon
 
-# 9. Patch containerd config
-echo "[cloudhv] Patching containerd config..."
-CONTAINERD_CONFIG="$HOST/etc/containerd/config.toml"
+# 9. Register the runtime handler with containerd. Only now, when everything it points at is in place and checked.
+log "Patching containerd config..."
+ORIG_MODE="$(stat -c '%a' "$CONTAINERD_CONFIG" 2>/dev/null || echo 644)"
+NEW_CONFIG="${CONTAINERD_CONFIG}.new"
 
-if [ ! -f "$CONTAINERD_CONFIG" ]; then
-  echo "[cloudhv] WARNING: $CONTAINERD_CONFIG not found, skipping"
+# Remove an existing cloudhv runtime section (and the comment line we put above it) and trailing blank lines,
+# so that running again gives the same file.
+awk '
+  /^# Cloud Hypervisor VM-isolated runtime$/ { next }
+  /^\[.*\.runtimes\.cloudhv/ { skip=1; next }
+  skip && /^\[/ && !/cloudhv/ { skip=0 }
+  skip { next }
+  /^[[:space:]]*$/ { blanks++; next }
+  { while (blanks > 0) { print ""; blanks-- } print }
+' "$CONTAINERD_CONFIG" > "$NEW_CONFIG"
+
+# Add the cloudhv runtime handler (uses containerd's default snapshotter; the shim converts the rootfs to erofs itself)
+{
+  echo ""
+  echo "# Cloud Hypervisor VM-isolated runtime"
+  echo '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.cloudhv]'
+  echo '  runtime_type = "io.containerd.cloudhv.v1"'
+} >> "$NEW_CONFIG"
+
+grep -q 'runtimes\.cloudhv' "$NEW_CONFIG" || die "the new containerd config has no cloudhv runtime; left the old one"
+[ "$(wc -l < "$NEW_CONFIG")" -ge 3 ] || die "the new containerd config looks truncated; left the old one"
+
+CONFIG_CHANGED=true
+if cmp -s "$CONTAINERD_CONFIG" "$NEW_CONFIG"; then
+  CONFIG_CHANGED=false
+  rm -f "$NEW_CONFIG"
 else
   cp "$CONTAINERD_CONFIG" "${CONTAINERD_CONFIG}.bak.$(date +%s)"
-  ORIG_MODE=$(stat -c '%a' "$CONTAINERD_CONFIG" 2>/dev/null || echo "644")
-
-  # Remove existing cloudhv runtime sections (idempotent)
-  awk '
-    /^\[.*\.runtimes\.cloudhv/ { skip=1; next }
-    skip && /^\[/ && !/cloudhv/ { skip=0 }
-    !skip { print }
-  ' "$CONTAINERD_CONFIG" > "${CONTAINERD_CONFIG}.tmp" && mv "${CONTAINERD_CONFIG}.tmp" "$CONTAINERD_CONFIG"
-  chmod "$ORIG_MODE" "$CONTAINERD_CONFIG" 2>/dev/null || true
-
-  # Add cloudhv runtime handler (uses containerd's default snapshotter;
-  # the shim converts rootfs to erofs internally via mkfs.erofs)
-  {
-    echo ""
-    echo "# Cloud Hypervisor VM-isolated runtime"
-    echo '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.cloudhv]'
-    echo '  runtime_type = "io.containerd.cloudhv.v1"'
-  } >> "$CONTAINERD_CONFIG"
-  echo "[cloudhv] Runtime handler added"
+  chmod "$ORIG_MODE" "$NEW_CONFIG"
+  mv -f "$NEW_CONFIG" "$CONTAINERD_CONFIG"
 fi
+NEW_CONFIG=""
 
-# 10. Restart containerd and start daemon
-echo "[cloudhv] Scheduling containerd restart and daemon start..."
-nsenter --target 1 --mount --uts --ipc --pid -- \
-  bash -c 'nohup bash -c "sleep 5 && systemctl restart containerd && sleep 3 && systemctl start cloudhv-sandbox-daemon" &>/dev/null &'
-
-sleep 15
-if chroot "$HOST" systemctl is-active --quiet containerd; then
-  echo "[cloudhv] containerd restarted successfully"
+# 10. Restart containerd (only if its config changed) and (re)start the daemon. This runs as a transient systemd unit,
+# so that it survives this container, and the restart of containerd does not take it down. Without systemd-run it is
+# left to a detached shell.
+if [ "$CONFIG_CHANGED" = true ]; then
+  log "containerd's config changed: scheduling its restart and the daemon's start..."
+  RESTART='sleep 5; systemctl restart containerd; sleep 3; systemctl restart cloudhv-sandbox-daemon'
 else
-  echo "[cloudhv] WARNING: containerd may still be restarting"
+  log "containerd's config is unchanged: restarting only the daemon..."
+  RESTART='sleep 1; systemctl restart cloudhv-sandbox-daemon'
 fi
-
-if chroot "$HOST" systemctl is-active --quiet cloudhv-sandbox-daemon; then
-  echo "[cloudhv] sandbox daemon running"
+RESTART_UNIT="cloudhv-install-restart-$(date +%s)"
+if host systemd-run --no-block --collect --unit="$RESTART_UNIT" sh -c "$RESTART" >/dev/null 2>&1; then
+  # wait for the restart itself to be over, then check the result below
+  for _ in $(seq 1 60); do
+    host systemctl is-active --quiet "$RESTART_UNIT.service" || break
+    sleep 1
+  done
 else
-  echo "[cloudhv] WARNING: sandbox daemon may still be starting (pool init takes a few seconds)"
+  host sh -c "nohup sh -c '$RESTART' >/dev/null 2>&1 &"
+  sleep 15
 fi
 
-echo "[cloudhv] Installation complete on $(cat $HOST/etc/hostname)"
-echo "[cloudhv] Rootfs delivery: erofs layer passthrough"
-echo "[cloudhv] Daemon: /run/cloudhv/daemon.sock"
-
-# Keep running so the DaemonSet stays healthy
-echo "[cloudhv] Installer idle. Shim + daemon active."
-exec sleep infinity
+# Wait for them (up to 2 minutes); failing here shows in the pod (the init container is retried).
+for _ in $(seq 1 60); do
+  if host systemctl is-active --quiet containerd \
+     && host systemctl is-active --quiet cloudhv-sandbox-daemon \
+     && host test -S /run/cloudhv/daemon.sock; then
+    log "containerd and the sandbox daemon are running"
+    log "Installation complete on $(cat "$HOST/etc/hostname")"
+    log "Daemon socket: /run/cloudhv/daemon.sock"
+    exit 0
+  fi
+  sleep 2
+done
+die "containerd or the sandbox daemon is not running after 2 minutes (see: journalctl -u cloudhv-sandbox-daemon)"

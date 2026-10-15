@@ -10,9 +10,6 @@ set -euo pipefail
 scriptdir="$(cd "$(dirname "$0")"; pwd)"
 source "${scriptdir}/util.inc"
 
-CNI_VERSION="${CNI_VERSION:-v1.9.1}"
-CH_VERSION="${CH_VERSION:-v51.1}"
-
 # Runs inside the container
 build() {
   local host_user_group="$1"
@@ -48,18 +45,27 @@ build() {
   if [ "${cni_arch}" = "x86-64" ] ; then
     cni_arch="amd64"
   fi
-  wget \
-    "https://github.com/containernetworking/plugins/releases/download/${CNI_VERSION}/cni-plugins-linux-${cni_arch}-${CNI_VERSION}.tgz"
-  tar -C root/usr/libexec/cni -xzf "cni-plugins-linux-${cni_arch}-${CNI_VERSION}.tgz"
+  cni_tgz="cni-plugins-linux-${cni_arch}-${CNI_VERSION}.tgz"
+  download_verified \
+    "https://github.com/containernetworking/plugins/releases/download/${CNI_VERSION}/${cni_tgz}" "${cni_tgz}" "${cni_tgz}"
+  tar -C root/usr/libexec/cni -xzf "${cni_tgz}"
 
   # Cloud hypervisor
   local ch_sufx=""
   if [ "${arch}" = "arm64" ] ; then
     ch_sufx="-aarch64"
   fi
-  wget "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CH_VERSION}/cloud-hypervisor-static${ch_sufx}" \
-    -O root/usr/bin/cloud-hypervisor
+  download_verified \
+    "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/${CH_VERSION}/cloud-hypervisor-static${ch_sufx}" \
+    root/usr/bin/cloud-hypervisor "cloud-hypervisor-${CH_VERSION}-static${ch_sufx}"
   chmod 755 root/usr/bin/cloud-hypervisor
+
+  # The daemon's console on the guest: the serial port of the architecture (daemon.json has a placeholder).
+  local console="console=ttyS0"
+  if [ "${arch}" = "arm64" ] ; then
+    console="console=ttyAMA0"
+  fi
+  sed -i "s/\${KERNEL_CONSOLE}/${console}/" root/usr/share/cloudhv/daemon.json
 
   mkfs.erofs --all-root --exclude-regex '.*\.gitkeep' containerd-cloudhypervisor.raw root
   cp containerd-cloudhypervisor.raw /host

@@ -28,7 +28,16 @@ build() {
   cp /host/cloudhv-agent .
 
   ./build-rootfs.sh cloudhv-agent
-  
+
+  # build-rootfs.sh downloads crun itself. Check what it installed against checksums.txt, so a changed upstream file fails the
+  # build here (this check can go once build-rootfs.sh uses download_verified: docs/supply-chain.md).
+  case "$(uname -m)" in
+    x86_64)  crun_arch="amd64" ;;
+    aarch64) crun_arch="arm64" ;;
+    *) echo "ERROR: unsupported architecture $(uname -m)"; exit 1 ;;
+  esac
+  verify_sha256 rootfs-base/bin/crun "crun-${CRUN_VERSION}-linux-${crun_arch}-disable-systemd"
+
   cp rootfs.erofs /host/
   chown "$host_user_group" /host/rootfs.erofs
 }

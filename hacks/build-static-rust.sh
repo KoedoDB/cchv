@@ -21,6 +21,7 @@ build() {
   shift
 
   echo -e "\n############  Installing build prerequisites ############\n"
+  # Package versions are those of the pinned Alpine release's repository (signed index); they are not pinned one by one.
   apk add --no-cache \
     lld \
     protoc \
@@ -49,7 +50,7 @@ build() {
     ( 
       set -euo pipefail
       cd "$subdir"
-      cargo build --release -p "${component}"
+      cargo build --release --locked -p "${component}"
       # target binaries might not be named exactly like components, so we're fuzzy here
       for a in "$(find "target/${target}/release" -maxdepth 1 -name "${component}*" -type f -executable)"; do
         cp "$a" /host/

@@ -16,7 +16,16 @@ Scripts are meant to be called from the repository root, and should be invoked w
     See [main readme](../README.md#test-your-builds-locally-in-a-flatcar-vm) for usage instructions.
 * `hacks/test-sysext.sh` - Will boot a Flatcar VM with the sysext in the repo root, run `/usr/share/cloudhv/demo/demo.sh`, and exit with the demo's exit code.
   - needs `containerd-cloudhypervisor.raw` present in the repo root.
-  - will clone the [sysext bakery](https://github.com/flatcar/sysext-bakery/) repo locally and use `bakery.sh boot` to run the test.
+  - will clone the [sysext bakery](https://github.com/flatcar/sysext-bakery/) repo locally (at the commit pinned in `versions.env`) and use `bakery.sh boot` to run the test. The Flatcar image the bakery downloads is not checked by us.
+
+## Pinned inputs
+
+* `hacks/versions.env` - every external version in one place: the build container image (by digest), Cloud Hypervisor, CNI plugins, erofs-utils, the guest kernel (an exact version), crun, the sysext bakery.
+* `hacks/checksums.txt` - SHA-256 of every downloaded file. A download that is not listed, or does not match, fails the build.
+* `hacks/verify-download.sh` - `download_verified URL DEST NAME`, to source from build scripts.
+* `hacks/check-upstream.sh` - re-checks the pins against what the upstream projects publish. See [docs/supply-chain.md](../docs/supply-chain.md).
+
+The build containers get no extra privileges: only the capabilities `apk add` and the final `chown` need, `no-new-privileges`, and an empty tmpfs over the checkout's `.git`.
 
 ## Building for different architectures
 

@@ -7,8 +7,6 @@
 #   hacks/build-guest-kernel.sh [--arch <arch>]
 # arch can be x86-64 or arm64.
 
-KERNEL_SERIES="${KERNEL_SERIES:-6.18}"
-
 set -euo pipefail
 scriptdir="$(cd "$(dirname "$0")"; pwd)"
 source "${scriptdir}/util.inc"
@@ -20,7 +18,7 @@ build() {
   
   echo -e "\n############  Installing build prerequisites ############\n"
   apk add --no-cache \
-      build-base linux-headers ncurses-dev bc elfutils-dev openssl-dev flex bison gawk diffutils jq curl perl
+      build-base linux-headers ncurses-dev bc elfutils-dev openssl-dev flex bison gawk diffutils wget perl
 
   echo -e "\n############  Commencing Kernel Build ############\n"
   mkdir -p /opt/build-kernel
@@ -28,7 +26,15 @@ build() {
 
   cp -a /host/* .
   cd guest/kernel
-  ./build-kernel.sh "$(latest_kernel_release "${KERNEL_SERIES}")" $@
+
+  # An exact kernel version (versions.env), downloaded here and checked against checksums.txt. guest/kernel/build-kernel.sh only
+  # downloads the source when linux-<version>/ is missing, so unpacking it first means it never fetches an unchecked tarball.
+  kernel_tar="linux-${KERNEL_VERSION}.tar.xz"
+  download_verified "https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_VERSION%%.*}.x/${kernel_tar}" "${kernel_tar}" "${kernel_tar}"
+  tar xf "${kernel_tar}"
+  rm -f "${kernel_tar}"
+
+  ./build-kernel.sh "${KERNEL_VERSION}" $@
   cp vmlinux /host/
   cp .config /host/vmlinux.kconfig
   chown "$host_user_group" /host/vmlinux /host/vmlinux.kconfig

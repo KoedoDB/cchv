@@ -39,7 +39,12 @@ fi
 
 echo "Fetching bakery for Flatcar VM automation"
 if [[ ! -d sysext-bakery ]]; then 
-  git clone --depth 1 https://github.com/flatcar/sysext-bakery.git
+  # Pinned to a commit (versions.env), not the head of main: the bakery's script downloads and boots a Flatcar image.
+  . "$(dirname "$0")/versions.env"
+  git init --quiet sysext-bakery
+  git -C sysext-bakery fetch --quiet --depth 1 https://github.com/flatcar/sysext-bakery.git "${SYSEXT_BAKERY_COMMIT}"
+  git -C sysext-bakery checkout --quiet FETCH_HEAD
+  test "$(git -C sysext-bakery rev-parse HEAD)" = "${SYSEXT_BAKERY_COMMIT}"
 fi
 cp containerd-cloudhypervisor.raw sysext-bakery
 cd sysext-bakery

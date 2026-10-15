@@ -9,6 +9,13 @@ bash -n installer/install.sh || { echo "FAIL: syntax error in install.sh"; exit 
 PASS=0
 FAIL=0
 
+# The awk program that removes the cloudhv runtime section is taken from install.sh itself, so that this test
+# cannot drift from what the installer runs.
+AWK_PROG="$(sed -n "/^awk '\$/,/^' \"\$CONTAINERD_CONFIG\"/p" installer/install.sh | sed '1d;$d')"
+if [ -z "$AWK_PROG" ]; then
+  echo "FAIL: could not extract the awk program from install.sh"; exit 1
+fi
+
 assert_contains() {
   local desc="$1" needle="$2" haystack="$3"
   if printf '%s\n' "$haystack" | grep -Fq "$needle"; then
@@ -42,11 +49,7 @@ INPUT='[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.kata]
   runtime_type = "io.containerd.kata.v2"'
 
-RESULT=$(printf '%s\n' "$INPUT" | awk '
-  /^\[.*\.runtimes\.cloudhv/ { skip=1; next }
-  skip && /^\[/ && !/cloudhv/ { skip=0 }
-  !skip { print }
-')
+RESULT=$(printf '%s\n' "$INPUT" | awk "$AWK_PROG")
 
 assert_contains "runc preserved" "runtimes.runc" "$RESULT"
 assert_contains "kata preserved" "runtimes.kata" "$RESULT"
@@ -75,14 +78,39 @@ INPUT2="[plugins.'io.containerd.grpc.v1.cri'.containerd.runtimes.cloudhv]
 [plugins.'io.containerd.grpc.v1.cri'.containerd.runtimes.runc]
   runtime_type = 'io.containerd.runc.v2'"
 
-RESULT2=$(printf '%s\n' "$INPUT2" | awk '
-  /^\[.*\.runtimes\.cloudhv/ { skip=1; next }
-  skip && /^\[/ && !/cloudhv/ { skip=0 }
-  !skip { print }
-')
+RESULT2=$(printf '%s\n' "$INPUT2" | awk "$AWK_PROG")
 
 assert_not_contains "single-quote cloudhv removed" "runtimes.cloudhv" "$RESULT2"
 assert_contains "single-quote runc preserved" "runtimes.runc" "$RESULT2"
+
+# --- Test 4: running the installer's edit twice gives the same file (no growth, no duplicate sections) ---
+echo ""
+echo "=== Test 4: the config edit is idempotent ==="
+BASE='[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+  runtime_type = "io.containerd.runc.v2"
+
+[plugins."io.containerd.grpc.v1.cri".cni]
+  bin_dir = "/opt/cni/bin"'
+add_runtime() {
+  printf '%s\n' "$1" | awk "$AWK_PROG"
+  echo ""
+  echo "# Cloud Hypervisor VM-isolated runtime"
+  echo '[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.cloudhv]'
+  echo '  runtime_type = "io.containerd.cloudhv.v1"'
+}
+ONCE="$(add_runtime "$BASE")"
+TWICE="$(add_runtime "$ONCE")"
+THRICE="$(add_runtime "$TWICE")"
+if [ "$ONCE" = "$TWICE" ] && [ "$TWICE" = "$THRICE" ]; then
+  echo "  ✅ same file after 1, 2 and 3 runs"
+  PASS=$((PASS + 1))
+else
+  echo "  ❌ the file changes between runs"
+  FAIL=$((FAIL + 1))
+fi
+assert_contains "cni section preserved" 'cni' "$TWICE"
+COUNT="$(printf '%s\n' "$THRICE" | grep -c 'runtimes.cloudhv')"
+if [ "$COUNT" = 1 ]; then echo "  ✅ one cloudhv section"; PASS=$((PASS + 1)); else echo "  ❌ $COUNT cloudhv sections"; FAIL=$((FAIL + 1)); fi
 
 # --- Results ---
 echo ""

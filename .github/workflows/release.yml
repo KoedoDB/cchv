@@ -6,21 +6,21 @@ on:
       - "v[0-9]+.[0-9]+.[0-9]+"
       - "v[0-9]+.[0-9]+.[0-9]+-*"
 
-permissions:
-  contents: write
-  packages: write
+# No job gets a token it does not name. The jobs that run build code (build-everything: every crate's build.rs, the kernel's
+# build system) can only read; only the last job can write, and it runs no code from the checkout.
+permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/cloudhv-installer
-  CH_VERSION: "v44.0"
-  KERNEL_SERIES: "6.18"
+  # Versions of everything the build downloads are in hacks/versions.env (checksums in hacks/checksums.txt).
 
 jobs:
   build-everything:
     name: Build Guest and Host Binaries, Guest root, and sysext for (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
     strategy:
       matrix:
         include:
@@ -29,7 +29,9 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: aarch64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Build complete Guest (kernel, agent, and root FS)
         run: |
@@ -44,7 +46,7 @@ jobs:
           bash hacks/build-sysext.sh
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: build-${{ matrix.arch }}
           path: |
@@ -60,17 +62,25 @@ jobs:
     name: Build Installer Image
     runs-on: ubuntu-latest
     needs: [build-everything]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write   # keyless signing of the image (cosign)
+    outputs:
+      digest: ${{ steps.manifest.outputs.digest }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Download build artifacts (arm64)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: build-aarch64
           path: /tmp/artifacts/arm64
 
       - name: Download build artifacts (amd64)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: build-x86_64
           path: /tmp/artifacts/amd64
@@ -106,25 +116,28 @@ jobs:
           chmod +x /tmp/image-root-arm64/opt/cloudhv/install.sh
           ls -lh /tmp/image-root-arm64/opt/cloudhv/
 
+      - name: Name of the image (GHCR names are lower case)
+        run: echo "IMAGE_NAME=${GITHUB_REPOSITORY_OWNER,,}/cloudhv-installer" >> "$GITHUB_ENV"
+
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up QEMU (for multi-arch builds)
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Extract version from tag
         id: version
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push installer image (amd64)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: /tmp/image-root-amd64
           file: installer/Dockerfile
@@ -136,7 +149,7 @@ jobs:
             org.opencontainers.image.version=${{ steps.version.outputs.VERSION }}
 
       - name: Build and push installer image (arm64)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: /tmp/image-root-arm64
           file: installer/Dockerfile
@@ -147,31 +160,51 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.version=${{ steps.version.outputs.VERSION }}
 
+      # No ":latest": a tag that moves must not be what a node's privileged installer runs. The digest is what is signed and
+      # what the Helm chart and the release notes point to.
       - name: Create and push multi-arch manifest
+        id: manifest
         run: |
-          docker buildx imagetools create \
-            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }} \
-            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}-amd64 \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}-arm64
+          REF="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}"
+          docker buildx imagetools create -t "$REF" "$REF-amd64" "$REF-arm64"
+          DIGEST="$(docker buildx imagetools inspect "$REF" --format '{{json .Manifest}}' | jq -r .digest)"
+          case "$DIGEST" in sha256:????????????????????????????????????????????????????????????????) ;; *) echo "bad digest: $DIGEST"; exit 1 ;; esac
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Installer image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@$DIGEST"
+
+      # Keyless signature (GitHub's OIDC identity of this workflow), stored next to the image in GHCR.
+      # Verify with: cosign verify --certificate-identity-regexp '^https://github.com/<owner>/<repo>/' \
+      #                --certificate-oidc-issuer https://token.actions.githubusercontent.com <image>@<digest>
+      # REVIEW: not exercised yet; it needs a real tag run to prove.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Sign the installer image
+        run: |
+          cosign sign --yes "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.manifest.outputs.digest }}"
 
   release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
     needs: [build-everything,build-installer-image]
+    # The only job that writes. It runs no build code: the checkout is only read by shell commands written in this file.
+    permissions:
+      contents: write
+      packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Download build artifacts (arm64)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: build-aarch64
           path: /tmp/artifacts/arm64
 
       - name: Download build artifacts (amd64)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: build-x86_64
           path: /tmp/artifacts/amd64
@@ -212,20 +245,35 @@ jobs:
           cd /tmp/release && sha256sum * > checksums-sha256.txt
 
       - name: Package and push Helm chart to GHCR
+        env:
+          INSTALLER_DIGEST: ${{ needs.build-installer-image.outputs.digest }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          OWNER_LC="${GITHUB_REPOSITORY_OWNER,,}"
           sed -i "s/^version:.*/version: $VERSION/" charts/cloudhv-installer/Chart.yaml
           sed -i "s/^appVersion:.*/appVersion: \"$VERSION\"/" charts/cloudhv-installer/Chart.yaml
+          # The chart runs the image of this release, by digest.
+          # (only inside the `image:` block; `idleImage:` below it has keys of the same names)
+          sed -i -e '/^image:/,/^idleImage:/{' \
+                 -e "s|^  repository: .*|  repository: ghcr.io/${OWNER_LC}/cloudhv-installer|" \
+                 -e "s|^  tag: .*|  tag: \"${GITHUB_REF_NAME}\"|" \
+                 -e "s|^  digest: .*|  digest: \"${INSTALLER_DIGEST}\"|" \
+                 -e '}' charts/cloudhv-installer/values.yaml
+          # the chart must now render, with the digest of this release and the pause image untouched
+          helm template check charts/cloudhv-installer | grep -F "cloudhv-installer:${GITHUB_REF_NAME}@${INSTALLER_DIGEST}"
+          helm template check charts/cloudhv-installer | grep -F "registry.k8s.io/pause"
 
           # Package the chart
           helm package charts/cloudhv-installer --destination /tmp/release
 
           # Push to GHCR as an OCI artifact
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
-          helm push /tmp/release/cloudhv-installer-$VERSION.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
+          helm push /tmp/release/cloudhv-installer-$VERSION.tgz oci://${{ env.REGISTRY }}/${OWNER_LC}/charts
 
       - name: Generate release notes
         id: notes
+        env:
+          INSTALLER_DIGEST: ${{ needs.build-installer-image.outputs.digest }}
         run: |
           # Find previous tag
           PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+' | head -2 | tail -1)
@@ -280,7 +328,7 @@ jobs:
             - path: /etc/extensions/containerd-cloudhypervisor.raw
               mode: 0644
               contents:
-                source: https://github.com/devigned/containerd-cloudhypervisor/releases/download/TAG/containerd-cloudhypervisor-TAG-x86-64.raw
+                source: https://github.com/@@REPO@@/releases/download/TAG/containerd-cloudhypervisor-TAG-x86-64.raw
           ```
           ### Helm Chart (Kubernetes)
 
@@ -288,7 +336,7 @@ jobs:
 
           ```bash
           helm install cloudhv-installer \
-            oci://ghcr.io/devigned/charts/cloudhv-installer \
+            oci://ghcr.io/@@OWNER@@/charts/cloudhv-installer \
             --version TAG \
             --namespace kube-system
           ```
@@ -296,8 +344,10 @@ jobs:
           ### Installer Image
 
           ```
-          ghcr.io/devigned/cloudhv-installer:TAG
+          ghcr.io/@@OWNER@@/cloudhv-installer:TAG@@@DIGEST@@
           ```
+
+          Always use the digest: the tag alone is not what the chart deploys. The image is signed (keyless, cosign).
 
           ### Manual Binaries (bare Linux)
 
@@ -310,11 +360,14 @@ jobs:
           ```
           INSTALL
 
-          # Replace TAG placeholder
-          sed -i "s/TAG/${GITHUB_REF_NAME}/g" /tmp/release-notes.md
+          # Replace the placeholders
+          sed -i -e "s|@@REPO@@|${GITHUB_REPOSITORY}|g" \
+                 -e "s|@@OWNER@@|${GITHUB_REPOSITORY_OWNER,,}|g" \
+                 -e "s|@@DIGEST@@|${INSTALLER_DIGEST}|g" \
+                 -e "s/TAG/${GITHUB_REF_NAME}/g" /tmp/release-notes.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           body_path: /tmp/release-notes.md
           files: /tmp/release/*
