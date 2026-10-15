@@ -8,6 +8,7 @@ mod api;
 mod config;
 mod netns;
 mod pool;
+mod rootless;
 pub mod shadow;
 mod vm_lifecycle;
 
@@ -32,6 +33,13 @@ async fn main() -> Result<()> {
     info!("config: {}", config_path.display());
 
     let config = config::DaemonConfig::load(&config_path)?;
+    rootless::init(&config)?;
+    // Snapshots made before rootless was turned on belong to root alone: hand them to the group the VMs run as.
+    for dir in [config.base_snapshot_dir(), config.snapshot_cache_dir()] {
+        if dir.exists() {
+            rootless::share_with_vms(&dir)?;
+        }
+    }
     info!(
         "pool_size: {}, memory: {}MiB, vcpus: {}",
         config.pool_size, config.default_memory_mb, config.default_vcpus

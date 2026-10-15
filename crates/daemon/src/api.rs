@@ -495,6 +495,10 @@ async fn run_container_in_vm(
         "image_type": "Raw",
         "id": disk_id,
     });
+    if let Some(state_dir) = params.api_socket.parent() {
+        crate::rootless::allow_read(std::path::Path::new(params.erofs_path), state_dir)
+            .context("let the VM read the rootfs")?;
+    }
     vm_lifecycle::api_request_with_body(
         params.api_socket,
         "PUT",
@@ -785,28 +789,47 @@ async fn setup_vm_networking(
     let tap_name = tap_name_for(vm_id);
 
     // Phase 1: probe pod netns for veth info, create TAP in host netns
-    let info = {
+    let hand_over = crate::rootless::enabled();
+    let (info, tap_fd) = {
         let ns = netns.to_string();
         let tap = tap_name.clone();
-        tokio::task::spawn_blocking(move || crate::netns::prepare_tap(&ns, &tap))
+        tokio::task::spawn_blocking(move || crate::netns::prepare_tap(&ns, &tap, hand_over))
             .await
             .context("prepare_tap panicked")?
             .context("prepare_tap")?
     };
 
-    // Phase 2: hot-plug TAP into CH (CH can see it in host netns)
-    let net_json = serde_json::json!({
-        "tap": &tap_name,
-        "mac": &info.mac,
-    });
-    crate::vm_lifecycle::api_request_with_body(
-        api_socket,
-        "PUT",
-        "/api/v1/vm.add-net",
-        &net_json.to_string(),
-    )
-    .await
-    .context("hot-plug TAP")?;
+    // Phase 2: hot-plug TAP into CH. As root, CH opens it by name (it can see it in the host netns). Rootless, CH may not enable the
+    // device (that needs CAP_NET_ADMIN, which would let it change the host's network), so the descriptor is handed to it over the API
+    // socket (SCM_RIGHTS) and the device is brought up later, in the pod's namespace, by the daemon.
+    match tap_fd {
+        Some(fd) => {
+            let net_json = serde_json::json!({ "mac": &info.mac });
+            crate::vm_lifecycle::api_request_with_fds(
+                api_socket,
+                "PUT",
+                "/api/v1/vm.add-net",
+                &net_json.to_string(),
+                &[std::os::unix::io::AsRawFd::as_raw_fd(&fd)],
+            )
+            .await
+            .context("hot-plug TAP (descriptor)")?;
+        }
+        None => {
+            let net_json = serde_json::json!({
+                "tap": &tap_name,
+                "mac": &info.mac,
+            });
+            crate::vm_lifecycle::api_request_with_body(
+                api_socket,
+                "PUT",
+                "/api/v1/vm.add-net",
+                &net_json.to_string(),
+            )
+            .await
+            .context("hot-plug TAP")?;
+        }
+    }
     info!("TAP {} hot-plugged into VM {}", tap_name, vm_id);
 
     // Phase 3: move TAP to pod netns, set up TC redirects

@@ -56,12 +56,33 @@ pub struct DaemonConfig {
     #[serde(default = "default_warmup_secs")]
     pub warmup_duration_secs: u64,
 
+    /// Run each Cloud Hypervisor as a user of its own, not root (see rootless.rs). Off by default.
+    #[serde(default)]
+    pub ch_rootless: bool,
+
+    /// First user ID given to VMs when `ch_rootless` is on; `ch_uid_count` IDs from here belong to the daemon.
+    #[serde(default = "default_ch_uid_base")]
+    pub ch_uid_base: u32,
+
+    #[serde(default = "default_ch_uid_count")]
+    pub ch_uid_count: u32,
+
+    /// Group Cloud Hypervisor runs as; the group of /dev/kvm when not set.
+    #[serde(default)]
+    pub ch_gid: Option<u32>,
+
     /// Maximum number of cached workload snapshots.
     /// Oldest (LRU) snapshots are evicted when this limit is reached.
     #[serde(default = "default_max_snapshots")]
     pub max_snapshots: usize,
 }
 
+fn default_ch_uid_base() -> u32 {
+    200_000
+}
+fn default_ch_uid_count() -> u32 {
+    60_000
+}
 fn default_pool_size() -> usize {
     3
 }

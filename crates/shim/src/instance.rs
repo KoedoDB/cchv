@@ -775,6 +775,14 @@ fn prepare_erofs(rootfs_path: &std::path::Path, cache_key: &str) -> Result<PathB
         return Err(Error::Any(anyhow::anyhow!("mkfs.erofs failed: {stderr}")));
     }
 
+    // The image is the customer's: root only. A rootless Cloud Hypervisor is given read access to the images of its own VM by the
+    // daemon (an ACL), and to no other.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| Error::Any(anyhow::anyhow!("chmod erofs: {e}")))?;
+    }
+
     std::fs::rename(&tmp_path, &cache_path)
         .map_err(|e| Error::Any(anyhow::anyhow!("rename erofs: {e}")))?;
 

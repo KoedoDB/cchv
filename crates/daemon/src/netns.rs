@@ -21,7 +21,14 @@ pub struct PodNetInfo {
 
 /// Phase 1: Discover veth info from pod netns, then create a persistent TAP
 /// in the host (daemon) namespace. Must be called from a blocking context.
-pub fn prepare_tap(netns_path: &str, tap_name: &str) -> Result<PodNetInfo> {
+///
+/// With `hand_over` (rootless Cloud Hypervisor, which cannot open and enable the device itself) the descriptor is returned too, to be
+/// passed to Cloud Hypervisor.
+pub fn prepare_tap(
+    netns_path: &str,
+    tap_name: &str,
+    hand_over: bool,
+) -> Result<(PodNetInfo, Option<OwnedFd>)> {
     // Discover veth info (IP, MAC, gateway) from pod netns
     let info = in_netns(netns_path, || {
         let nl = Netlink::open().context("netlink")?;
@@ -66,9 +73,9 @@ pub fn prepare_tap(netns_path: &str, tap_name: &str) -> Result<PodNetInfo> {
         let nl = Netlink::open().context("netlink")?;
         let _ = nl.del_link(tap_name);
     }
-    create_tap(tap_name).context("create TAP")?;
+    let fd = create_tap(tap_name, hand_over).context("create TAP")?;
 
-    Ok(info)
+    Ok((info, if hand_over { Some(fd) } else { None }))
 }
 
 /// Phase 3: Move TAP from host netns to pod netns and set up TC redirects.

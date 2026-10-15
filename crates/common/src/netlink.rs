@@ -727,8 +727,11 @@ pub fn find_ipv4_nla(data: &[u8], target: u16) -> Option<Ipv4Addr> {
     None
 }
 
-/// Create a persistent TAP device in the current network namespace.
-pub fn create_tap(name: &str) -> Result<()> {
+/// Create a persistent TAP device in the current network namespace and return the descriptor it was created with.
+///
+/// With `vnet_hdr` the device has the virtio-net header, which is what a Cloud Hypervisor that is handed the descriptor (instead of
+/// opening the device by name, which sets the flag itself) needs.
+pub fn create_tap(name: &str, vnet_hdr: bool) -> Result<OwnedFd> {
     let c = std::ffi::CString::new("/dev/net/tun")?;
     let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
     if fd < 0 {
@@ -738,13 +741,14 @@ pub fn create_tap(name: &str) -> Result<()> {
     let mut ifr = [0u8; 40];
     let b = name.as_bytes();
     ifr[..b.len().min(15)].copy_from_slice(&b[..b.len().min(15)]);
-    // IFF_TAP | IFF_NO_PI
-    ifr[16..18].copy_from_slice(&(0x0002i16 | 0x1000i16).to_ne_bytes());
+    // IFF_TAP | IFF_NO_PI (| IFF_VNET_HDR)
+    let flags = 0x0002i16 | 0x1000i16 | if vnet_hdr { 0x4000i16 } else { 0 };
+    ifr[16..18].copy_from_slice(&flags.to_ne_bytes());
     if unsafe { libc::ioctl(fd.as_raw_fd(), 0x400454ca as _, ifr.as_ptr()) } < 0 {
         return Err(std::io::Error::last_os_error()).context("TUNSETIFF");
     }
     if unsafe { libc::ioctl(fd.as_raw_fd(), 0x400454cb as _, 1i32) } < 0 {
         return Err(std::io::Error::last_os_error()).context("TUNSETPERSIST");
     }
-    Ok(())
+    Ok(fd)
 }

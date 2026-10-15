@@ -685,3 +685,28 @@ Protocol:
 | Daemon and shim version mismatch | ttrpc API versioned; daemon rejects incompatible clients |
 | Multiple images trigger shadow VMs simultaneously | Daemon caps concurrent shadows (e.g. max 2) to avoid resource exhaustion |
 | AcquireSandbox with vcpus/memory that don't match pool VMs | Daemon bypasses pool, creates custom VM synchronously |
+
+## Rootless Cloud Hypervisor
+
+Cloud Hypervisor is what a guest attacks when it escapes the VM, so it need not be root. With `"ch_rootless": true` in the daemon's
+config the daemon (still root: it makes TAP devices, enters network namespaces and sets up tc) starts every Cloud Hypervisor as a
+user that exists for that VM alone (`ch_uid_base`, `ch_uid_count`; default 200000, 60000 of them), in the group of `/dev/kvm`
+(`ch_gid` to say another), with no capabilities, `no_new_privs`, and Cloud Hypervisor's own seccomp filter. Off by default.
+
+What that takes (all in `crates/daemon/src/rootless.rs`):
+
+- the VM's state directory and console log belong to its user (0700);
+- the **TAP device is not opened by Cloud Hypervisor**: enabling a TAP needs `CAP_NET_ADMIN`, which would let it change the host's
+  network. The daemon opens the device (with the virtio-net header) and passes the descriptor over the API socket (SCM_RIGHTS).
+  Without `ch_rootless` the device is opened by name, as before;
+- the container's **erofs image** is root-only (0600, set by the shim); a VM is given read access with a POSIX ACL entry for its user
+  and nobody else's, taken back when the VM is destroyed (the daemon sets the ACL attribute itself; no `setfacl` is needed). The
+  images are the customers', and one VM must not read another's;
+- a snapshot is written by the VM that takes it, then handed to the VMs' group (0640 root:gid; also at start for snapshots made earlier);
+- the kernel (`kernel_path`) and the base rootfs (`rootfs_path`) must be world-readable; the daemon refuses to start otherwise.
+
+Restore with **`OnDemand`** (userfaultfd) needs `vm.unprivileged_userfaultfd=1` for a process without `CAP_SYS_PTRACE`; the default `Copy`
+mode does not. A failed restore now stops the Cloud Hypervisor process it started and removes its directory.
+
+Checked: each Cloud Hypervisor runs as its own uid with `CapEff: 0`, `NoNewPrivs: 1`, `Seccomp: 2`; pods get network (DNS, Services,
+the internet), volumes, hot-plugged rootfs, warm-snapshot restore; ACL entries are added with the pod and gone after it.

@@ -317,32 +317,48 @@ impl Pool {
 
         // 1. Prepare snapshot: patch CID, vsock socket, serial console
         let vsock_socket = state_dir.join("vsock.sock");
-        let snapshot_dir =
-            vm_lifecycle::prepare_snapshot(&base_dir, &state_dir, cid, &vsock_socket)?;
+        let snapshot_dir = match vm_lifecycle::prepare_snapshot(&base_dir, &state_dir, cid, &vsock_socket) {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&state_dir);
+                return Err(e);
+            }
+        };
         let t_prepare = t0.elapsed().as_millis();
 
         // 2. Spawn CH process
-        let ch_pid = vm_lifecycle::spawn_ch(&self.config, &state_dir).await?;
+        let ch_pid = match vm_lifecycle::spawn_ch(&self.config, &state_dir).await {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&state_dir);
+                return Err(e);
+            }
+        };
         let t_spawn = t0.elapsed().as_millis();
 
-        // 3. Wait for CH API socket
+        // 3-6. The VM is up when CH answers, the snapshot is restored and resumed, and the agent answers. If any step fails, the CH
+        // process (and, rootless, its user and ACLs) is stopped and the directory removed; it must not be left behind.
         let api_socket = state_dir.join("api.sock");
-        vm_lifecycle::wait_ch_ready(&api_socket).await?;
-        let t_ready = t0.elapsed().as_millis();
-
-        // 4. vm.restore
-        vm_lifecycle::restore_vm(&api_socket, &snapshot_dir).await?;
-        let t_restore = t0.elapsed().as_millis();
-
-        // 5. vm.resume
-        vm_lifecycle::resume_vm(&api_socket).await?;
-        let t_resume = t0.elapsed().as_millis();
-
-        // 6. Wait for agent
-        vm_lifecycle::wait_for_agent(&vsock_socket)
-            .await
-            .context("agent connect after restore")?;
-        let t_agent = t0.elapsed().as_millis();
+        let steps = async {
+            vm_lifecycle::wait_ch_ready(&api_socket).await?;
+            let t_ready = t0.elapsed().as_millis();
+            vm_lifecycle::restore_vm(&api_socket, &snapshot_dir).await?;
+            let t_restore = t0.elapsed().as_millis();
+            vm_lifecycle::resume_vm(&api_socket).await?;
+            let t_resume = t0.elapsed().as_millis();
+            vm_lifecycle::wait_for_agent(&vsock_socket)
+                .await
+                .context("agent connect after restore")?;
+            Ok::<_, anyhow::Error>((t_ready, t_restore, t_resume, t0.elapsed().as_millis()))
+        }
+        .await;
+        let (t_ready, t_restore, t_resume, t_agent) = match steps {
+            Ok(t) => t,
+            Err(e) => {
+                vm_lifecycle::shutdown_and_destroy(&api_socket, ch_pid, &state_dir).await;
+                return Err(e);
+            }
+        };
 
         info!(
             "TIMING restore_one {}: prepare={}ms spawn={}ms ch_ready={}ms restore={}ms resume={}ms agent={}ms total={}ms",
@@ -412,6 +428,7 @@ impl Pool {
                     continue;
                 }
             }
+            crate::rootless::release(&dir);
             let _ = std::fs::remove_dir_all(&dir);
         }
         stopped

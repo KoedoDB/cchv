@@ -190,6 +190,10 @@ impl SnapshotManager {
             "image_type": "Raw",
             "id": "ctr-rootfs",
         });
+        if let Some(state_dir) = api_socket.parent() {
+            crate::rootless::allow_read(Path::new(erofs_path), state_dir)
+                .context("let the shadow VM read the rootfs")?;
+        }
         vm_lifecycle::api_request_with_body(
             &api_socket,
             "PUT",
@@ -283,7 +287,8 @@ impl SnapshotManager {
             );
         }
 
-        // 7. Destroy the shadow VM
+        // 7. Destroy the shadow VM (it ran in a pool VM; the directory made for it above stays empty)
+        let _ = std::fs::remove_dir(&state_dir);
         self.pool.release(&pool_vm.vm_id).await?;
 
         info!(

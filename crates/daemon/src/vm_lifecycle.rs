@@ -59,6 +59,10 @@ pub async fn boot_vm_sized(
     let vsock_socket = state_dir.join("vsock.sock");
     let console_log = state_dir.join("console.log");
     std::fs::File::create(&console_log)?;
+    crate::rootless::give(&console_log, state_dir)?;
+    for (path, _, _) in extra_disks {
+        crate::rootless::allow_read(Path::new(path), state_dir)?;
+    }
 
     // Build VM config
     let mut disks = vec![serde_json::json!({
@@ -133,11 +137,32 @@ pub async fn spawn_ch(config: &DaemonConfig, state_dir: &Path) -> Result<u32> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 
+    // Rootless: a user for this VM alone, who owns the state directory (and console log, if it is there already).
+    let user = crate::rootless::alloc()?;
+    if let Some((uid, gid)) = user {
+        let setup = (|| -> Result<()> {
+            crate::rootless::record(state_dir, uid)?;
+            crate::rootless::give(state_dir, state_dir)?;
+            let console = state_dir.join("console.log");
+            if console.exists() {
+                crate::rootless::give(&console, state_dir)?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = setup {
+            crate::rootless::release(state_dir);
+            return Err(e);
+        }
+        // std clears the supplementary groups when it drops from root; the group is the one that may open /dev/kvm.
+        cmd.uid(uid).gid(gid);
+    }
+
     // Reset the signal mask before exec. The daemon's tokio runtime blocks
     // SIGTERM/SIGINT which CH inherits, preventing CH's signal handler from
     // receiving them. Clear the mask so CH can handle signals normally.
+    let rootless = user.is_some();
     unsafe {
-        cmd.pre_exec(|| {
+        cmd.pre_exec(move || {
             let mut set: libc::sigset_t = std::mem::zeroed();
             if libc::sigemptyset(&mut set) != 0 {
                 return Err(std::io::Error::last_os_error());
@@ -145,11 +170,20 @@ pub async fn spawn_ch(config: &DaemonConfig, state_dir: &Path) -> Result<u32> {
             if libc::sigprocmask(libc::SIG_SETMASK, &set, std::ptr::null_mut()) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
+            if rootless && libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
             Ok(())
         });
     }
 
-    let mut child = cmd.spawn().context("spawn cloud-hypervisor")?;
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            crate::rootless::release(state_dir);
+            return Err(e).context("spawn cloud-hypervisor");
+        }
+    };
 
     let pid = child.id().context("get CH pid")?;
     // Spawn a background task to reap the child when it exits, avoiding
@@ -225,16 +259,22 @@ pub async fn resume_vm(api_socket: &Path) -> Result<()> {
 
 /// Take a snapshot of a paused VM.
 pub async fn snapshot_vm(api_socket: &Path, dest_dir: &Path) -> Result<()> {
+    // Rootless: the VM that takes the snapshot writes it, so it owns the directory meanwhile; afterwards the group of all VMs reads it.
+    if let Some(state_dir) = api_socket.parent() {
+        crate::rootless::give(dest_dir, state_dir)?;
+    }
     let body = serde_json::json!({
         "destination_url": format!("file://{}", dest_dir.display()),
     });
-    api_request(
+    let result = api_request(
         api_socket,
         "PUT",
         "/api/v1/vm.snapshot",
         Some(&body.to_string()),
     )
-    .await
+    .await;
+    crate::rootless::share_with_vms(dest_dir)?;
+    result
 }
 
 /// The memory restore mode of `vm.restore`: `OnDemand` (userfaultfd, lazy) or `Copy` (the snapshot is read into guest RAM before the
@@ -346,6 +386,7 @@ pub async fn shutdown_and_destroy(_api_socket: &Path, ch_pid: u32, state_dir: &P
                 ch_pid,
                 t0.elapsed().as_millis()
             );
+            crate::rootless::release(state_dir);
             let _ = std::fs::remove_dir_all(state_dir);
             return;
         }
@@ -363,6 +404,7 @@ pub async fn shutdown_and_destroy(_api_socket: &Path, ch_pid: u32, state_dir: &P
     }
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
+    crate::rootless::release(state_dir);
     let _ = std::fs::remove_dir_all(state_dir);
     info!("VM {} destroyed in {}ms", ch_pid, t0.elapsed().as_millis());
 }
@@ -426,6 +468,69 @@ pub async fn api_request_with_body(
     body: &str,
 ) -> Result<()> {
     api_request(socket_path, method, path, Some(body)).await
+}
+
+/// A request to the CH API that carries file descriptors (SCM_RIGHTS), which the API takes for devices backed by descriptors the caller
+/// opened (a TAP). The descriptors go with the first bytes of the request; the answer is read to its end.
+pub async fn api_request_with_fds(
+    socket_path: &Path,
+    method: &str,
+    path: &str,
+    body: &str,
+    fds: &[std::os::unix::io::RawFd],
+) -> Result<()> {
+    let socket_path = socket_path.to_path_buf();
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let fds = fds.to_vec();
+    let (method, path) = (method.to_string(), path.to_string());
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        use std::io::{Read, Write};
+        use std::os::unix::io::AsRawFd;
+        let mut stream = std::os::unix::net::UnixStream::connect(&socket_path)
+            .with_context(|| format!("connect {}", socket_path.display()))?;
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+        let bytes = request.as_bytes();
+
+        let fd_len = std::mem::size_of_val(fds.as_slice());
+        let space = unsafe { libc::CMSG_SPACE(fd_len as u32) } as usize;
+        let mut control = vec![0u8; space];
+        let mut iov = libc::iovec {
+            iov_base: bytes.as_ptr() as *mut libc::c_void,
+            iov_len: bytes.len(),
+        };
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control.as_mut_ptr() as *mut libc::c_void;
+        msg.msg_controllen = space as _;
+        unsafe {
+            let cmsg = libc::CMSG_FIRSTHDR(&msg);
+            (*cmsg).cmsg_level = libc::SOL_SOCKET;
+            (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+            (*cmsg).cmsg_len = libc::CMSG_LEN(fd_len as u32) as _;
+            std::ptr::copy_nonoverlapping(fds.as_ptr() as *const u8, libc::CMSG_DATA(cmsg), fd_len);
+        }
+        let sent = unsafe { libc::sendmsg(stream.as_raw_fd(), &msg, 0) };
+        if sent < 0 {
+            return Err(std::io::Error::last_os_error()).context("sendmsg");
+        }
+        stream.write_all(&bytes[sent as usize..])?;
+
+        let mut answer = Vec::new();
+        let _ = stream.read_to_end(&mut answer);
+        let text = String::from_utf8_lossy(&answer);
+        let status = text.split_whitespace().nth(1).unwrap_or("?");
+        if !status.starts_with('2') {
+            let body = text.split("\r\n\r\n").nth(1).unwrap_or("");
+            anyhow::bail!("CH API {method} {path}: {status} {body}");
+        }
+        Ok(())
+    })
+    .await
+    .context("api request with descriptors panicked")?
 }
 
 /// Connect to the guest agent via vsock and return ttrpc clients.
