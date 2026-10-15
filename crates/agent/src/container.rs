@@ -54,6 +54,54 @@ pub enum ContainerState {
 /// a container that prints without end would otherwise fill it. When the buffer is full the oldest bytes go (and are counted).
 pub const MAX_LOG_BUFFER: usize = 1024 * 1024;
 
+/// The part of an OCI `linux.resources` that means the same inside the guest: the memory limit, the CPU shares, quota and period, and the
+/// number of processes. A value that stands for "no limit" (huge) is left out. Returns None if nothing is left.
+pub fn sanitize_resources(resources: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    const NO_LIMIT: i64 = 1 << 60;
+    let r = resources?;
+    let mut out = serde_json::Map::new();
+
+    if let Some(limit) = r.pointer("/memory/limit").and_then(|v| v.as_i64()) {
+        if limit > 0 && limit < NO_LIMIT {
+            out.insert("memory".to_string(), serde_json::json!({ "limit": limit }));
+        }
+    }
+
+    let mut cpu = serde_json::Map::new();
+    if let Some(shares) = r.pointer("/cpu/shares").and_then(|v| v.as_u64()) {
+        if shares > 0 {
+            cpu.insert("shares".to_string(), serde_json::json!(shares));
+        }
+    }
+    let quota = r
+        .pointer("/cpu/quota")
+        .and_then(|v| v.as_i64())
+        .filter(|q| *q > 0);
+    let period = r
+        .pointer("/cpu/period")
+        .and_then(|v| v.as_u64())
+        .filter(|p| *p > 0);
+    if let (Some(quota), Some(period)) = (quota, period) {
+        cpu.insert("quota".to_string(), serde_json::json!(quota));
+        cpu.insert("period".to_string(), serde_json::json!(period));
+    }
+    if !cpu.is_empty() {
+        out.insert("cpu".to_string(), serde_json::Value::Object(cpu));
+    }
+
+    if let Some(pids) = r.pointer("/pids/limit").and_then(|v| v.as_i64()) {
+        if pids > 0 && pids < NO_LIMIT {
+            out.insert("pids".to_string(), serde_json::json!({ "limit": pids }));
+        }
+    }
+
+    if out.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(out))
+    }
+}
+
 /// Captured container output (buffered for streaming via RPC).
 #[derive(Debug, Default)]
 pub struct ContainerLogs {
@@ -71,12 +119,22 @@ pub struct ContainerLogs {
 impl ContainerLogs {
     /// Append output to stdout, dropping the oldest bytes if the buffer would pass MAX_LOG_BUFFER.
     pub fn push_stdout(&mut self, data: &[u8]) {
-        Self::push(&mut self.stdout, &mut self.stdout_base, &mut self.stdout_dropped, data);
+        Self::push(
+            &mut self.stdout,
+            &mut self.stdout_base,
+            &mut self.stdout_dropped,
+            data,
+        );
     }
 
     /// Append output to stderr (see push_stdout).
     pub fn push_stderr(&mut self, data: &[u8]) {
-        Self::push(&mut self.stderr, &mut self.stderr_base, &mut self.stderr_dropped, data);
+        Self::push(
+            &mut self.stderr,
+            &mut self.stderr_base,
+            &mut self.stderr_dropped,
+            data,
+        );
     }
 
     fn push(buf: &mut Vec<u8>, base: &mut u64, dropped: &mut u64, data: &[u8]) {
@@ -105,8 +163,10 @@ impl ContainerLogs {
 
     /// The new output of both streams since the given offsets, for the ReadLogs call (see proto/agent.proto).
     pub fn read(&mut self, stdout_offset: u64, stderr_offset: u64, max: usize) -> LogRead {
-        let (stdout, stdout_next) = Self::take(&mut self.stdout, &mut self.stdout_base, stdout_offset, max);
-        let (stderr, stderr_next) = Self::take(&mut self.stderr, &mut self.stderr_base, stderr_offset, max);
+        let (stdout, stdout_next) =
+            Self::take(&mut self.stdout, &mut self.stdout_base, stdout_offset, max);
+        let (stderr, stderr_next) =
+            Self::take(&mut self.stderr, &mut self.stderr_base, stderr_offset, max);
         let drained = self.stdout_base + self.stdout.len() as u64 <= stdout_next
             && self.stderr_base + self.stderr.len() as u64 <= stderr_next;
         LogRead {
@@ -222,7 +282,21 @@ impl ContainerManager {
                 obj.remove("cgroupsPath");
                 obj.remove("maskedPaths");
                 obj.remove("readonlyPaths");
+                // The limits of the container itself are kept, so that one container of a pod cannot take the memory and CPU of the
+                // others: the VM is as big as the whole pod, and without them the limit of each container was not enforced
+                // (a 100Mi container allocated 300 MB next to a 600Mi one). The host's own cgroup path, devices, cpusets and the
+                // rest do not exist in the guest and are dropped; the container gets a cgroup of its own at the root of the guest's cgroup2.
+                let kept = sanitize_resources(obj.get("resources"));
                 obj.remove("resources");
+                if let Some(resources) = kept {
+                    obj.insert("resources".to_string(), resources);
+                    if let Some(id) = bundle.file_name().and_then(|n| n.to_str()) {
+                        obj.insert(
+                            "cgroupsPath".to_string(),
+                            serde_json::json!(format!("/{id}")),
+                        );
+                    }
+                }
                 obj.remove("seccomp");
             }
         }
@@ -1071,6 +1145,54 @@ mod log_tests {
         assert_eq!(b.stdout, b"c");
         assert!(b.eof);
         let c = ContainerLogs::default().read(0, 0, 10);
-        assert!(!c.eof, "a running container with no output yet is not at its end");
+        assert!(
+            !c.eof,
+            "a running container with no output yet is not at its end"
+        );
+    }
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+
+    #[test]
+    fn the_memory_cpu_and_pids_limits_are_kept_and_the_host_side_parts_are_dropped() {
+        let host = serde_json::json!({
+            "devices": [{"allow": false, "access": "rwm"}],
+            "memory": {"limit": 104857600, "swap": 104857600, "disableOOMKiller": false},
+            "cpu": {"shares": 102, "quota": 50000, "period": 100000, "cpus": "0-7", "mems": "0"},
+            "pids": {"limit": 512},
+            "hugepageLimits": [{"pageSize": "2MB", "limit": 0}],
+            "blockIO": {"weight": 10}
+        });
+        let got = sanitize_resources(Some(&host)).expect("limits");
+        assert_eq!(
+            got,
+            serde_json::json!({
+                "memory": {"limit": 104857600},
+                "cpu": {"shares": 102, "quota": 50000, "period": 100000},
+                "pids": {"limit": 512}
+            })
+        );
+    }
+
+    #[test]
+    fn no_limit_means_no_resources_so_the_container_gets_no_cgroup_of_its_own() {
+        assert_eq!(sanitize_resources(None), None);
+        assert_eq!(sanitize_resources(Some(&serde_json::json!({}))), None);
+        // containerd leaves quota out and shares at its minimum for a container without a limit; a huge memory limit stands for none.
+        let none =
+            serde_json::json!({"memory": {"limit": 9223372036854771712i64}, "cpu": {"shares": 2}});
+        assert_eq!(
+            sanitize_resources(Some(&none)),
+            Some(serde_json::json!({"cpu": {"shares": 2}}))
+        );
+    }
+
+    #[test]
+    fn a_quota_without_a_period_is_not_passed_on() {
+        let half = serde_json::json!({"cpu": {"quota": 50000}});
+        assert_eq!(sanitize_resources(Some(&half)), None);
     }
 }
