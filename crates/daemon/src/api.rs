@@ -193,8 +193,12 @@ async fn handle_acquire(
                 let tap_name_out = if !netns.is_empty() {
                     match setup_vm_networking(netns, &vm_id, &api_socket).await {
                         Ok((tap, net_info)) => {
-                            if let Err(e) =
-                                configure_guest_network(&agent, &net_info.ip_cidr, &net_info.gateway).await
+                            if let Err(e) = configure_guest_network(
+                                &agent,
+                                &net_info.ip_cidr,
+                                &net_info.gateway,
+                            )
+                            .await
                             {
                                 warn!("configure_network on warm restore: {e:#}");
                             }
@@ -215,13 +219,14 @@ async fn handle_acquire(
                 // run, with its own OCI config and under the ID the pod's runtime uses; without this the pod's
                 // runtime asks the agent about an ID it does not know ("unknown container", exit 137), or, if the
                 // shadow's container is simply handed over, gets the exit status of a container that ended long ago.
-                let container_pid = match run_container_in_warm_vm(&agent, container_id, config_json_b64).await {
-                    Ok(pid) => pid,
-                    Err(e) => {
-                        warn!("run container on warm restore: {e:#}");
-                        return serde_json::json!({"error": format!("run container: {e:#}")});
-                    }
-                };
+                let container_pid =
+                    match run_container_in_warm_vm(&agent, container_id, config_json_b64).await {
+                        Ok(pid) => pid,
+                        Err(e) => {
+                            warn!("run container on warm restore: {e:#}");
+                            return serde_json::json!({"error": format!("run container: {e:#}")});
+                        }
+                    };
 
                 // Register as active so release() works correctly
                 pool.register_active(crate::pool::PoolVm {
@@ -346,6 +351,7 @@ async fn run_container_in_vm(
     let disk_json = serde_json::json!({
         "path": params.erofs_path,
         "readonly": true,
+        "image_type": "Raw",
         "id": disk_id,
     });
     vm_lifecycle::api_request_with_body(
@@ -641,7 +647,6 @@ async fn handle_status(pool: &Arc<Pool>, snapshots: &Arc<SnapshotManager>) -> se
     })
 }
 
-
 /// The ID under which the shadow VM runs the container that a warm snapshot holds (`shadow.rs`).
 pub fn shadow_container_id(image_key: &str) -> String {
     format!("shadow-ctr-{}", image_key)
@@ -668,7 +673,13 @@ async fn run_container_in_warm_vm(
     req.rootfs_preattached = true;
     req.erofs_layers = 1;
     let ctx = ttrpc::context::with_duration(std::time::Duration::from_secs(30));
-    let resp = agent.run_container(ctx, &req).await.context("RunContainer on warm restore")?;
-    info!("warm restore: container {} started (pid={})", container_id, resp.pid);
+    let resp = agent
+        .run_container(ctx, &req)
+        .await
+        .context("RunContainer on warm restore")?;
+    info!(
+        "warm restore: container {} started (pid={})",
+        container_id, resp.pid
+    );
     Ok(resp.pid)
 }

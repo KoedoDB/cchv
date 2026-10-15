@@ -39,12 +39,39 @@ async fn main() -> Result<()> {
 
     // Initialize pool (creates base snapshot if needed, fills pool)
     let pool = pool::Pool::new(config.clone());
+    // VMs of an earlier daemon that died without cleaning up are held in memory and known to nobody: stop them first.
+    let swept = pool.sweep_orphans().await;
+    if swept > 0 {
+        info!("stopped {swept} Cloud Hypervisor processes left by an earlier daemon");
+    }
     pool.initialize().await?;
 
     // Initialize snapshot manager (for warm workload snapshots)
     let snapshots = shadow::SnapshotManager::new(config.clone(), Arc::clone(&pool));
 
-    // Start API server
+    // Start API server. On SIGTERM or SIGINT, stop every VM before exiting: the VMs are this daemon's children and must not outlive it.
+    let socket_path = config.socket_path.clone();
+    let pool_for_shutdown = Arc::clone(&pool);
     let server = api::ApiServer::new(config, pool, snapshots);
-    server.serve().await
+    tokio::select! {
+        result = server.serve() => result,
+        _ = shutdown_signal() => {
+            info!("stop requested: stopping all VMs");
+            pool_for_shutdown.shutdown_all().await;
+            let _ = std::fs::remove_file(&socket_path);
+            info!("all VMs stopped, exiting");
+            Ok(())
+        }
+    }
+}
+
+/// Resolves when the process gets SIGTERM (systemd stop, docker stop) or SIGINT (Ctrl-C).
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
+    let mut int = signal(SignalKind::interrupt()).expect("SIGINT handler");
+    tokio::select! {
+        _ = term.recv() => {}
+        _ = int.recv() => {}
+    }
 }

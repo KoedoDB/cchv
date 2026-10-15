@@ -315,6 +315,53 @@ impl Pool {
     }
 
     /// Destroy a VM by shutting down CH and cleaning up state.
+    /// Stop every VM this daemon owns: the ready ones, the ones handed to pods, and any Cloud Hypervisor process that is left in the
+    /// state directory (a shadow VM, or one of an earlier daemon that was killed). Called when the daemon is told to stop, so that its
+    /// VMs do not outlive it: a VM that does is held in memory (one resident guest, 38 to 133 MiB) and known to nobody.
+    pub async fn shutdown_all(&self) {
+        let mut ids: Vec<String> = self.ready.lock().await.drain(..).map(|v| v.vm_id).collect();
+        ids.extend(self.active.lock().await.drain().map(|(id, _)| id));
+        self.active_count
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        info!("stopping {} VMs", ids.len());
+        for id in ids {
+            self.destroy_vm(&id).await;
+        }
+        let left = self.sweep_orphans().await;
+        if left > 0 {
+            info!("stopped {left} more Cloud Hypervisor processes found in the state directory");
+        }
+    }
+
+    /// Stop the Cloud Hypervisor processes recorded in `<state_dir>/<vm>/ch.pid` that no pool knows about. The process is checked
+    /// (its command line names cloud-hypervisor and this VM's directory) before it is signalled, so that a PID the system has given to
+    /// something else is left alone. Returns how many were stopped. Run at start, for the VMs of a daemon that died without cleaning up.
+    pub async fn sweep_orphans(&self) -> usize {
+        let root = PathBuf::from(&self.config.state_dir);
+        let mut stopped = 0;
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            return 0;
+        };
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            let Ok(text) = std::fs::read_to_string(dir.join("ch.pid")) else {
+                continue;
+            };
+            let Ok(pid) = text.trim().parse::<u32>() else {
+                continue;
+            };
+            let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            let cmdline = String::from_utf8_lossy(&cmdline).replace('\0', " ");
+            if !cmdline.contains("cloud-hypervisor") || !cmdline.contains(&*dir.to_string_lossy()) {
+                let _ = std::fs::remove_dir_all(&dir);
+                continue;
+            }
+            vm_lifecycle_stop(pid, &dir).await;
+            stopped += 1;
+        }
+        stopped
+    }
+
     async fn destroy_vm(&self, vm_id: &str) {
         use crate::vm_lifecycle;
 
@@ -339,4 +386,22 @@ impl Pool {
         // Fallback: just clean up the directory
         let _ = std::fs::remove_dir_all(&state_dir);
     }
+}
+
+/// SIGTERM, then (after a second) SIGKILL; the VM's directory goes with it.
+async fn vm_lifecycle_stop(pid: u32, dir: &std::path::Path) {
+    unsafe {
+        libc::kill(pid as i32, libc::SIGTERM);
+    }
+    for _ in 0..200 {
+        if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            let _ = std::fs::remove_dir_all(dir);
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    unsafe {
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
+    let _ = std::fs::remove_dir_all(dir);
 }

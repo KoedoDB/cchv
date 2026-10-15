@@ -34,12 +34,14 @@ pub async fn boot_vm(
     let mut disks = vec![serde_json::json!({
         "path": config.rootfs_path,
         "readonly": true,
+        "image_type": "Raw",
         "id": "_disk0",
     })];
     for (path, id, readonly) in extra_disks {
         disks.push(serde_json::json!({
             "path": path,
             "readonly": readonly,
+            "image_type": "Raw",
             "id": id,
         }));
     }

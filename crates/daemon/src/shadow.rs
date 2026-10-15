@@ -187,6 +187,7 @@ impl SnapshotManager {
         let disk_json = serde_json::json!({
             "path": erofs_path,
             "readonly": true,
+            "image_type": "Raw",
             "id": "ctr-rootfs",
         });
         vm_lifecycle::api_request_with_body(
