@@ -18,6 +18,8 @@ pub struct AcquireRequest<'a> {
     /// The VM the pod needs (0: the daemon's default). The daemon serves the default size from its pool and boots any other size.
     pub memory_mb: u64,
     pub vcpus: u32,
+    /// What the pod's runtime bind-mounts into the container (see `volumes.rs`).
+    pub volumes: &'a [serde_json::Value],
 }
 
 /// Response from AcquireSandbox.
@@ -57,6 +59,7 @@ impl DaemonClient {
                 "config_json": config_b64,
                 "memory_mb": params.memory_mb,
                 "vcpus": params.vcpus,
+                "volumes": params.volumes,
             }))
             .await?;
 
@@ -91,6 +94,7 @@ impl DaemonClient {
         erofs_path: &str,
         container_id: &str,
         config_json: &[u8],
+        volumes: &[serde_json::Value],
     ) -> Result<u32> {
         use base64::Engine;
         let config_b64 = base64::engine::general_purpose::STANDARD.encode(config_json);
@@ -102,6 +106,7 @@ impl DaemonClient {
                 "erofs_path": erofs_path,
                 "container_id": container_id,
                 "config_json": config_b64,
+                "volumes": volumes,
             }))
             .await?;
         Self::check_error(&resp, "AddContainer")?;

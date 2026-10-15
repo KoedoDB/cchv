@@ -117,7 +117,8 @@ async fn handle_connection(
         resp_str.push('\n');
         writer.write_all(resp_str.as_bytes()).await?;
         writer.flush().await?;
-        log::info!("responded: {}", resp_str.trim());
+        // Only the size: an answer can hold a container's output (ReadLogs), which is the customer's and may hold secrets.
+        log::info!("responded: {} ({} bytes)", method, resp_str.len());
         line.clear();
     }
 
@@ -148,6 +149,7 @@ async fn handle_acquire(
         .get("config_json")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let volumes = volumes_from_request(request);
 
     // A pod whose limits ask for a VM of another size than the pool's (and the warm snapshots') cannot be served from them: their
     // memory and CPUs are those of the snapshot. Such a pod gets a VM of its own size, booted for it.
@@ -169,6 +171,7 @@ async fn handle_acquire(
                 erofs_path,
                 container_id,
                 config_json_b64,
+                volumes: &volumes,
             },
             want_memory,
             want_vcpus,
@@ -248,7 +251,7 @@ async fn handle_acquire(
                 // runtime asks the agent about an ID it does not know ("unknown container", exit 137), or, if the
                 // shadow's container is simply handed over, gets the exit status of a container that ended long ago.
                 let container_pid =
-                    match run_container_in_warm_vm(&agent, container_id, config_json_b64).await {
+                    match run_container_in_warm_vm(&agent, container_id, config_json_b64, &volumes).await {
                         Ok(pid) => pid,
                         Err(e) => {
                             warn!("run container on warm restore: {e:#}");
@@ -311,6 +314,7 @@ async fn handle_acquire(
                             erofs_path,
                             container_id,
                             config_json_b64,
+                            volumes: &volumes,
                         },
                         agents,
                     )
@@ -458,6 +462,8 @@ struct RunContainerParams<'a> {
     erofs_path: &'a str,
     container_id: &'a str,
     config_json_b64: &'a str,
+    /// What the pod's runtime bind-mounts into the container; the agent writes it into the VM.
+    volumes: &'a [cloudhv_proto::VolumeMount],
 }
 
 /// Hot-plug an erofs rootfs and run a container via the guest agent.
@@ -536,6 +542,7 @@ async fn run_container_in_vm(
     let mut req = cloudhv_proto::CreateContainerRequest::new();
     req.container_id = params.container_id.to_string();
     req.config_json = config_json;
+    req.volumes = params.volumes.to_vec();
     req.rootfs_preattached = false;
     req.erofs_layers = 1;
 
@@ -570,6 +577,7 @@ async fn handle_add_container(
         .get("config_json")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let volumes = volumes_from_request(request);
 
     if vm_id.is_empty() || container_id.is_empty() {
         return serde_json::json!({"error": "vm_id and container_id required"});
@@ -591,6 +599,7 @@ async fn handle_add_container(
             erofs_path,
             container_id,
             config_json_b64,
+            volumes: &volumes,
         },
         agents,
     )
@@ -857,6 +866,7 @@ async fn run_container_in_warm_vm(
     agent: &cloudhv_proto::AgentServiceClient,
     container_id: &str,
     config_json_b64: &str,
+    volumes: &[cloudhv_proto::VolumeMount],
 ) -> Result<u32> {
     use base64::Engine;
     let config_json = if config_json_b64.is_empty() {
@@ -869,6 +879,7 @@ async fn run_container_in_warm_vm(
     let mut req = cloudhv_proto::CreateContainerRequest::new();
     req.container_id = container_id.to_string();
     req.config_json = config_json;
+    req.volumes = volumes.to_vec();
     req.rootfs_preattached = true;
     req.erofs_layers = 1;
     let ctx = ttrpc::context::with_duration(std::time::Duration::from_secs(30));
@@ -909,4 +920,31 @@ mod tap_name_tests {
         // The same VM always gets the same name (the shim and the cleanup find the device by it).
         assert_eq!(tap_name_for("pool-30322-4"), names[0]);
     }
+}
+
+/// The `volumes` of a request (see the shim's `volumes.rs`): [{destination, source, readonly, files: [{path, content (base64), mode}]}].
+fn volumes_from_request(request: &serde_json::Value) -> Vec<cloudhv_proto::VolumeMount> {
+    use base64::Engine;
+    let list = match request.get("volumes").and_then(|v| v.as_array()) {
+        Some(l) => l,
+        None => return Vec::new(),
+    };
+    list.iter()
+        .map(|v| {
+            let mut m = cloudhv_proto::VolumeMount::new();
+            m.destination = v["destination"].as_str().unwrap_or("").to_string();
+            m.source = v["source"].as_str().unwrap_or("").to_string();
+            m.readonly = v["readonly"].as_bool().unwrap_or(false);
+            for f in v["files"].as_array().into_iter().flatten() {
+                let mut file = cloudhv_proto::InlineFile::new();
+                file.path = f["path"].as_str().unwrap_or("").to_string();
+                file.content = base64::engine::general_purpose::STANDARD
+                    .decode(f["content"].as_str().unwrap_or(""))
+                    .unwrap_or_default();
+                file.mode = f["mode"].as_u64().unwrap_or(0o644) as u32;
+                m.files.push(file);
+            }
+            m
+        })
+        .collect()
 }

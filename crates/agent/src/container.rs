@@ -280,8 +280,6 @@ impl ContainerManager {
                     ]),
                 );
                 obj.remove("cgroupsPath");
-                obj.remove("maskedPaths");
-                obj.remove("readonlyPaths");
                 // The limits of the container itself are kept, so that one container of a pod cannot take the memory and CPU of the
                 // others: the VM is as big as the whole pod, and without them the limit of each container was not enforced
                 // (a 100Mi container allocated 300 MB next to a 600Mi one). The host's own cgroup path, devices, cpusets and the
@@ -297,7 +295,6 @@ impl ContainerManager {
                         );
                     }
                 }
-                obj.remove("seccomp");
             }
         }
 
@@ -385,6 +382,15 @@ impl ContainerManager {
             }
         }
 
+        // The VM is the pod: its hostname is the pod's (the containers share one UTS namespace, the VM's, so crun is not asked to set it).
+        if let Some(name) = spec.get("hostname").and_then(|h| h.as_str()) {
+            if !name.is_empty() && name.len() < 64 {
+                let rc = unsafe { libc::sethostname(name.as_ptr() as *const libc::c_char, name.len()) };
+                if rc != 0 {
+                    warn!("sethostname({name}): {}", std::io::Error::last_os_error());
+                }
+            }
+        }
         if let Some(obj) = spec.as_object_mut() {
             obj.remove("hostname");
             obj.insert("mounts".to_string(), serde_json::Value::Array(mounts));
@@ -535,7 +541,21 @@ impl ContainerManager {
 
         // Write inline filesystem volume files to the bundle directory
         for vol in volumes {
-            if vol.is_block || vol.inline_files.is_empty() {
+            if vol.is_block {
+                continue;
+            }
+            // Volumes the shim read from the host (see the shim's volumes.rs): written under VOLUME_ROOT, which is not part of
+            // any one container's bundle, so the containers of a pod that mount the same host directory share it. A volume
+            // with no files (an emptyDir) is an empty directory anyone can write to.
+            if let Some(rest) = vol.source.strip_prefix(VOLUME_ROOT) {
+                if rest.is_empty() || rest.contains("..") {
+                    warn!("skipping volume with unsafe source: {}", vol.source);
+                    continue;
+                }
+                write_shared_volume(vol)?;
+                continue;
+            }
+            if vol.inline_files.is_empty() {
                 continue;
             }
             let vol_dir = mount_point
@@ -1195,4 +1215,48 @@ mod resource_tests {
         let half = serde_json::json!({"cpu": {"quota": 50000}});
         assert_eq!(sanitize_resources(Some(&half)), None);
     }
+}
+
+/// Where in the guest the shim's volumes are written; the same prefix as the shim's.
+const VOLUME_ROOT: &str = "/run/cloudhv-vols/";
+
+fn write_shared_volume(vol: &VolumeInfo) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::path::Path::new(&vol.source);
+    std::fs::create_dir_all(dir)?;
+    if vol.inline_files.is_empty() {
+        // An emptyDir: like Kubernetes, writable by every user.
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o777))?;
+        return Ok(());
+    }
+    for f in &vol.inline_files {
+        if f.path.starts_with('/') || f.path.split('/').any(|c| c == ".." || c.is_empty()) {
+            warn!("skipping unsafe inline file path: {}", f.path);
+            continue;
+        }
+        let file_path = dir.join(&f.path);
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&file_path, &f.content)
+            .with_context(|| format!("write volume file: {}", f.path))?;
+        std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(f.mode & 0o777))?;
+    }
+    // The pod's hostname comes as the /etc/hostname the runtime bind-mounts; the VM is the pod, so it is the VM's hostname.
+    if vol.destination == "/etc/hostname" && vol.inline_files.len() == 1 {
+        let name = String::from_utf8_lossy(&vol.inline_files[0].content).trim().to_string();
+        if !name.is_empty() && name.len() < 64 {
+            let rc = unsafe { libc::sethostname(name.as_ptr() as *const libc::c_char, name.len()) };
+            if rc != 0 {
+                warn!("sethostname({name}): {}", std::io::Error::last_os_error());
+            }
+        }
+    }
+    info!(
+        "wrote {} files for volume {} ({})",
+        vol.inline_files.len(),
+        vol.destination,
+        vol.source
+    );
+    Ok(())
 }

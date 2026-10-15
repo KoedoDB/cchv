@@ -382,6 +382,7 @@ impl CloudHvInstance {
         // Read OCI config for the container
         let spec_path = self.bundle.join("config.json");
         let config_json = std::fs::read(&spec_path).unwrap_or_default();
+        let volumes = crate::volumes::from_spec(&config_json);
 
         // Check if a VM is already acquired for this sandbox (multi-container pod).
         // Only the first container triggers daemon acquire + warm snapshot lookup.
@@ -401,6 +402,7 @@ impl CloudHvInstance {
                     &erofs_path.to_string_lossy(),
                     container_id,
                     &config_json,
+                    &volumes,
                 )
                 .await
                 .ctx("daemon add_container")?;
@@ -419,6 +421,7 @@ impl CloudHvInstance {
                     config_json: &config_json,
                     memory_mb: vm_state.memory_mb,
                     vcpus: vm_state.vcpus,
+                    volumes: &volumes,
                 })
                 .await
                 .ctx("daemon acquire")?;
