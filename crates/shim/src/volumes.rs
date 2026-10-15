@@ -79,7 +79,12 @@ pub fn from_spec(config_json: &[u8]) -> Vec<serde_json::Value> {
 
 /// The files of a bind source: a regular file is one file named like its destination; a directory is its tree.
 fn read_source(source: &Path, dest: &str) -> Result<BTreeMap<String, (Vec<u8>, u32)>, String> {
-    let meta = std::fs::metadata(source).map_err(|e| e.to_string())?;
+    // The source is a path the runtime made. If it is a link, someone has put it there (a customer's directory): not followed.
+    let link = std::fs::symlink_metadata(source).map_err(|e| e.to_string())?;
+    if link.file_type().is_symlink() {
+        return Err("the source is a symbolic link".into());
+    }
+    let meta = link;
     let mut files = BTreeMap::new();
     if meta.is_file() {
         if meta.len() as usize > MAX_BYTES {
@@ -93,14 +98,19 @@ fn read_source(source: &Path, dest: &str) -> Result<BTreeMap<String, (Vec<u8>, u
         files.insert(name.to_string(), (content, meta.permissions().mode() & 0o777));
     } else if meta.is_dir() {
         let mut total = 0;
-        walk(source, "", 0, &mut total, &mut files)?;
+        let root = std::fs::canonicalize(source).map_err(|e| e.to_string())?;
+        walk(&root, source, "", 0, &mut total, &mut files)?;
     } else {
         return Err("neither a file nor a directory".into());
     }
     Ok(files)
 }
 
+/// `root` is the real path of the volume. A volume can be a directory a customer writes to (a persistent volume), and this runs as
+/// root on the host: a link in it to `/etc/shadow` must not put that file into the VM. Links are followed only where they stay
+/// inside `root` (the kubelet's own `..data` links do).
 fn walk(
+    root: &Path,
     dir: &Path,
     prefix: &str,
     depth: usize,
@@ -123,13 +133,20 @@ fn walk(
             Ok(m) => m,
             Err(_) => continue, // a dangling link
         };
+        match std::fs::canonicalize(&path) {
+            Ok(real) if real.starts_with(root) => {}
+            _ => {
+                warn!("volume entry {} leaves its volume; left out", path.display());
+                continue;
+            }
+        }
         let rel = if prefix.is_empty() {
             name
         } else {
             format!("{prefix}/{name}")
         };
         if meta.is_dir() {
-            walk(&path, &rel, depth + 1, total, files)?;
+            walk(root, &path, &rel, depth + 1, total, files)?;
         } else if meta.is_file() {
             *total += meta.len() as usize;
             if *total > MAX_BYTES || files.len() >= MAX_FILES {
@@ -167,6 +184,7 @@ mod tests {
         std::fs::write(dir.join("..2026_01_01/token"), b"secret").unwrap();
         std::os::unix::fs::symlink("..2026_01_01", dir.join("..data")).unwrap();
         std::os::unix::fs::symlink("..data/token", dir.join("token")).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", dir.join("escape")).unwrap();
         let resolv = dir.join("resolv.conf");
         std::fs::write(&resolv, b"nameserver 10.45.0.10\n").unwrap();
 
@@ -187,7 +205,12 @@ mod tests {
             .iter()
             .map(|f| f["path"].as_str().unwrap())
             .collect();
-        assert_eq!(names, vec!["resolv.conf", "token"]);
+        assert_eq!(names, vec!["resolv.conf", "token"], "a link out of the volume is left out");
+        let link_source = dir.join("linked");
+        std::os::unix::fs::symlink("/etc/passwd", &link_source).unwrap();
+        let spec = serde_json::json!({"mounts": [
+            {"destination": "/etc/x", "type": "bind", "source": link_source, "options": ["rbind"]}]});
+        assert!(from_spec(spec.to_string().as_bytes()).is_empty(), "a link as the source is refused");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

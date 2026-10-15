@@ -116,6 +116,33 @@ impl SnapshotManager {
 
         let ch_pid = vm_lifecycle::spawn_ch(&self.config, state_dir).await?;
         let api_socket = state_dir.join("api.sock");
+        // Rootless: the VM may read the two big files of this snapshot (hard links of the cached ones), and nothing else of it.
+        for name in ["memory-ranges", "state.json"] {
+            if let Err(e) =
+                crate::rootless::allow_read(&snapshot_work_dir.join(name), state_dir)
+            {
+                vm_lifecycle::shutdown_and_destroy(&api_socket, ch_pid, state_dir).await;
+                return Err(e.context("let the VM read the snapshot"));
+            }
+        }
+        // ... and the disks it refers to, besides the platform's own rootfs (the container's erofs image).
+        if crate::rootless::enabled() {
+            let disks: Vec<String> = std::fs::read_to_string(snapshot_work_dir.join("config.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .and_then(|c| c.get("disks").and_then(|d| d.as_array()).cloned())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|d| d.get("path").and_then(|p| p.as_str()).map(String::from))
+                .filter(|p| *p != self.config.rootfs_path)
+                .collect();
+            for disk in disks {
+                if let Err(e) = crate::rootless::allow_read(Path::new(&disk), state_dir) {
+                    vm_lifecycle::shutdown_and_destroy(&api_socket, ch_pid, state_dir).await;
+                    return Err(e.context("let the VM read a disk of the snapshot"));
+                }
+            }
+        }
         vm_lifecycle::wait_ch_ready(&api_socket).await?;
         vm_lifecycle::restore_vm(&api_socket, &snapshot_work_dir).await?;
         vm_lifecycle::resume_vm(&api_socket).await?;
@@ -244,7 +271,7 @@ impl SnapshotManager {
         std::fs::create_dir_all(&snap_dir)?;
 
         vm_lifecycle::pause_vm(&api_socket).await?;
-        vm_lifecycle::snapshot_vm(&api_socket, &snap_dir).await?;
+        vm_lifecycle::snapshot_vm(&api_socket, &snap_dir, false).await?;
 
         let t_snap = t0.elapsed().as_millis();
         info!("shadow {}: snapshot created ({}ms total)", vm_id, t_snap);

@@ -10,9 +10,9 @@
 //!   daemon opens the device and hands the descriptor over the API socket (SCM_RIGHTS);
 //! - the container's erofs image: read access for it alone, by an ACL (the images are the customers', and one VM must not read
 //!   another's); the ACL is removed when the VM is destroyed;
-//! - the snapshots (`base-snapshot`, `snapshot-cache`): written by the VM that takes them, then handed to the group (0640 root:gid)
-//!   so that every VM can restore from them. They hold the memory of a freshly started guest and an image's warm-up, not a
-//!   customer's secrets (those arrive after the restore);
+//! - the snapshots: written by the VM that takes them. The base snapshot (a fresh guest) is then handed to the group (0640 root:gid)
+//!   so that every VM can restore from it. A workload snapshot (`snapshot-cache`) holds a customer's image warmed up in memory, so it
+//!   is root's alone (0600), and a VM that restores from it is given read access to its two big files by an ACL, like the rootfs;
 //! - the kernel and the base rootfs: world-readable platform files.
 //!
 //! Userfaultfd restore (`CLOUDHV_MEMORY_RESTORE_MODE=OnDemand`) needs `vm.unprivileged_userfaultfd=1` for a process without
@@ -136,21 +136,27 @@ pub fn give(path: &Path, state_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// After a VM wrote a snapshot: every VM's group may read it, nobody else (no-op when rootless is off).
-pub fn share_with_vms(dir: &Path) -> Result<()> {
+/// After a VM wrote a snapshot (no-op when rootless is off). The base snapshot (`shared`: a fresh guest, the same for every
+/// customer) may be read by the group of all VMs. A workload snapshot holds a customer's image warmed up in memory, so it is root's
+/// alone, and a VM is given read access to the one it restores from (`allow_read`), as to its rootfs.
+pub fn hand_over_snapshot(dir: &Path, shared: bool) -> Result<()> {
     if !enabled() {
         return Ok(());
     }
-    let gid = gid();
+    let (gid, dir_mode, file_mode) = if shared {
+        (gid(), 0o750, 0o640)
+    } else {
+        (0, 0o700, 0o600)
+    };
     chown(dir, 0, gid)?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o750))?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(dir_mode))?;
     for entry in std::fs::read_dir(dir)? {
         let p = entry?.path();
         if p.is_dir() {
-            share_with_vms(&p)?;
+            hand_over_snapshot(&p, shared)?;
         } else {
             chown(&p, 0, gid)?;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o640))?;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(file_mode))?;
         }
     }
     Ok(())

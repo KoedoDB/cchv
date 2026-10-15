@@ -702,7 +702,9 @@ What that takes (all in `crates/daemon/src/rootless.rs`):
 - the container's **erofs image** is root-only (0600, set by the shim); a VM is given read access with a POSIX ACL entry for its user
   and nobody else's, taken back when the VM is destroyed (the daemon sets the ACL attribute itself; no `setfacl` is needed). The
   images are the customers', and one VM must not read another's;
-- a snapshot is written by the VM that takes it, then handed to the VMs' group (0640 root:gid; also at start for snapshots made earlier);
+- a snapshot is written by the VM that takes it. The base snapshot (a fresh guest) is then handed to the VMs' group (0640 root:gid); a
+  workload snapshot holds a customer's image warmed up in memory, so it is root's alone (0600) and a VM that restores from it is given
+  read access to the snapshot's two big files and to the image disk it refers to, by ACL, like its rootfs (also done at start for snapshots made earlier);
 - the kernel (`kernel_path`) and the base rootfs (`rootfs_path`) must be world-readable; the daemon refuses to start otherwise.
 
 Restore with **`OnDemand`** (userfaultfd) needs `vm.unprivileged_userfaultfd=1` for a process without `CAP_SYS_PTRACE`; the default `Copy`

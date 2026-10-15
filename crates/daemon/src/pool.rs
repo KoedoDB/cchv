@@ -289,7 +289,7 @@ impl Pool {
 
         // Pause → snapshot → destroy
         vm_lifecycle::pause_vm(&api_socket).await?;
-        vm_lifecycle::snapshot_vm(&api_socket, base_dir).await?;
+        vm_lifecycle::snapshot_vm(&api_socket, base_dir, true).await?;
 
         // Shut down the base VM
         vm_lifecycle::shutdown_and_destroy(&api_socket, ch_pid, &state_dir).await;

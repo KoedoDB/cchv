@@ -34,10 +34,10 @@ async fn main() -> Result<()> {
 
     let config = config::DaemonConfig::load(&config_path)?;
     rootless::init(&config)?;
-    // Snapshots made before rootless was turned on belong to root alone: hand them to the group the VMs run as.
-    for dir in [config.base_snapshot_dir(), config.snapshot_cache_dir()] {
+    // Snapshots made before rootless was turned on belong to root: the base snapshot goes to the group the VMs run as, workload snapshots stay root's.
+    for (dir, shared) in [(config.base_snapshot_dir(), true), (config.snapshot_cache_dir(), false)] {
         if dir.exists() {
-            rootless::share_with_vms(&dir)?;
+            rootless::hand_over_snapshot(&dir, shared)?;
         }
     }
     info!(

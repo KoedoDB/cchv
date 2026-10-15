@@ -258,7 +258,8 @@ pub async fn resume_vm(api_socket: &Path) -> Result<()> {
 }
 
 /// Take a snapshot of a paused VM.
-pub async fn snapshot_vm(api_socket: &Path, dest_dir: &Path) -> Result<()> {
+/// `shared`: the base snapshot (see `rootless::hand_over_snapshot`).
+pub async fn snapshot_vm(api_socket: &Path, dest_dir: &Path, shared: bool) -> Result<()> {
     // Rootless: the VM that takes the snapshot writes it, so it owns the directory meanwhile; afterwards the group of all VMs reads it.
     if let Some(state_dir) = api_socket.parent() {
         crate::rootless::give(dest_dir, state_dir)?;
@@ -273,7 +274,7 @@ pub async fn snapshot_vm(api_socket: &Path, dest_dir: &Path) -> Result<()> {
         Some(&body.to_string()),
     )
     .await;
-    crate::rootless::share_with_vms(dest_dir)?;
+    crate::rootless::hand_over_snapshot(dest_dir, shared)?;
     result
 }
 
