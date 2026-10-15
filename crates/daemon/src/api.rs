@@ -176,27 +176,27 @@ async fn handle_acquire(
             Ok((ch_pid, api_socket, vsock_socket)) => {
                 info!("warm restore for image_key={}", image_key);
 
+                // Connect to the guest agent of the restored VM. It is needed for the network configuration
+                // and, always, to hand the warm container over to the pod's container ID (below).
+                let agent = match crate::vm_lifecycle::connect_agent(&vsock_socket).await {
+                    Ok((agent, _health)) => {
+                        agents.lock().await.insert(vm_id.clone(), agent.clone());
+                        agent
+                    }
+                    Err(e) => {
+                        warn!("agent connect on warm restore: {e:#}");
+                        return serde_json::json!({"error": format!("agent connect: {e:#}")});
+                    }
+                };
+
                 // Set up networking: TAP in host → CH add-net → move to pod netns + TC
                 let tap_name_out = if !netns.is_empty() {
                     match setup_vm_networking(netns, &vm_id, &api_socket).await {
                         Ok((tap, net_info)) => {
-                            match crate::vm_lifecycle::connect_agent(&vsock_socket).await {
-                                Ok((agent, _health)) => {
-                                    agents.lock().await.insert(vm_id.clone(), agent.clone());
-                                    if let Err(e) = configure_guest_network(
-                                        &agent,
-                                        &net_info.ip_cidr,
-                                        &net_info.gateway,
-                                    )
-                                    .await
-                                    {
-                                        warn!("configure_network on warm restore: {e:#}");
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("agent connect on warm restore: {e:#}");
-                                    return serde_json::json!({"error": format!("agent connect: {e:#}")});
-                                }
+                            if let Err(e) =
+                                configure_guest_network(&agent, &net_info.ip_cidr, &net_info.gateway).await
+                            {
+                                warn!("configure_network on warm restore: {e:#}");
                             }
                             tap
                         }
@@ -207,6 +207,20 @@ async fn handle_acquire(
                     }
                 } else {
                     String::new()
+                };
+
+                // The snapshot holds a VM whose runtime is warm: the guest has booted, the image's erofs rootfs is
+                // attached (/dev/vdb) and its pages are cached. The container the shadow VM ran was only there to
+                // warm that up (an empty OCI config, which exits at once). The pod's own container still has to be
+                // run, with its own OCI config and under the ID the pod's runtime uses; without this the pod's
+                // runtime asks the agent about an ID it does not know ("unknown container", exit 137), or, if the
+                // shadow's container is simply handed over, gets the exit status of a container that ended long ago.
+                let container_pid = match run_container_in_warm_vm(&agent, container_id, config_json_b64).await {
+                    Ok(pid) => pid,
+                    Err(e) => {
+                        warn!("run container on warm restore: {e:#}");
+                        return serde_json::json!({"error": format!("run container: {e:#}")});
+                    }
                 };
 
                 // Register as active so release() works correctly
@@ -227,7 +241,7 @@ async fn handle_acquire(
                     "cid": cid,
                     "ch_pid": ch_pid,
                     "from_snapshot": true,
-                    "container_pid": 0,
+                    "container_pid": container_pid,
                     "tap_name": tap_name_out,
                 });
             }
@@ -625,4 +639,36 @@ async fn handle_status(pool: &Arc<Pool>, snapshots: &Arc<SnapshotManager>) -> se
         "shadow_vms_running": snapshots.active_shadow_count().await,
         "snapshot_keys": snapshots.snapshot_keys().await,
     })
+}
+
+
+/// The ID under which the shadow VM runs the container that a warm snapshot holds (`shadow.rs`).
+pub fn shadow_container_id(image_key: &str) -> String {
+    format!("shadow-ctr-{}", image_key)
+}
+
+/// Run the pod's container in a VM restored from a warm snapshot. The rootfs (the image's erofs) is already attached as the
+/// first disk after the boot disk, so the agent is told it is pre-attached and does not wait for a hot-plug. Returns the PID in the guest.
+async fn run_container_in_warm_vm(
+    agent: &cloudhv_proto::AgentServiceClient,
+    container_id: &str,
+    config_json_b64: &str,
+) -> Result<u32> {
+    use base64::Engine;
+    let config_json = if config_json_b64.is_empty() {
+        b"{}".to_vec()
+    } else {
+        base64::engine::general_purpose::STANDARD
+            .decode(config_json_b64)
+            .unwrap_or_else(|_| b"{}".to_vec())
+    };
+    let mut req = cloudhv_proto::CreateContainerRequest::new();
+    req.container_id = container_id.to_string();
+    req.config_json = config_json;
+    req.rootfs_preattached = true;
+    req.erofs_layers = 1;
+    let ctx = ttrpc::context::with_duration(std::time::Duration::from_secs(30));
+    let resp = agent.run_container(ctx, &req).await.context("RunContainer on warm restore")?;
+    info!("warm restore: container {} started (pid={})", container_id, resp.pid);
+    Ok(resp.pid)
 }

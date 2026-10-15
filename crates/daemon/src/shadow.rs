@@ -207,7 +207,7 @@ impl SnapshotManager {
         let (agent, _health) = agent_connected;
 
         let mut run_req = cloudhv_proto::CreateContainerRequest::new();
-        run_req.container_id = format!("shadow-ctr-{}", image_key);
+        run_req.container_id = crate::api::shadow_container_id(image_key);
         run_req.rootfs_preattached = false;
         run_req.erofs_layers = 1;
         // Intentionally empty OCI config: the shadow container only exists to
