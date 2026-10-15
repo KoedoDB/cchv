@@ -75,8 +75,67 @@ pub struct DaemonConfig {
     /// Oldest (LRU) snapshots are evicted when this limit is reached.
     #[serde(default = "default_max_snapshots")]
     pub max_snapshots: usize,
+
+    /// Where the shim keeps the container images (erofs). The daemon accepts an image path only inside this directory, and with
+    /// `ch_rootless` gives a VM read access to nothing else outside its own snapshot. Must be the shim's `EROFS_CACHE_DIR`.
+    #[serde(default = "default_erofs_cache_dir")]
+    pub erofs_cache_dir: String,
+
+    /// The most memory (MiB) and vCPUs a request may ask a VM for. A request above is refused: the sizes come from a pod's limits,
+    /// which a customer chooses.
+    #[serde(default = "default_max_memory_mb")]
+    pub max_memory_mb: u64,
+    #[serde(default = "default_max_vcpus")]
+    pub max_vcpus: u32,
+
+    /// The most VMs that may be handed to pods at once.
+    #[serde(default = "default_max_active_vms")]
+    pub max_active_vms: usize,
+
+    /// The most shadow VMs (the ones that make warm snapshots) that may run at once; each takes a pool VM for its warm-up.
+    #[serde(default = "default_max_shadow_vms")]
+    pub max_shadow_vms: usize,
+
+    /// The longest request line, in bytes, and the most connections the API serves at once.
+    #[serde(default = "default_max_request_bytes")]
+    pub max_request_bytes: usize,
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
+
+    /// Whether a VM's serial console is written to `console.log` in its state directory. Off by default with `ch_rootless`: the file is
+    /// in memory (`/run`), has no size limit, and the guest writes to it. On by default otherwise.
+    #[serde(default)]
+    pub serial_console: Option<bool>,
+
+    /// The most processes (threads count) the user of a rootless Cloud Hypervisor may have (`RLIMIT_NPROC`).
+    #[serde(default = "default_ch_max_processes")]
+    pub ch_max_processes: u64,
 }
 
+fn default_erofs_cache_dir() -> String {
+    "/run/cloudhv/erofs-cache".to_string()
+}
+fn default_max_memory_mb() -> u64 {
+    65_536
+}
+fn default_max_vcpus() -> u32 {
+    64
+}
+fn default_max_active_vms() -> usize {
+    512
+}
+fn default_max_shadow_vms() -> usize {
+    2
+}
+fn default_max_request_bytes() -> usize {
+    8 * 1024 * 1024
+}
+fn default_max_connections() -> usize {
+    64
+}
+fn default_ch_max_processes() -> u64 {
+    1024
+}
 fn default_ch_uid_base() -> u32 {
     200_000
 }
@@ -127,6 +186,11 @@ impl DaemonConfig {
             .with_context(|| format!("read config: {}", path.display()))?;
         let config: Self = serde_json::from_str(&content).with_context(|| "parse daemon config")?;
         Ok(config)
+    }
+
+    /// Whether the serial console of a VM is written to a file (see `serial_console`).
+    pub fn serial_console_enabled(&self) -> bool {
+        self.serial_console.unwrap_or(!self.ch_rootless)
     }
 
     /// Path to the base snapshot directory.

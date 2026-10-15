@@ -691,24 +691,88 @@ Protocol:
 Cloud Hypervisor is what a guest attacks when it escapes the VM, so it need not be root. With `"ch_rootless": true` in the daemon's
 config the daemon (still root: it makes TAP devices, enters network namespaces and sets up tc) starts every Cloud Hypervisor as a
 user that exists for that VM alone (`ch_uid_base`, `ch_uid_count`; default 200000, 60000 of them), in the group of `/dev/kvm`
-(`ch_gid` to say another), with no capabilities, `no_new_privs`, and Cloud Hypervisor's own seccomp filter. Off by default.
+(`ch_gid` to say another), with no capabilities, `no_new_privs`, no core file, a limit on its processes (`ch_max_processes`), and
+Cloud Hypervisor's own seccomp filter. Off by default.
 
-What that takes (all in `crates/daemon/src/rootless.rs`):
+**The rule behind all of it: once the guest is compromised, that Cloud Hypervisor is hostile and owns everything it can write.** It can
+delete and re-create any file in its VM's state directory, so root never trusts, follows or acts on anything in such a directory.
 
-- the VM's state directory and console log belong to its user (0700);
-- the **TAP device is not opened by Cloud Hypervisor**: enabling a TAP needs `CAP_NET_ADMIN`, which would let it change the host's
+- **Control data is out of reach.** The daemon's records of a VM (its Cloud Hypervisor's pid, its user, the files it was given read
+  access to) are in `<state_dir>/.ctl/<vm_id>/` (0700 root; `ctl.rs`), not in the VM's own directory. A process is signalled only if
+  it is verified to be that VM's Cloud Hypervisor (its command line has `--api-socket <state_dir>/<vm_id>/api.sock`; rootless, its user
+  is the VM's user), through a pidfd, and never pid 0 or 1 or a number that is not a `pid_t`. The user of a VM is kept in the daemon's
+  memory.
+- **Root works on descriptors** (`fsutil.rs`): paths are opened with `openat2(RESOLVE_NO_SYMLINKS)` (or `O_NOFOLLOW`), looked at with
+  `fstat`, and changed with `fchown`/`fchmod`/`fsetxattr` on the descriptor. The sockets of a VM (`api.sock`, `vsock.sock`) are
+  checked to be sockets, not links, before the daemon connects. The console log is made before the Cloud Hypervisor exists.
+- **A user is never given to a second VM while a process of the first is left.** Freeing a VM's user first kills every process that
+  has that user (`/proc` is scanned until none is left); a user that cannot be cleared is *quarantined* (not used again until the daemon
+  restarts). At start the daemon kills the processes of every user in the range and takes every ACL entry of a user of the range off
+  the images and snapshots (those of an earlier daemon that was killed). The range must not contain a user of `/etc/passwd`.
+- **The TAP device is not opened by Cloud Hypervisor**: enabling a TAP needs `CAP_NET_ADMIN`, which would let it change the host's
   network. The daemon opens the device (with the virtio-net header) and passes the descriptor over the API socket (SCM_RIGHTS).
-  Without `ch_rootless` the device is opened by name, as before;
-- the container's **erofs image** is root-only (0600, set by the shim); a VM is given read access with a POSIX ACL entry for its user
-  and nobody else's, taken back when the VM is destroyed (the daemon sets the ACL attribute itself; no `setfacl` is needed). The
-  images are the customers', and one VM must not read another's;
-- a snapshot is written by the VM that takes it. The base snapshot (a fresh guest) is then handed to the VMs' group (0640 root:gid); a
-  workload snapshot holds a customer's image warmed up in memory, so it is root's alone (0600) and a VM that restores from it is given
-  read access to the snapshot's two big files and to the image disk it refers to, by ACL, like its rootfs (also done at start for snapshots made earlier);
-- the kernel (`kernel_path`) and the base rootfs (`rootfs_path`) must be world-readable; the daemon refuses to start otherwise.
+  Without `ch_rootless` the device is opened by name, as before.
+- **The container's erofs image is root-only** (0600, set by the shim); a VM is given read access with a POSIX ACL entry for its user
+  and nobody else's (the daemon sets the ACL attribute itself; no `setfacl` is needed). One lock covers every read-modify-write of
+  an ACL, the file is chmod-ed only when it has no ACL yet, and the grant is written to the VM's record before it is made, so that
+  it can always be taken back. A grant is only made on a regular file under `erofs_cache_dir` or the snapshot cache, never on a path in
+  a VM's own directory.
+- **A snapshot is the work of a VM, and is not trusted until that VM is dead.** The VM writes it into a directory made for it; then
+  the VM is destroyed (its process and its user's processes gone); only then is the directory handed over (`hand_over_snapshot`: on
+  descriptors, links, devices, FIFOs, sockets, files with a second hard link and anything deeper than 4 levels are removed). The base
+  snapshot (a fresh guest) goes to the VMs' group (0640 root:gid) and is marked complete (`.complete`) by the daemon; one without the
+  mark is made again. A workload snapshot holds a customer's image warmed up in memory, so it is root's alone (0600) and a VM that
+  restores from it is given read access to its two big files by ACL.
+- **A snapshot's `config.json` is checked, not trusted** (`validate_snapshot_config`): only the keys of Cloud Hypervisor v54 are
+  accepted; no `fs`, `pmem`, `devices`, `user_devices`, `vdpa`, `generic_vhost_user`, `tpm`, `numa`, `iommu`, `net`, `gdb`,
+  `ivshmem`, `preserved_fds`, `landlock_rules`; the kernel is the daemon's; no initramfs, firmware, `fw_cfg`; memory has no zones;
+  disks are read-only raw and only the platform's rootfs and the pod's own image (whose path is *replaced* by the daemon's, so the
+  path the snapshot names is never used); consoles are off or a file; `rng` is `/dev/urandom`. A snapshot that fails is dropped and the
+  pod gets a VM from the pool.
+- The kernel (`kernel_path`) and the base rootfs (`rootfs_path`) must be world-readable; the daemon refuses to start otherwise.
 
 Restore with **`OnDemand`** (userfaultfd) needs `vm.unprivileged_userfaultfd=1` for a process without `CAP_SYS_PTRACE`; the default `Copy`
-mode does not. A failed restore now stops the Cloud Hypervisor process it started and removes its directory.
+mode does not.
 
-Checked: each Cloud Hypervisor runs as its own uid with `CapEff: 0`, `NoNewPrivs: 1`, `Seccomp: 2`; pods get network (DNS, Services,
-the internet), volumes, hot-plugged rootfs, warm-snapshot restore; ACL entries are added with the pod and gone after it.
+**Not done (follow-ups).** The Cloud Hypervisor still runs in the host's network, PID and mount namespaces, in the host's cgroup, and
+all VMs share one group (the one of `/dev/kvm`, which also reads the base snapshot). After an escape it can reach what the host's
+namespaces show a non-root user (127.0.0.1 services, world-readable files) and what that group may read. Each of these is feasible
+because the TAP descriptor is passed in: its own network namespace (nothing to reach), mount namespace with `pivot_root` (only its
+directory), PID namespace (no other process visible), a group per VM, and a cgroup per VM with memory and pids limits (also
+`cgroup.kill` to clear a user instead of scanning `/proc`). Until then `RLIMIT_NPROC` bounds its processes, `RLIMIT_CORE` is 0, and
+its serial console is off by default (`serial_console`), because the file would be in memory (`/run`) with no size limit.
+
+## Hardening of the API
+
+The daemon is root and its socket is the one door:
+
+- the socket is 0600 root (made with a umask that leaves no gap) and a connection whose peer is not root (`SO_PEERCRED`) is closed.
+  The directory of the socket is not made 0700: the state directory is usually below it and a VM's user has to pass through it
+  (the state directory is 0711: enter, not list, so a VM cannot read the names of the others);
+- a request line is read up to `max_request_bytes` and no further; at most `max_connections` connections; a connection with no
+  request for 5 minutes is closed; calls to Cloud Hypervisor time out (30 s, 120 s for snapshot and restore);
+- `vm_id`, `container_id` and the keys of images are `[A-Za-z0-9_-]{1,64}`; `netns` is `/var/run/netns/<name>`, `/run/netns/<name>` or
+  `/proc/<pid>/ns/net` and, opened, must be a network namespace on `nsfs` that is not the daemon's own; `erofs_path` must be a regular
+  `<name>.erofs` file directly in `erofs_cache_dir`, reached without a link; memory and vCPUs are limited (`max_memory_mb`,
+  `max_vcpus`), and so are the VMs handed to pods (`max_active_vms`) and the shadow VMs (`max_shadow_vms`);
+- **the warm-snapshot key is made by the daemon** from the SHA-256 of the image file's content (`imagekey.rs`); the `image_key` the
+  caller sends is ignored. Two pods share a warm snapshot only if their images are the same bytes;
+- `ReleaseSandbox` only touches a VM that was handed out; for any other name it answers ok and does nothing.
+
+### New configuration fields
+
+| field | default | |
+|---|---|---|
+| `ch_rootless` | `false` | run each Cloud Hypervisor as a user of its own |
+| `ch_uid_base`, `ch_uid_count` | `200000`, `60000` | the users of the VMs; must be 1000 or more, must not overflow, must not contain a user of `/etc/passwd` |
+| `ch_gid` | group of `/dev/kvm` | the group of the Cloud Hypervisors |
+| `ch_max_processes` | `1024` | `RLIMIT_NPROC` of a rootless Cloud Hypervisor's user (threads count) |
+| `serial_console` | `true`, `false` with `ch_rootless` | write the guest's serial console to `console.log` in the VM's directory (in memory, no size limit) |
+| `erofs_cache_dir` | `/run/cloudhv/erofs-cache` | where the shim keeps the images; must be the shim's `EROFS_CACHE_DIR` |
+| `max_memory_mb`, `max_vcpus` | `65536`, `64` | the most a request may ask for |
+| `max_active_vms` | `512` | VMs handed to pods |
+| `max_shadow_vms` | `2` | shadow VMs (warm-up) at once; a shadow that failed for an image is not retried for 5 minutes |
+| `max_request_bytes` | `8388608` | the longest request line (volumes of a pod are in it; the agent's own limit is 4 MiB) |
+| `max_connections` | `64` | |
+
+The daemon keeps its records in `<state_dir>/.ctl/` (0700 root); the state directory is made 0711.

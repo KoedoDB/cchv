@@ -6,10 +6,14 @@ use log::info;
 
 mod api;
 mod config;
+mod ctl;
+mod fsutil;
+mod imagekey;
 mod netns;
 mod pool;
 mod rootless;
 pub mod shadow;
+mod validate;
 mod vm_lifecycle;
 
 #[tokio::main]
@@ -34,40 +38,56 @@ async fn main() -> Result<()> {
 
     let config = config::DaemonConfig::load(&config_path)?;
     rootless::init(&config)?;
-    // Snapshots made before rootless was turned on belong to root: the base snapshot goes to the group the VMs run as, workload snapshots stay root's.
-    for (dir, shared) in [(config.base_snapshot_dir(), true), (config.snapshot_cache_dir(), false)] {
-        if dir.exists() {
-            rootless::hand_over_snapshot(&dir, shared)?;
-        }
-    }
     info!(
         "pool_size: {}, memory: {}MiB, vcpus: {}",
         config.pool_size, config.default_memory_mb, config.default_vcpus
     );
 
-    // Initialize pool (creates base snapshot if needed, fills pool)
+    // The signal handlers are installed now, before the start, which can take half a minute (the base snapshot): a request to stop during
+    // it is not lost, and stops what was started.
+    let mut stop = StopSignals::new();
+
     let pool = pool::Pool::new(config.clone());
-    // VMs of an earlier daemon that died without cleaning up are held in memory and known to nobody: stop them first.
-    let swept = pool.sweep_orphans().await;
-    if swept > 0 {
-        info!("stopped {swept} Cloud Hypervisor processes left by an earlier daemon");
-    }
-    pool.initialize().await?;
-    // A pool VM whose process died on its own (OOM kill, crash) is replaced within a few seconds, not when a pod is given it.
-    pool.spawn_reaper(std::time::Duration::from_secs(5));
-
-    // Initialize snapshot manager (for warm workload snapshots)
-    let snapshots = shadow::SnapshotManager::new(config.clone(), Arc::clone(&pool));
-
-    // Start API server. On SIGTERM or SIGINT, stop every VM before exiting: the VMs are this daemon's children and must not outlive it.
     let socket_path = config.socket_path.clone();
-    let pool_for_shutdown = Arc::clone(&pool);
-    let server = api::ApiServer::new(config, pool, snapshots);
+    let run = async {
+        pool.prepare_state_dir()?;
+        // VMs of an earlier daemon that died without cleaning up are held in memory and known to nobody: stop them first.
+        let swept = pool.sweep_orphans().await;
+        if swept > 0 {
+            info!("stopped {swept} Cloud Hypervisor processes left by an earlier daemon");
+        }
+        // Rootless: what an earlier daemon left of its VMs' users (processes, ACL entries on the images) goes before any user is given
+        // out.
+        rootless::sweep_processes(&config).await;
+        rootless::sweep_acls(&config);
+        // The workload snapshots of an earlier daemon are unknown to this one (its cache is empty) and were made by VMs it can no longer
+        // vouch for: they go. The base snapshot is reused only if the daemon marked it complete (see `Pool::base_snapshot_valid`).
+        if let Ok(entries) = std::fs::read_dir(config.snapshot_cache_dir()) {
+            for e in entries.flatten() {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+
+        // Initialize pool (creates base snapshot if needed, fills pool)
+        pool.initialize().await?;
+        // A pool VM whose process died on its own (OOM kill, crash) is replaced within a few seconds, not when a pod is given it.
+        pool.spawn_reaper(std::time::Duration::from_secs(5));
+
+        // Initialize snapshot manager (for warm workload snapshots)
+        let snapshots = shadow::SnapshotManager::new(config.clone(), Arc::clone(&pool));
+
+        // Start API server.
+        let server = api::ApiServer::new(config.clone(), Arc::clone(&pool), snapshots);
+        server.serve().await
+    };
+
+    // On SIGTERM or SIGINT, stop every VM before exiting: the VMs are this daemon's children and must not outlive it. From then on no
+    // request makes a VM (`Pool::is_stopping`).
     tokio::select! {
-        result = server.serve() => result,
-        _ = shutdown_signal() => {
+        result = run => result,
+        _ = stop.wait() => {
             info!("stop requested: stopping all VMs");
-            pool_for_shutdown.shutdown_all().await;
+            pool.shutdown_all().await;
             let _ = std::fs::remove_file(&socket_path);
             info!("all VMs stopped, exiting");
             Ok(())
@@ -75,13 +95,26 @@ async fn main() -> Result<()> {
     }
 }
 
-/// Resolves when the process gets SIGTERM (systemd stop, docker stop) or SIGINT (Ctrl-C).
-async fn shutdown_signal() {
-    use tokio::signal::unix::{signal, SignalKind};
-    let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
-    let mut int = signal(SignalKind::interrupt()).expect("SIGINT handler");
-    tokio::select! {
-        _ = term.recv() => {}
-        _ = int.recv() => {}
+/// SIGTERM (systemd stop, docker stop) and SIGINT (Ctrl-C), registered when this is made.
+struct StopSignals {
+    term: tokio::signal::unix::Signal,
+    int: tokio::signal::unix::Signal,
+}
+
+impl StopSignals {
+    fn new() -> Self {
+        use tokio::signal::unix::{signal, SignalKind};
+        Self {
+            term: signal(SignalKind::terminate()).expect("SIGTERM handler"),
+            int: signal(SignalKind::interrupt()).expect("SIGINT handler"),
+        }
+    }
+
+    /// Resolves when either has arrived.
+    async fn wait(&mut self) {
+        tokio::select! {
+            _ = self.term.recv() => {}
+            _ = self.int.recv() => {}
+        }
     }
 }

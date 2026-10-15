@@ -104,6 +104,10 @@ impl Netlink {
             while off + 16 <= n {
                 let len = u32_at(&r, off) as usize;
                 let ty = u16_at(&r, off + 4);
+                // A header is 16 bytes. A shorter length would leave `off` where it is and loop for ever.
+                if len < 16 {
+                    anyhow::bail!("nl dump: malformed message (length {len})");
+                }
                 if ty == 3 {
                     return Ok(out);
                 }
@@ -113,7 +117,7 @@ impl Netlink {
                         anyhow::bail!("nl dump: {}", std::io::Error::from_raw_os_error(-e));
                     }
                 }
-                if len > 0 && off + len <= n {
+                if off + len <= n {
                     out.push(r[off..off + len].to_vec());
                 }
                 off += (len + 3) & !3;

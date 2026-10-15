@@ -4,6 +4,7 @@
 //! They are used by the pool manager and shadow VM logic.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use log::{info, warn};
@@ -11,6 +12,27 @@ use tokio::net::UnixStream;
 use tokio::process::Command;
 
 use crate::config::DaemonConfig;
+
+/// How long a call to the Cloud Hypervisor API may take. A snapshot or a restore of a big guest takes longer than the rest.
+const API_TIMEOUT: Duration = Duration::from_secs(30);
+const API_TIMEOUT_SLOW: Duration = Duration::from_secs(120);
+
+/// Whether `path` is a socket and not a link (to some other socket or file). The daemon is root and the Cloud Hypervisor owns the
+/// directory its sockets are in: a link put there would have root talk to whatever it points at.
+fn is_socket(path: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_socket())
+        .unwrap_or(false)
+}
+
+fn check_socket(path: &Path) -> Result<()> {
+    if is_socket(path) {
+        Ok(())
+    } else {
+        anyhow::bail!("{} is not a socket", path.display())
+    }
+}
 
 /// Boot a VM from scratch (cold boot) of the default size. Returns the CH process PID.
 pub async fn boot_vm(
@@ -39,6 +61,9 @@ pub async fn boot_vm(
 
 /// Boot a VM from scratch with the given memory and vCPUs. `shared` backs the guest's RAM with a shared (memfd) mapping, which a VM
 /// that will be snapshotted needs; a VM that will not be (a pod's VM of its own size) uses ordinary anonymous memory.
+///
+/// If any step after the process was started fails, the VM is stopped and everything of it removed (its user, its ACL entries, its
+/// directory): a failed boot leaves nothing behind.
 #[allow(clippy::too_many_arguments)]
 pub async fn boot_vm_sized(
     config: &DaemonConfig,
@@ -52,73 +77,89 @@ pub async fn boot_vm_sized(
     vcpus: u32,
     shared: bool,
 ) -> Result<u32> {
+    // The console log is made before the Cloud Hypervisor exists, while the directory is still root's: afterwards the directory is the
+    // VM's, which could have put a link in the place of the file. `spawn_ch` hands the file to the VM's user.
+    let console_log = state_dir.join("console.log");
+    let serial = config.serial_console_enabled();
+    if serial {
+        crate::fsutil::create_new(&console_log).context("create console.log")?;
+    }
     let ch_pid = spawn_ch(config, state_dir).await?;
     let api_socket = state_dir.join("api.sock");
-    wait_ch_ready(&api_socket).await?;
 
-    let vsock_socket = state_dir.join("vsock.sock");
-    let console_log = state_dir.join("console.log");
-    std::fs::File::create(&console_log)?;
-    crate::rootless::give(&console_log, state_dir)?;
-    for (path, _, _) in extra_disks {
-        crate::rootless::allow_read(Path::new(path), state_dir)?;
-    }
+    let steps = async {
+        wait_ch_ready(&api_socket).await?;
+        let vsock_socket = state_dir.join("vsock.sock");
+        for (path, _, _) in extra_disks {
+            crate::rootless::allow_read(Path::new(path), state_dir)?;
+        }
 
-    // Build VM config
-    let mut disks = vec![serde_json::json!({
-        "path": config.rootfs_path,
-        "readonly": true,
-        "image_type": "Raw",
-        "id": "_disk0",
-    })];
-    for (path, id, readonly) in extra_disks {
-        disks.push(serde_json::json!({
-            "path": path,
-            "readonly": readonly,
+        // Build VM config
+        let mut disks = vec![serde_json::json!({
+            "path": config.rootfs_path,
+            "readonly": true,
             "image_type": "Raw",
-            "id": id,
-        }));
+            "id": "_disk0",
+        })];
+        for (path, id, readonly) in extra_disks {
+            disks.push(serde_json::json!({
+                "path": path,
+                "readonly": readonly,
+                "image_type": "Raw",
+                "id": id,
+            }));
+        }
+
+        let mut net = Vec::new();
+        if let (Some(tap), Some(mac)) = (tap_name, tap_mac) {
+            net.push(serde_json::json!({
+                "tap": tap,
+                "mac": mac,
+            }));
+        }
+
+        let memory_bytes = memory_mb
+            .checked_mul(1024 * 1024)
+            .context("the memory size does not fit")?;
+        let serial_config = if serial {
+            serde_json::json!({ "mode": "File", "file": console_log.to_string_lossy() })
+        } else {
+            serde_json::json!({ "mode": "Off" })
+        };
+        let vm_config = serde_json::json!({
+            "payload": {
+                "kernel": config.kernel_path,
+                "cmdline": config.kernel_args,
+            },
+            "cpus": {
+                "boot_vcpus": vcpus,
+                "max_vcpus": vcpus,
+            },
+            "memory": {
+                "size": memory_bytes,
+                "shared": shared,
+            },
+            "disks": disks,
+            "net": net,
+            "serial": serial_config,
+            "console": { "mode": "Off" },
+            "vsock": { "cid": cid, "socket": vsock_socket.to_string_lossy() },
+        });
+
+        api_request(
+            &api_socket,
+            "PUT",
+            "/api/v1/vm.create",
+            Some(&vm_config.to_string()),
+        )
+        .await?;
+        api_request(&api_socket, "PUT", "/api/v1/vm.boot", None).await
     }
-
-    let mut net = Vec::new();
-    if let (Some(tap), Some(mac)) = (tap_name, tap_mac) {
-        net.push(serde_json::json!({
-            "tap": tap,
-            "mac": mac,
-        }));
+    .await;
+    if let Err(e) = steps {
+        shutdown_and_destroy(&api_socket, ch_pid, state_dir).await;
+        return Err(e);
     }
-
-    let vm_config = serde_json::json!({
-        "payload": {
-            "kernel": config.kernel_path,
-            "cmdline": config.kernel_args,
-        },
-        "cpus": {
-            "boot_vcpus": vcpus,
-            "max_vcpus": vcpus,
-        },
-        "memory": {
-            "size": memory_mb * 1024 * 1024,
-            "shared": shared,
-        },
-        "disks": disks,
-        "net": net,
-        "serial": { "mode": "File", "file": console_log.to_string_lossy() },
-        "console": { "mode": "Off" },
-        "vsock": { "cid": cid, "socket": vsock_socket.to_string_lossy() },
-    });
-
-    api_request(
-        &api_socket,
-        "PUT",
-        "/api/v1/vm.create",
-        Some(&vm_config.to_string()),
-    )
-    .await?;
-    api_request(&api_socket, "PUT", "/api/v1/vm.boot", None).await?;
-
-    // Save PID for cleanup
-    std::fs::write(state_dir.join("ch.pid"), ch_pid.to_string())?;
 
     info!(
         "VM {} booted (pid={}, cid={}, {} MiB, {} vCPUs)",
@@ -127,8 +168,20 @@ pub async fn boot_vm_sized(
     Ok(ch_pid)
 }
 
-/// Spawn a Cloud Hypervisor process. Returns PID.
+/// Spawn a Cloud Hypervisor process. Returns PID. Records it where only root can (`ctl.rs`). If rootless, the VM gets a user of its own
+/// first, who owns the state directory (and `console.log`, if it is there already). A failure leaves no user and no record behind.
 pub async fn spawn_ch(config: &DaemonConfig, state_dir: &Path) -> Result<u32> {
+    match spawn_ch_inner(config, state_dir).await {
+        Ok(pid) => Ok(pid),
+        Err(e) => {
+            crate::rootless::release(state_dir).await;
+            crate::ctl::remove(state_dir);
+            Err(e)
+        }
+    }
+}
+
+async fn spawn_ch_inner(config: &DaemonConfig, state_dir: &Path) -> Result<u32> {
     let api_socket = state_dir.join("api.sock");
     let mut cmd = Command::new(&config.cloud_hypervisor_binary);
     cmd.arg("--api-socket")
@@ -137,21 +190,13 @@ pub async fn spawn_ch(config: &DaemonConfig, state_dir: &Path) -> Result<u32> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 
-    // Rootless: a user for this VM alone, who owns the state directory (and console log, if it is there already).
-    let user = crate::rootless::alloc()?;
+    crate::ctl::create(state_dir)?;
+    let user = crate::rootless::alloc_for(state_dir)?;
     if let Some((uid, gid)) = user {
-        let setup = (|| -> Result<()> {
-            crate::rootless::record(state_dir, uid)?;
-            crate::rootless::give(state_dir, state_dir)?;
-            let console = state_dir.join("console.log");
-            if console.exists() {
-                crate::rootless::give(&console, state_dir)?;
-            }
-            Ok(())
-        })();
-        if let Err(e) = setup {
-            crate::rootless::release(state_dir);
-            return Err(e);
+        crate::rootless::give(state_dir, state_dir)?;
+        let console = state_dir.join("console.log");
+        if console.exists() {
+            crate::rootless::give(&console, state_dir)?;
         }
         // std clears the supplementary groups when it drops from root; the group is the one that may open /dev/kvm.
         cmd.uid(uid).gid(gid);
@@ -161,6 +206,7 @@ pub async fn spawn_ch(config: &DaemonConfig, state_dir: &Path) -> Result<u32> {
     // SIGTERM/SIGINT which CH inherits, preventing CH's signal handler from
     // receiving them. Clear the mask so CH can handle signals normally.
     let rootless = user.is_some();
+    let max_processes = config.ch_max_processes;
     unsafe {
         cmd.pre_exec(move || {
             let mut set: libc::sigset_t = std::mem::zeroed();
@@ -170,54 +216,68 @@ pub async fn spawn_ch(config: &DaemonConfig, state_dir: &Path) -> Result<u32> {
             if libc::sigprocmask(libc::SIG_SETMASK, &set, std::ptr::null_mut()) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            if rootless && libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+            // No core file: it would hold the guest's memory.
+            let no_core = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+            if libc::setrlimit(libc::RLIMIT_CORE, &no_core) != 0 {
                 return Err(std::io::Error::last_os_error());
+            }
+            if rootless {
+                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // The VM's user is its own, so this counts the processes and threads of this one VM: a fork bomb in a compromised
+                // Cloud Hypervisor stops here, not at the host's limit.
+                let nproc = libc::rlimit {
+                    rlim_cur: max_processes as libc::rlim_t,
+                    rlim_max: max_processes as libc::rlim_t,
+                };
+                if libc::setrlimit(libc::RLIMIT_NPROC, &nproc) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
             }
             Ok(())
         });
     }
 
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            crate::rootless::release(state_dir);
-            return Err(e).context("spawn cloud-hypervisor");
-        }
-    };
-
+    let mut child = cmd.spawn().context("spawn cloud-hypervisor")?;
     let pid = child.id().context("get CH pid")?;
+    if let Err(e) = crate::ctl::write_pid(state_dir, pid) {
+        let _ = child.start_kill();
+        tokio::spawn(async move {
+            let _ = child.wait().await;
+        });
+        return Err(e);
+    }
     // Spawn a background task to reap the child when it exits, avoiding
     // zombie processes without blocking the caller.
     tokio::spawn(async move {
         let _ = child.wait().await;
     });
-
-    std::fs::write(state_dir.join("ch.pid"), pid.to_string())?;
     Ok(pid)
 }
 
 /// Wait for the CH API socket to become ready.
 pub async fn wait_ch_ready(api_socket: &Path) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while tokio::time::Instant::now() < deadline {
-        if api_socket.exists() && UnixStream::connect(api_socket).await.is_ok() {
+        if is_socket(api_socket) && UnixStream::connect(api_socket).await.is_ok() {
             return Ok(());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     anyhow::bail!("CH API socket not ready: {}", api_socket.display())
 }
 
 /// Connect to the guest agent via vsock and verify it responds.
 pub async fn wait_for_agent(vsock_socket: &Path) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     while tokio::time::Instant::now() < deadline {
-        if vsock_socket.exists() {
+        if is_socket(vsock_socket) {
             if let Ok(()) = try_agent_health(vsock_socket).await {
                 return Ok(());
             }
         }
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     anyhow::bail!("agent not responding on vsock: {}", vsock_socket.display())
 }
@@ -234,11 +294,7 @@ async fn try_agent_health(vsock_socket: &Path) -> Result<()> {
 
     let mut buf_reader = BufReader::new(reader);
     let mut response = String::new();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        buf_reader.read_line(&mut response),
-    )
-    .await??;
+    tokio::time::timeout(Duration::from_secs(2), buf_reader.read_line(&mut response)).await??;
 
     if response.starts_with("OK") {
         Ok(())
@@ -257,25 +313,24 @@ pub async fn resume_vm(api_socket: &Path) -> Result<()> {
     api_request(api_socket, "PUT", "/api/v1/vm.resume", None).await
 }
 
-/// Take a snapshot of a paused VM.
-/// `shared`: the base snapshot (see `rootless::hand_over_snapshot`).
-pub async fn snapshot_vm(api_socket: &Path, dest_dir: &Path, shared: bool) -> Result<()> {
-    // Rootless: the VM that takes the snapshot writes it, so it owns the directory meanwhile; afterwards the group of all VMs reads it.
+/// Take a snapshot of a paused VM into `dest_dir`, a directory that was just made (by root). Rootless, the VM that takes the snapshot
+/// writes it, so it owns the directory meanwhile. What is in the directory afterwards is the VM's work and is not trusted: the caller
+/// must destroy the VM (`shutdown_and_destroy`) and then `rootless::hand_over_snapshot` before it reads or uses any of it.
+pub async fn snapshot_vm(api_socket: &Path, dest_dir: &Path) -> Result<()> {
     if let Some(state_dir) = api_socket.parent() {
         crate::rootless::give(dest_dir, state_dir)?;
     }
     let body = serde_json::json!({
         "destination_url": format!("file://{}", dest_dir.display()),
     });
-    let result = api_request(
+    api_request_timeout(
         api_socket,
         "PUT",
         "/api/v1/vm.snapshot",
         Some(&body.to_string()),
+        API_TIMEOUT_SLOW,
     )
-    .await;
-    crate::rootless::hand_over_snapshot(dest_dir, shared)?;
-    result
+    .await
 }
 
 /// The memory restore mode of `vm.restore`: `OnDemand` (userfaultfd, lazy) or `Copy` (the snapshot is read into guest RAM before the
@@ -296,25 +351,57 @@ pub async fn restore_vm(api_socket: &Path, source_dir: &Path) -> Result<()> {
         "prefault": false,
         "memory_restore_mode": memory_restore_mode(),
     });
-    api_request(
+    api_request_timeout(
         api_socket,
         "PUT",
         "/api/v1/vm.restore",
         Some(&body.to_string()),
+        API_TIMEOUT_SLOW,
     )
     .await
 }
 
 /// Prepare a snapshot directory for a specific VM: patch CID, vsock socket,
 /// serial console path. Hardlinks large files (memory-ranges) for CoW.
+///
+/// The configuration of a snapshot was written by the Cloud Hypervisor that took it. It is checked (`validate_snapshot_config`) and the
+/// pod's image is put in the place of the image disk the snapshot names, so that nothing of what the snapshot says about the host (a
+/// disk path, a device) is used. `image` is the image of the pod, None for the base snapshot (which has no image disk). A snapshot that
+/// does not pass is an error: the caller must not use it.
 pub fn prepare_snapshot(
+    config: &DaemonConfig,
     base_dir: &Path,
     vm_state_dir: &Path,
     new_cid: u64,
     new_vsock_socket: &Path,
+    image: Option<&str>,
 ) -> Result<PathBuf> {
     let work_dir = vm_state_dir.join("snapshot");
     std::fs::create_dir_all(&work_dir)?;
+
+    // Read, check, patch, and write config.json
+    let config_str = std::fs::read_to_string(base_dir.join("config.json"))?;
+    let mut cfg: serde_json::Value = serde_json::from_str(&config_str)?;
+
+    // The image disk of a warm snapshot is the one the shadow VM had, named by the path it had then. The image of this pod has the same
+    // content (the key is its hash), at whatever path the shim keeps it now: that path is the disk.
+    if let Some(disks) = cfg.get_mut("disks").and_then(|d| d.as_array_mut()) {
+        let mut extra = 0;
+        for d in disks.iter_mut() {
+            if d.get("path").and_then(|p| p.as_str()) == Some(config.rootfs_path.as_str()) {
+                continue;
+            }
+            extra += 1;
+            match (image, extra) {
+                (Some(img), 1) => {
+                    d["path"] = serde_json::json!(img);
+                }
+                _ => anyhow::bail!("the snapshot has a disk the VM may not have"),
+            }
+        }
+    }
+    crate::validate::validate_snapshot_config(&cfg, &config.kernel_path, &config.rootfs_path, image)
+        .context("the snapshot's configuration is not accepted")?;
 
     // Hardlink large files
     for name in &["memory-ranges", "state.json"] {
@@ -331,12 +418,8 @@ pub fn prepare_snapshot(
             .with_context(|| format!("link {name} from base snapshot"))?;
     }
 
-    // Read, patch, and write config.json
-    let config_str = std::fs::read_to_string(base_dir.join("config.json"))?;
-    let mut config: serde_json::Value = serde_json::from_str(&config_str)?;
-
     // Patch vsock CID and socket
-    if let Some(vsock) = config.pointer_mut("/vsock") {
+    if let Some(vsock) = cfg.pointer_mut("/vsock") {
         if let Some(obj) = vsock.as_object_mut() {
             obj.insert("cid".to_string(), serde_json::json!(new_cid));
             obj.insert(
@@ -346,66 +429,71 @@ pub fn prepare_snapshot(
         }
     }
 
-    // Patch serial console path
+    // Patch serial console path. The file is made here, before the Cloud Hypervisor exists (the directory is still root's); `spawn_ch`
+    // hands it to the VM's user. A snapshot taken with the console off is restored with it off.
     let console_path = vm_state_dir.join("console.log");
-    std::fs::File::create(&console_path)?;
-    if let Some(serial) = config.pointer_mut("/serial") {
+    if let Some(serial) = cfg.pointer_mut("/serial") {
         if let Some(obj) = serial.as_object_mut() {
             if obj.get("mode").and_then(|v| v.as_str()) == Some("File") {
-                obj.insert(
-                    "file".to_string(),
-                    serde_json::json!(console_path.to_string_lossy()),
-                );
+                if config.serial_console_enabled() {
+                    crate::fsutil::create_new(&console_path).context("create console.log")?;
+                    obj.insert(
+                        "file".to_string(),
+                        serde_json::json!(console_path.to_string_lossy()),
+                    );
+                } else {
+                    *serial = serde_json::json!({ "mode": "Off" });
+                }
             }
         }
     }
 
-    std::fs::write(
-        work_dir.join("config.json"),
-        serde_json::to_string_pretty(&config)?,
-    )?;
+    std::fs::write(work_dir.join("config.json"), serde_json::to_string_pretty(&cfg)?)?;
 
     Ok(work_dir)
 }
 
-/// Shutdown and destroy a VM.
+/// Wait up to `ms` milliseconds for the process to be gone.
+async fn wait_gone(pid: u32, ms: u64) -> bool {
+    let mut waited = 0;
+    while waited <= ms {
+        if !crate::ctl::pid_alive(pid) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        waited += 5;
+    }
+    !crate::ctl::pid_alive(pid)
+}
+
+/// Shutdown and destroy a VM: stop its Cloud Hypervisor (only if the process is really that VM's; see `ctl::signal_ch`), kill what its
+/// user left, take back its ACL entries, free its user, and remove its record and its directory. Safe to call for a VM that is gone.
 pub async fn shutdown_and_destroy(_api_socket: &Path, ch_pid: u32, state_dir: &Path) {
     let t0 = std::time::Instant::now();
 
     // Send SIGTERM to CH. CH handles SIGTERM by shutting down the VM and
     // exiting cleanly (requires signal mask to be cleared in spawn_ch).
-    unsafe {
-        libc::kill(ch_pid as i32, libc::SIGTERM);
-    }
-
-    // Wait for CH to exit gracefully
-    let proc_path = format!("/proc/{ch_pid}");
-    for _ in 0..200 {
-        if !std::path::Path::new(&proc_path).exists() {
-            info!(
-                "VM {} exited gracefully in {}ms",
+    if crate::ctl::pid_alive(ch_pid) {
+        crate::ctl::signal_ch(ch_pid, state_dir, libc::SIGTERM);
+        if wait_gone(ch_pid, 1000).await {
+            info!("VM {} exited gracefully in {}ms", ch_pid, t0.elapsed().as_millis());
+        } else {
+            // Fallback: force kill if CH did not exit within 1s
+            warn!(
+                "VM {} did not exit after {}ms, force killing",
                 ch_pid,
                 t0.elapsed().as_millis()
             );
-            crate::rootless::release(state_dir);
-            let _ = std::fs::remove_dir_all(state_dir);
-            return;
+            crate::ctl::signal_ch(ch_pid, state_dir, libc::SIGKILL);
+            if !wait_gone(ch_pid, 500).await {
+                warn!("VM {} is still there after SIGKILL", ch_pid);
+            }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
 
-    // Fallback: force kill if CH did not exit within 1s
-    warn!(
-        "VM {} did not exit after {}ms, force killing",
-        ch_pid,
-        t0.elapsed().as_millis()
-    );
-    unsafe {
-        libc::kill(ch_pid as i32, libc::SIGKILL);
-    }
-    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-    crate::rootless::release(state_dir);
+    // Rootless: every other process of the VM's user goes too, and only then is the user free for another VM.
+    crate::rootless::release(state_dir).await;
+    crate::ctl::remove(state_dir);
     let _ = std::fs::remove_dir_all(state_dir);
     info!("VM {} destroyed in {}ms", ch_pid, t0.elapsed().as_millis());
 }
@@ -417,11 +505,35 @@ pub async fn api_request(
     path: &str,
     body: Option<&str>,
 ) -> Result<()> {
+    api_request_timeout(socket_path, method, path, body, API_TIMEOUT).await
+}
+
+/// `api_request` that gives up after `timeout`: a Cloud Hypervisor that has been compromised can leave a call hanging for ever.
+pub async fn api_request_timeout(
+    socket_path: &Path,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    timeout: Duration,
+) -> Result<()> {
+    match tokio::time::timeout(timeout, api_request_inner(socket_path, method, path, body)).await {
+        Ok(r) => r,
+        Err(_) => anyhow::bail!("CH API {method} {path}: no answer in {}s", timeout.as_secs()),
+    }
+}
+
+async fn api_request_inner(
+    socket_path: &Path,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> Result<()> {
     use http_body_util::{BodyExt, Empty, Full};
     use hyper::body::Bytes;
     use hyper::Request;
     use hyper_util::rt::TokioIo;
 
+    check_socket(socket_path)?;
     let stream = UnixStream::connect(socket_path)
         .await
         .with_context(|| format!("connect to CH API: {}", socket_path.display()))?;
@@ -472,7 +584,8 @@ pub async fn api_request_with_body(
 }
 
 /// A request to the CH API that carries file descriptors (SCM_RIGHTS), which the API takes for devices backed by descriptors the caller
-/// opened (a TAP). The descriptors go with the first bytes of the request; the answer is read to its end.
+/// opened (a TAP). The descriptors go with the first bytes of the request; the answer is read to its end. Reading and writing give up
+/// after ten seconds each.
 pub async fn api_request_with_fds(
     socket_path: &Path,
     method: &str,
@@ -480,6 +593,7 @@ pub async fn api_request_with_fds(
     body: &str,
     fds: &[std::os::unix::io::RawFd],
 ) -> Result<()> {
+    check_socket(socket_path)?;
     let socket_path = socket_path.to_path_buf();
     let request = format!(
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -492,7 +606,8 @@ pub async fn api_request_with_fds(
         use std::os::unix::io::AsRawFd;
         let mut stream = std::os::unix::net::UnixStream::connect(&socket_path)
             .with_context(|| format!("connect {}", socket_path.display()))?;
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(10)))?;
         let bytes = request.as_bytes();
 
         let fd_len = std::mem::size_of_val(fds.as_slice());
@@ -520,8 +635,9 @@ pub async fn api_request_with_fds(
         }
         stream.write_all(&bytes[sent as usize..])?;
 
+        // The answer is small; a Cloud Hypervisor that keeps writing is not read for more than a megabyte.
         let mut answer = Vec::new();
-        let _ = stream.read_to_end(&mut answer);
+        let _ = stream.take(1 << 20).read_to_end(&mut answer);
         let text = String::from_utf8_lossy(&answer);
         let status = text.split_whitespace().nth(1).unwrap_or("?");
         if !status.starts_with('2') {
@@ -543,6 +659,7 @@ pub async fn connect_agent(
 )> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+    check_socket(vsock_socket)?;
     let stream = UnixStream::connect(vsock_socket)
         .await
         .with_context(|| format!("connect vsock: {}", vsock_socket.display()))?;
@@ -553,13 +670,10 @@ pub async fn connect_agent(
 
     let mut buf_reader = BufReader::new(reader);
     let mut response = String::new();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        buf_reader.read_line(&mut response),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("vsock CONNECT handshake timed out"))?
-    .context("vsock read")?;
+    tokio::time::timeout(Duration::from_secs(5), buf_reader.read_line(&mut response))
+        .await
+        .map_err(|_| anyhow::anyhow!("vsock CONNECT handshake timed out"))?
+        .context("vsock read")?;
 
     if !response.starts_with("OK") {
         anyhow::bail!("vsock CONNECT failed: {}", response.trim());

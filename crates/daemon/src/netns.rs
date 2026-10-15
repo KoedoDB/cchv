@@ -29,6 +29,8 @@ pub fn prepare_tap(
     tap_name: &str,
     hand_over: bool,
 ) -> Result<(PodNetInfo, Option<OwnedFd>)> {
+    check_netns(netns_path)?;
+
     // Discover veth info (IP, MAC, gateway) from pod netns
     let info = in_netns(netns_path, || {
         let nl = Netlink::open().context("netlink")?;
@@ -87,7 +89,7 @@ pub fn activate_tap(netns_path: &str, tap_name: &str) -> Result<()> {
     {
         let nl = Netlink::open().context("netlink")?;
         let tap_idx = nl.get_link_index(tap_name).context("TAP index")?;
-        let ns_fd = open_ns(netns_path)?;
+        let ns_fd = open_checked(netns_path)?;
         nl.set_link_netns_fd(tap_idx, ns_fd.as_raw_fd())
             .context("move TAP to pod netns")?;
     }
@@ -114,17 +116,57 @@ pub fn activate_tap(netns_path: &str, tap_name: &str) -> Result<()> {
 
 // ── Netns helpers ───────────────────────────────────────────────────────────
 
-struct NetnsGuard(OwnedFd);
+const NSFS_MAGIC: i64 = 0x6e73_6673;
+/// `ioctl(NS_GET_NSTYPE)` on a namespace file returns the `CLONE_NEW*` flag of its kind.
+const NS_GET_NSTYPE: libc::c_ulong = 0xb703;
 
-impl Drop for NetnsGuard {
-    fn drop(&mut self) {
-        let _ = unsafe { libc::setns(self.0.as_raw_fd(), libc::CLONE_NEWNET) };
+/// Open a network namespace file and make sure it is one: on `nsfs`, of the network kind, and not the daemon's own (which is the host's;
+/// a request that names it would have the guest bridged to the host's interfaces). `path` must be one `validate::netns_path_allowed`
+/// accepts.
+fn open_checked(path: &str) -> Result<OwnedFd> {
+    if !crate::validate::netns_path_allowed(path) {
+        anyhow::bail!("{path} is not a network namespace the daemon may enter");
     }
+    let fd = open_ns(path)?;
+    let mut sfs: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatfs(fd.as_raw_fd(), &mut sfs) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("fstatfs");
+    }
+    if sfs.f_type as i64 != NSFS_MAGIC {
+        anyhow::bail!("{path} is not a namespace file");
+    }
+    let kind = unsafe { libc::ioctl(fd.as_raw_fd(), NS_GET_NSTYPE as _) };
+    if kind != libc::CLONE_NEWNET {
+        anyhow::bail!("{path} is not a network namespace");
+    }
+    let own = open_ns("/proc/self/ns/net")?;
+    let (a, b) = (stat_of(fd.as_raw_fd())?, stat_of(own.as_raw_fd())?);
+    if (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino) {
+        anyhow::bail!("{path} is the daemon's own network namespace");
+    }
+    Ok(fd)
 }
 
+fn stat_of(fd: i32) -> Result<libc::stat> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("fstat");
+    }
+    Ok(st)
+}
+
+/// Whether a request's network namespace is one the daemon will enter (see `open_checked`).
+pub fn check_netns(path: &str) -> Result<()> {
+    open_checked(path).map(|_| ())
+}
+
+/// Run `f` inside the network namespace `path`. It runs on a thread of its own that ends with it: `setns` changes the namespace of the
+/// calling thread, and a thread that could not come back (or was left inside by a panic) must never be a worker that other work runs
+/// on. A thread that is gone cannot be found in the wrong namespace later, so nothing has to be put back.
 fn in_netns<F, T>(path: &str, f: F) -> Result<T>
 where
-    F: FnOnce() -> Result<T>,
+    F: FnOnce() -> Result<T> + Send,
+    T: Send,
 {
     for attempt in 0..20 {
         if std::path::Path::new(path).exists() {
@@ -138,16 +180,37 @@ where
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    let orig = open_ns("/proc/self/ns/net")?;
-    let target = open_ns(path)?;
-    if unsafe { libc::setns(target.as_raw_fd(), libc::CLONE_NEWNET) } != 0 {
-        return Err(std::io::Error::last_os_error()).context("setns into target");
-    }
-    drop(target);
-    let _guard = NetnsGuard(orig);
-    f()
+    let target = open_checked(path)?;
+    std::thread::scope(|s| {
+        std::thread::Builder::new()
+            .name("netns".into())
+            .spawn_scoped(s, move || {
+                if unsafe { libc::setns(target.as_raw_fd(), libc::CLONE_NEWNET) } != 0 {
+                    return Err(std::io::Error::last_os_error()).context("setns into target");
+                }
+                drop(target);
+                f()
+            })
+            .context("spawn the netns thread")?
+            .join()
+            .map_err(|_| anyhow::anyhow!("the netns thread panicked"))?
+    })
 }
 
+/// Delete a TAP device, wherever it is: in the daemon's namespace (before it was moved) or in the pod's (after). Best effort; for the
+/// cleanup of a start that failed.
+pub fn delete_tap(netns_path: &str, tap_name: &str) {
+    if let Ok(nl) = Netlink::open() {
+        let _ = nl.del_link(tap_name);
+    }
+    let _ = in_netns(netns_path, || {
+        let nl = Netlink::open().context("netlink")?;
+        let _ = nl.del_link(tap_name);
+        Ok(())
+    });
+}
+
+/// (Not `O_NOFOLLOW`: `/proc/<pid>/ns/net` is a link of the kernel's own. What the file is, is checked after, by `open_checked`.)
 fn open_ns(path: &str) -> Result<OwnedFd> {
     let c = std::ffi::CString::new(path)?;
     let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };

@@ -381,6 +381,7 @@ dependencies = [
  "protobuf 3.4.0",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tower 0.5.3",
  "ttrpc",
@@ -477,7 +478,9 @@ dependencies = [
  "libc",
  "log",
  "nix 0.29.0",
+ "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
 ]
@@ -496,7 +499,7 @@ dependencies = [
 [[package]]
 name = "containerd-shimkit"
 version = "0.1.1"
-source = "git+https://github.com/devigned/runwasi.git?branch=shimkit-ttrpc-0.10#faee81b62728f235a28c81f6db71c4e7f6db1d4a"
+source = "git+https://github.com/devigned/runwasi.git?rev=faee81b62728f235a28c81f6db71c4e7f6db1d4a#faee81b62728f235a28c81f6db71c4e7f6db1d4a"
 dependencies = [
  "anyhow",
  "caps",

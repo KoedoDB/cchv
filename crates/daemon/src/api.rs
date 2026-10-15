@@ -3,8 +3,12 @@
 //! The daemon listens on a Unix socket and serves AcquireSandbox,
 //! ReleaseSandbox, container lifecycle proxies, and Status RPCs
 //! using a newline-delimited JSON protocol.
+//!
+//! The daemon is root and this is its one door, so the door is narrow: the socket is root's (0600) and a connection from any other user
+//! is closed; a request line, the number of connections and the sizes a request may ask for are limited; and every string of a request
+//! that becomes a path, a name or a size is checked before anything is made (`validate.rs`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -15,12 +19,53 @@ use tokio::sync::Mutex;
 use crate::config::DaemonConfig;
 use crate::pool::Pool;
 use crate::shadow::SnapshotManager;
+use crate::validate;
 
 /// Monotonic counter for unique warm VM IDs.
 static WARM_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Per-VM agent connection, stored after first container start.
 type AgentRegistry = Arc<Mutex<HashMap<String, cloudhv_proto::AgentServiceClient>>>;
+
+/// The names of the TAP devices of the VMs that have one. A name is a hash of the VM's ID (see `tap_name_for`); two VMs whose hashes
+/// collide must not both have it, or the second would delete the first's device. Taken when a VM's network is set up, given back when
+/// the VM is released or the set-up fails.
+static TAP_NAMES: std::sync::Mutex<Option<HashSet<String>>> = std::sync::Mutex::new(None);
+
+fn reserve_tap_name(name: &str) -> bool {
+    TAP_NAMES
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashSet::new)
+        .insert(name.to_string())
+}
+
+fn release_tap_name_of(vm_id: &str) {
+    if let Some(set) = TAP_NAMES.lock().unwrap().as_mut() {
+        set.remove(&tap_name_for(vm_id));
+    }
+}
+
+/// What the daemon keeps for a VM besides the VM itself: its agent connection and its TAP name.
+async fn forget_vm(agents: &AgentRegistry, vm_id: &str) {
+    agents.lock().await.remove(vm_id);
+    release_tap_name_of(vm_id);
+}
+
+/// Stop a VM that was started and is not (or no longer) in the pool's hands: its process, user, directory and the daemon's records.
+async fn abort_vm(
+    agents: &AgentRegistry,
+    vm_id: &str,
+    api_socket: &std::path::Path,
+    ch_pid: u32,
+    state_dir: &std::path::Path,
+) {
+    forget_vm(agents, vm_id).await;
+    crate::vm_lifecycle::shutdown_and_destroy(api_socket, ch_pid, state_dir).await;
+}
+
+/// How long a connection may sit without sending a request.
+const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// The daemon API server. Listens on a Unix socket and serves
 /// AcquireSandbox, ReleaseSandbox, and Status RPCs.
@@ -43,22 +88,53 @@ impl ApiServer {
 
     /// Start the ttrpc server. Blocks until shutdown.
     pub async fn serve(&self) -> Result<()> {
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
         let socket_path = &self.config.socket_path;
 
-        // Remove stale socket
-        let _ = std::fs::remove_file(socket_path);
+        // Remove a stale socket (and nothing else that happens to be at the path)
+        match std::fs::symlink_metadata(socket_path) {
+            Ok(m) if m.file_type().is_socket() => {
+                let _ = std::fs::remove_file(socket_path);
+            }
+            Ok(_) => anyhow::bail!("{socket_path} exists and is not a socket"),
+            Err(_) => {}
+        }
 
-        // Ensure parent directory exists
+        // Ensure parent directory exists. It is not made 0700: the state directory is usually below it, and a VM's user has to pass
+        // through to its own directory. The socket itself is root's.
         if let Some(parent) = std::path::Path::new(socket_path).parent() {
             std::fs::create_dir_all(parent)?;
         }
 
+        // Bound with a umask that leaves no gap in which another user could connect, then fixed to 0600.
+        let listener = {
+            let old = unsafe { libc::umask(0o177) };
+            let bound = tokio::net::UnixListener::bind(socket_path);
+            unsafe { libc::umask(old) };
+            bound?
+        };
+        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
         info!("daemon API listening on {}", socket_path);
 
-        let listener = tokio::net::UnixListener::bind(socket_path)?;
-
+        let limit = Arc::new(tokio::sync::Semaphore::new(self.config.max_connections.max(1)));
         loop {
             let (stream, _) = listener.accept().await?;
+            // Only root: the shim runs as root. Whoever else could reach the socket (the mode is 0600, so this is a second wall) is not served.
+            match stream.peer_cred() {
+                Ok(cred) if cred.uid() == 0 => {}
+                Ok(cred) => {
+                    warn!("closing a connection from user {}", cred.uid());
+                    continue;
+                }
+                Err(e) => {
+                    warn!("closing a connection whose user is unknown: {e}");
+                    continue;
+                }
+            }
+            let Ok(permit) = Arc::clone(&limit).try_acquire_owned() else {
+                warn!("closing a connection: {} are open", self.config.max_connections);
+                continue;
+            };
             let pool = Arc::clone(&self.pool);
             let snapshots = Arc::clone(&self.snapshots);
             let config = self.config.clone();
@@ -68,9 +144,28 @@ impl ApiServer {
                 {
                     log::warn!("client error: {:#}", e);
                 }
+                drop(permit);
             });
         }
     }
+}
+
+/// Read one request line of at most `max` bytes (without reading on past the limit). Ok(false) at the end of the stream.
+async fn read_request_line<R>(reader: &mut R, max: usize, buf: &mut Vec<u8>) -> Result<bool>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+    buf.clear();
+    let mut limited = (&mut *reader).take(max as u64 + 1);
+    let n = limited.read_until(b'\n', buf).await?;
+    if n == 0 {
+        return Ok(false);
+    }
+    if buf.len() > max || (buf.len() == max && buf.last() != Some(&b'\n')) {
+        anyhow::bail!("a request is longer than {max} bytes");
+    }
+    Ok(true)
 }
 
 /// Handle a single client connection (JSON-line protocol).
@@ -81,14 +176,23 @@ async fn handle_connection(
     config: &DaemonConfig,
     agents: &AgentRegistry,
 ) -> Result<()> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
 
     let (reader, mut writer) = stream.into_split();
     let mut buf_reader = BufReader::new(reader);
-    let mut line = String::new();
+    let mut line = Vec::new();
 
-    while buf_reader.read_line(&mut line).await? > 0 {
-        let request: serde_json::Value = serde_json::from_str(line.trim())?;
+    loop {
+        let more = tokio::time::timeout(
+            IDLE_TIMEOUT,
+            read_request_line(&mut buf_reader, config.max_request_bytes, &mut line),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("no request for {}s", IDLE_TIMEOUT.as_secs()))??;
+        if !more {
+            break;
+        }
+        let request: serde_json::Value = serde_json::from_slice(&line)?;
         let method = request.get("method").and_then(|v| v.as_str()).unwrap_or("");
 
         log::debug!(
@@ -104,7 +208,7 @@ async fn handle_connection(
         let response = match method {
             "AcquireSandbox" => handle_acquire(pool, snapshots, config, agents, &request).await,
             "ReleaseSandbox" => handle_release(pool, agents, &request).await,
-            "AddContainer" => handle_add_container(pool, agents, &request).await,
+            "AddContainer" => handle_add_container(pool, config, agents, &request).await,
             "KillContainer" => handle_kill_container(agents, &request).await,
             "WaitContainer" => handle_wait_container(agents, &request).await,
             "ReadLogs" => handle_read_logs(agents, &request).await,
@@ -119,10 +223,24 @@ async fn handle_connection(
         writer.flush().await?;
         // Only the size: an answer can hold a container's output (ReadLogs), which is the customer's and may hold secrets.
         log::info!("responded: {} ({} bytes)", method, resp_str.len());
-        line.clear();
     }
 
     Ok(())
+}
+
+fn field<'a>(request: &'a serde_json::Value, key: &str) -> &'a str {
+    request.get(key).and_then(|v| v.as_str()).unwrap_or("")
+}
+
+fn error(what: &str, e: impl std::fmt::Display) -> serde_json::Value {
+    serde_json::json!({"error": format!("{what}: {e}")})
+}
+
+/// An identifier field of a request that must be there and must be plain.
+fn required_id<'a>(request: &'a serde_json::Value, key: &str) -> Result<&'a str, serde_json::Value> {
+    let v = field(request, key);
+    validate::check_id(key, v).map_err(|e| error("bad request", e))?;
+    Ok(v)
 }
 
 async fn handle_acquire(
@@ -132,32 +250,57 @@ async fn handle_acquire(
     agents: &AgentRegistry,
     request: &serde_json::Value,
 ) -> serde_json::Value {
-    let netns = request.get("netns").and_then(|v| v.as_str()).unwrap_or("");
-    let image_key = request
-        .get("image_key")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let erofs_path = request
-        .get("erofs_path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let container_id = request
-        .get("container_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let config_json_b64 = request
-        .get("config_json")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    if pool.is_stopping() {
+        return serde_json::json!({"error": "the daemon is stopping"});
+    }
+    let netns = field(request, "netns");
+    let erofs_path = field(request, "erofs_path");
+    let container_id = field(request, "container_id");
+    let config_json_b64 = field(request, "config_json");
+
+    // Everything that becomes a path, a name or a size is checked before anything is made.
+    if !netns.is_empty() {
+        if let Err(e) = crate::netns::check_netns(netns) {
+            return error("bad request (netns)", format!("{e:#}"));
+        }
+    }
+    if !container_id.is_empty() {
+        if let Err(e) = validate::check_id("container_id", container_id) {
+            return error("bad request", e);
+        }
+    }
+    if !erofs_path.is_empty() {
+        if let Err(e) = validate::check_erofs_path(config, erofs_path) {
+            return error("bad request (erofs_path)", format!("{e:#}"));
+        }
+    }
+    let want_memory = request.get("memory_mb").and_then(|v| v.as_u64()).unwrap_or(0);
+    let want_vcpus = request.get("vcpus").and_then(|v| v.as_u64()).unwrap_or(0);
+    if let Err(e) = validate::check_size(config, want_memory, want_vcpus) {
+        return error("bad request (size)", e);
+    }
+    let want_vcpus = want_vcpus as u32; // checked above: at most max_vcpus
+    if pool.active_count() >= config.max_active_vms {
+        return serde_json::json!({"error": format!("{} VMs are active, the most max_active_vms allows", pool.active_count())});
+    }
     let volumes = volumes_from_request(request);
+
+    // The key of the warm snapshot is made here, from the content of the image. The one the caller sends is not used: with it, a pod
+    // could be given the warm guest of another pod's image.
+    let image_key = if erofs_path.is_empty() {
+        String::new()
+    } else {
+        match crate::imagekey::content_key(erofs_path).await {
+            Ok(k) => k,
+            Err(e) => return error("image", format!("{e:#}")),
+        }
+    };
+    if let Some(sent) = request.get("image_key").and_then(|v| v.as_str()) {
+        log::debug!("image_key sent {sent:?} not used; the image's own is {image_key}");
+    }
 
     // A pod whose limits ask for a VM of another size than the pool's (and the warm snapshots') cannot be served from them: their
     // memory and CPUs are those of the snapshot. Such a pod gets a VM of its own size, booted for it.
-    let want_memory = request
-        .get("memory_mb")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let want_vcpus = request.get("vcpus").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     if is_other_size(config, want_memory, want_vcpus) {
         return acquire_sized(
             pool,
@@ -180,18 +323,7 @@ async fn handle_acquire(
     }
 
     // Check for warm workload snapshot
-    if !image_key.is_empty()
-        && snapshots
-            .has_snapshot(
-                image_key,
-                if erofs_path.is_empty() {
-                    None
-                } else {
-                    Some(erofs_path)
-                },
-            )
-            .await
-    {
+    if !image_key.is_empty() && snapshots.has_snapshot(&image_key).await {
         let seq = WARM_COUNTER.fetch_add(1, Ordering::Relaxed);
         let vm_id = format!("warm-{}-{}", image_key, seq);
         let state_dir = std::path::PathBuf::from(&config.state_dir).join(&vm_id);
@@ -201,88 +333,38 @@ async fn handle_acquire(
 
         let cid = pool.next_cid_pub();
         match snapshots
-            .restore_from_snapshot(image_key, &vm_id, cid, &state_dir)
+            .restore_from_snapshot(&image_key, cid, &state_dir, erofs_path)
             .await
         {
             Ok((ch_pid, api_socket, vsock_socket)) => {
                 info!("warm restore for image_key={}", image_key);
-
-                // Connect to the guest agent of the restored VM. It is needed for the network configuration
-                // and, always, to hand the warm container over to the pod's container ID (below).
-                let agent = match crate::vm_lifecycle::connect_agent(&vsock_socket).await {
-                    Ok((agent, _health)) => {
-                        agents.lock().await.insert(vm_id.clone(), agent.clone());
-                        agent
-                    }
-                    Err(e) => {
-                        warn!("agent connect on warm restore: {e:#}");
-                        return serde_json::json!({"error": format!("agent connect: {e:#}")});
-                    }
-                };
-
-                // Set up networking: TAP in host → CH add-net → move to pod netns + TC
-                let tap_name_out = if !netns.is_empty() {
-                    match setup_vm_networking(netns, &vm_id, &api_socket).await {
-                        Ok((tap, net_info)) => {
-                            if let Err(e) = configure_guest_network(
-                                &agent,
-                                &net_info.ip_cidr,
-                                &net_info.gateway,
-                            )
-                            .await
-                            {
-                                warn!("configure_network on warm restore: {e:#}");
-                            }
-                            tap
-                        }
-                        Err(e) => {
-                            warn!("networking failed on warm restore: {e:#}");
-                            return serde_json::json!({"error": format!("networking: {e:#}")});
-                        }
-                    }
-                } else {
-                    String::new()
-                };
-
-                // The snapshot holds a VM whose runtime is warm: the guest has booted, the image's erofs rootfs is
-                // attached (/dev/vdb) and its pages are cached. The container the shadow VM ran was only there to
-                // warm that up (an empty OCI config, which exits at once). The pod's own container still has to be
-                // run, with its own OCI config and under the ID the pod's runtime uses; without this the pod's
-                // runtime asks the agent about an ID it does not know ("unknown container", exit 137), or, if the
-                // shadow's container is simply handed over, gets the exit status of a container that ended long ago.
-                let container_pid =
-                    match run_container_in_warm_vm(&agent, container_id, config_json_b64, &volumes).await {
-                        Ok(pid) => pid,
-                        Err(e) => {
-                            warn!("run container on warm restore: {e:#}");
-                            return serde_json::json!({"error": format!("run container: {e:#}")});
-                        }
-                    };
-
-                // Register as active so release() works correctly
-                pool.register_active(crate::pool::PoolVm {
-                    vm_id: vm_id.clone(),
-                    api_socket: api_socket.clone(),
-                    vsock_socket: vsock_socket.clone(),
+                // From here the VM exists. Whatever fails, it is stopped and everything of it removed.
+                match finish_warm_restore(
+                    pool,
+                    agents,
+                    &vm_id,
                     cid,
                     ch_pid,
-                    created_at: std::time::Instant::now(),
-                })
-                .await;
-
-                return serde_json::json!({
-                    "vm_id": vm_id,
-                    "api_socket": api_socket.to_string_lossy(),
-                    "vsock_socket": vsock_socket.to_string_lossy(),
-                    "cid": cid,
-                    "ch_pid": ch_pid,
-                    "from_snapshot": true,
-                    "container_pid": container_pid,
-                    "tap_name": tap_name_out,
-                });
+                    &api_socket,
+                    &vsock_socket,
+                    netns,
+                    container_id,
+                    config_json_b64,
+                    &volumes,
+                )
+                .await
+                {
+                    Ok(json) => return json,
+                    Err(e) => {
+                        warn!("warm restore of {vm_id}: {e:#}");
+                        abort_vm(agents, &vm_id, &api_socket, ch_pid, &state_dir).await;
+                        return error("warm restore", format!("{e:#}"));
+                    }
+                }
             }
             Err(e) => {
                 warn!("warm restore failed, falling back to pool: {:#}", e);
+                let _ = std::fs::remove_dir_all(&state_dir);
                 // Fall through to pool acquire
             }
         }
@@ -298,8 +380,8 @@ async fn handle_acquire(
             });
 
             // Trigger shadow VM for this image (if not already snapshotted)
-            if !image_key.is_empty() && !erofs_path.is_empty() {
-                snapshots.trigger_shadow(image_key, erofs_path).await;
+            if !image_key.is_empty() {
+                snapshots.trigger_shadow(&image_key, erofs_path).await;
             }
 
             // Hot-plug rootfs and run container inside the VM
@@ -322,6 +404,9 @@ async fn handle_acquire(
                     {
                         Ok((pid, tap)) => (pid, tap),
                         Err(e) => {
+                            // The VM was handed out and the pod does not start: it is not left active.
+                            forget_vm(agents, &vm.vm_id).await;
+                            let _ = pool.release(&vm.vm_id).await;
                             return serde_json::json!({"error": format!("run container: {e:#}")});
                         }
                     }
@@ -344,6 +429,75 @@ async fn handle_acquire(
             serde_json::json!({"error": format!("acquire failed: {:#}", e)})
         }
     }
+}
+
+/// The rest of a warm restore, once the VM exists: connect to its agent, set up its network, run the pod's container and register the VM
+/// as active. On an error the caller stops the VM (`abort_vm`).
+#[allow(clippy::too_many_arguments)]
+async fn finish_warm_restore(
+    pool: &Arc<Pool>,
+    agents: &AgentRegistry,
+    vm_id: &str,
+    cid: u64,
+    ch_pid: u32,
+    api_socket: &std::path::Path,
+    vsock_socket: &std::path::Path,
+    netns: &str,
+    container_id: &str,
+    config_json_b64: &str,
+    volumes: &[cloudhv_proto::VolumeMount],
+) -> Result<serde_json::Value> {
+    // Connect to the guest agent of the restored VM. It is needed for the network configuration
+    // and, always, to hand the warm container over to the pod's container ID (below).
+    let (agent, _health) = crate::vm_lifecycle::connect_agent(vsock_socket)
+        .await
+        .context("agent connect")?;
+    agents.lock().await.insert(vm_id.to_string(), agent.clone());
+
+    // Set up networking: TAP in host → CH add-net → move to pod netns + TC
+    let tap_name_out = if !netns.is_empty() {
+        let (tap, net_info) = setup_vm_networking(netns, vm_id, api_socket)
+            .await
+            .context("networking")?;
+        if let Err(e) = configure_guest_network(&agent, &net_info.ip_cidr, &net_info.gateway).await {
+            warn!("configure_network on warm restore: {e:#}");
+        }
+        tap
+    } else {
+        String::new()
+    };
+
+    // The snapshot holds a VM whose runtime is warm: the guest has booted, the image's erofs rootfs is
+    // attached (/dev/vdb) and its pages are cached. The container the shadow VM ran was only there to
+    // warm that up (an empty OCI config, which exits at once). The pod's own container still has to be
+    // run, with its own OCI config and under the ID the pod's runtime uses; without this the pod's
+    // runtime asks the agent about an ID it does not know ("unknown container", exit 137), or, if the
+    // shadow's container is simply handed over, gets the exit status of a container that ended long ago.
+    let container_pid = run_container_in_warm_vm(&agent, container_id, config_json_b64, volumes)
+        .await
+        .context("run container")?;
+
+    // Register as active so release() works correctly
+    pool.register_active(crate::pool::PoolVm {
+        vm_id: vm_id.to_string(),
+        api_socket: api_socket.to_path_buf(),
+        vsock_socket: vsock_socket.to_path_buf(),
+        cid,
+        ch_pid,
+        created_at: std::time::Instant::now(),
+    })
+    .await;
+
+    Ok(serde_json::json!({
+        "vm_id": vm_id,
+        "api_socket": api_socket.to_string_lossy(),
+        "vsock_socket": vsock_socket.to_string_lossy(),
+        "cid": cid,
+        "ch_pid": ch_pid,
+        "from_snapshot": true,
+        "container_pid": container_pid,
+        "tap_name": tap_name_out,
+    }))
 }
 
 /// Whether a requested VM size differs from the pool's (0 means "the default").
@@ -386,6 +540,7 @@ async fn acquire_sized(
     let cid = pool.next_cid_pub();
     let t0 = std::time::Instant::now();
 
+    // A failed boot stops the VM and removes its directory itself.
     let ch_pid = match crate::vm_lifecycle::boot_vm_sized(
         config,
         &vm_id,
@@ -407,7 +562,7 @@ async fn acquire_sized(
         }
     };
     if let Err(e) = crate::vm_lifecycle::wait_for_agent(&vsock_socket).await {
-        crate::vm_lifecycle::shutdown_and_destroy(&api_socket, ch_pid, &state_dir).await;
+        abort_vm(agents, &vm_id, &api_socket, ch_pid, &state_dir).await;
         return serde_json::json!({"error": format!("agent of the new VM: {e:#}")});
     }
     pool.register_active(crate::pool::PoolVm {
@@ -429,6 +584,7 @@ async fn acquire_sized(
     let (container_pid, tap_name) = match run_container_in_vm(&run, agents).await {
         Ok(v) => v,
         Err(e) => {
+            forget_vm(agents, &vm_id).await;
             let _ = pool.release(&vm_id).await;
             return serde_json::json!({"error": format!("run container: {e:#}")});
         }
@@ -466,6 +622,11 @@ struct RunContainerParams<'a> {
     volumes: &'a [cloudhv_proto::VolumeMount],
 }
 
+/// The first characters of a container ID, for the name of its disk (the ID is a plain identifier here, but never slice by bytes).
+fn disk_id_for(container_id: &str) -> String {
+    format!("ctr-{}", container_id.chars().take(12).collect::<String>())
+}
+
 /// Hot-plug an erofs rootfs and run a container via the guest agent.
 /// If `netns` is non-empty, sets up TAP networking first.
 async fn run_container_in_vm(
@@ -485,10 +646,7 @@ async fn run_container_in_vm(
     };
 
     // Hot-plug rootfs disk
-    let disk_id = format!(
-        "ctr-{}",
-        &params.container_id[..12.min(params.container_id.len())]
-    );
+    let disk_id = disk_id_for(params.container_id);
     let disk_json = serde_json::json!({
         "path": params.erofs_path,
         "readonly": true,
@@ -565,27 +723,24 @@ async fn run_container_in_vm(
 
 async fn handle_add_container(
     pool: &Arc<Pool>,
+    config: &DaemonConfig,
     agents: &AgentRegistry,
     request: &serde_json::Value,
 ) -> serde_json::Value {
-    let vm_id = request.get("vm_id").and_then(|v| v.as_str()).unwrap_or("");
-    let erofs_path = request
-        .get("erofs_path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let container_id = request
-        .get("container_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let config_json_b64 = request
-        .get("config_json")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let volumes = volumes_from_request(request);
-
-    if vm_id.is_empty() || container_id.is_empty() {
-        return serde_json::json!({"error": "vm_id and container_id required"});
+    let vm_id = match required_id(request, "vm_id") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let container_id = match required_id(request, "container_id") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let erofs_path = field(request, "erofs_path");
+    if let Err(e) = validate::check_erofs_path(config, erofs_path) {
+        return error("bad request (erofs_path)", format!("{e:#}"));
     }
+    let config_json_b64 = field(request, "config_json");
+    let volumes = volumes_from_request(request);
 
     let vm = match pool.get_active(vm_id).await {
         Some(vm) => vm,
@@ -619,17 +774,18 @@ async fn handle_release(
     agents: &AgentRegistry,
     request: &serde_json::Value,
 ) -> serde_json::Value {
-    let vm_id = request.get("vm_id").and_then(|v| v.as_str()).unwrap_or("");
-
-    if vm_id.is_empty() {
-        return serde_json::json!({"error": "vm_id required"});
-    }
+    let vm_id = match required_id(request, "vm_id") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     // Remove agent connection for this VM
-    agents.lock().await.remove(vm_id);
+    forget_vm(agents, vm_id).await;
 
+    // Only a VM that was handed out is destroyed; any other name is answered with success and nothing is touched (a release is
+    // idempotent: the shim may repeat it, or ask after the daemon restarted).
     match pool.release(vm_id).await {
-        Ok(()) => serde_json::json!({"ok": true}),
+        Ok(_) => serde_json::json!({"ok": true}),
         Err(e) => serde_json::json!({"error": format!("release failed: {:#}", e)}),
     }
 }
@@ -638,12 +794,18 @@ async fn handle_kill_container(
     agents: &AgentRegistry,
     request: &serde_json::Value,
 ) -> serde_json::Value {
-    let vm_id = request.get("vm_id").and_then(|v| v.as_str()).unwrap_or("");
-    let container_id = request
-        .get("container_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let signal = request.get("signal").and_then(|v| v.as_u64()).unwrap_or(15) as u32;
+    let vm_id = match required_id(request, "vm_id") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let container_id = match required_id(request, "container_id") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let signal = request.get("signal").and_then(|v| v.as_u64()).unwrap_or(15);
+    if signal == 0 || signal > 64 {
+        return serde_json::json!({"error": "bad request: signal"});
+    }
 
     let agent = match agents.lock().await.get(vm_id).cloned() {
         Some(a) => a,
@@ -652,7 +814,7 @@ async fn handle_kill_container(
 
     let mut req = cloudhv_proto::KillContainerRequest::new();
     req.container_id = container_id.to_string();
-    req.signal = signal;
+    req.signal = signal as u32;
     let ctx = ttrpc::context::with_duration(std::time::Duration::from_secs(5));
 
     match agent.kill_container(ctx, &req).await {
@@ -665,11 +827,14 @@ async fn handle_wait_container(
     agents: &AgentRegistry,
     request: &serde_json::Value,
 ) -> serde_json::Value {
-    let vm_id = request.get("vm_id").and_then(|v| v.as_str()).unwrap_or("");
-    let container_id = request
-        .get("container_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let vm_id = match required_id(request, "vm_id") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let container_id = match required_id(request, "container_id") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     let agent = match agents.lock().await.get(vm_id).cloned() {
         Some(a) => a,
@@ -693,6 +858,9 @@ async fn handle_wait_container(
     }
 }
 
+/// The most log bytes one ReadLogs call returns (the ttrpc message limit is 4 MiB).
+const MAX_LOG_BYTES: u64 = 2 * 1024 * 1024;
+
 /// Carry a container's new output from the guest agent to the shim (which writes it to the pipes containerd gave it). The offsets are
 /// the caller's: what is before them has been taken and the agent drops it. The bytes go as base64 in the JSON line.
 async fn handle_read_logs(
@@ -700,11 +868,14 @@ async fn handle_read_logs(
     request: &serde_json::Value,
 ) -> serde_json::Value {
     use base64::Engine;
-    let vm_id = request.get("vm_id").and_then(|v| v.as_str()).unwrap_or("");
-    let container_id = request
-        .get("container_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let vm_id = match required_id(request, "vm_id") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let container_id = match required_id(request, "container_id") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let agent = match agents.lock().await.get(vm_id).cloned() {
         Some(a) => a,
         None => return serde_json::json!({"error": format!("no agent for VM {vm_id}")}),
@@ -723,7 +894,8 @@ async fn handle_read_logs(
     req.max_bytes = request
         .get("max_bytes")
         .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .unwrap_or(0)
+        .min(MAX_LOG_BYTES) as u32;
     let ctx = ttrpc::context::with_duration(std::time::Duration::from_secs(10));
 
     match agent.read_logs(ctx, &req).await {
@@ -747,11 +919,14 @@ async fn handle_delete_container(
     agents: &AgentRegistry,
     request: &serde_json::Value,
 ) -> serde_json::Value {
-    let vm_id = request.get("vm_id").and_then(|v| v.as_str()).unwrap_or("");
-    let container_id = request
-        .get("container_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let vm_id = match required_id(request, "vm_id") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let container_id = match required_id(request, "container_id") {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
 
     let agent = match agents.lock().await.get(vm_id).cloned() {
         Some(a) => a,
@@ -766,7 +941,6 @@ async fn handle_delete_container(
     serde_json::json!({"ok": true})
 }
 
-/// Set up networking for a VM: create TAP in host → CH add-net → move to pod netns + TC.
 /// The name of a VM's TAP device. A Linux interface name has 15 characters at most, so the name cannot hold the VM's ID; it holds a hash of it.
 /// The name used to be the first 8 characters of the ID, which for the pool's VMs ("pool-<pid>-<n>"), the warm ones and the sized ones
 /// ("sized-<pid>-<n>") is the same for every VM of one daemon: two pods starting at about the same time were given the same TAP name,
@@ -781,12 +955,36 @@ pub fn tap_name_for(vm_id: &str) -> String {
     format!("tap_{:011x}", hash & 0xfff_ffff_ffff)
 }
 
+/// Set up networking for a VM: create TAP in host → CH add-net → move to pod netns + TC.
+/// The TAP's name is reserved for the VM (a collision of two hashes is refused, not resolved by deleting the other's device). If any
+/// step fails the device is deleted wherever it is and the name given back.
 async fn setup_vm_networking(
     netns: &str,
     vm_id: &str,
     api_socket: &std::path::Path,
 ) -> anyhow::Result<(String, crate::netns::PodNetInfo)> {
     let tap_name = tap_name_for(vm_id);
+    if !reserve_tap_name(&tap_name) {
+        anyhow::bail!("the TAP name {tap_name} is already used by another VM");
+    }
+    match setup_vm_networking_inner(netns, vm_id, api_socket, &tap_name).await {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            let (ns, tap) = (netns.to_string(), tap_name.clone());
+            let _ = tokio::task::spawn_blocking(move || crate::netns::delete_tap(&ns, &tap)).await;
+            release_tap_name_of(vm_id);
+            Err(e)
+        }
+    }
+}
+
+async fn setup_vm_networking_inner(
+    netns: &str,
+    vm_id: &str,
+    api_socket: &std::path::Path,
+    tap_name: &str,
+) -> anyhow::Result<(String, crate::netns::PodNetInfo)> {
+    let tap_name = tap_name.to_string();
 
     // Phase 1: probe pod netns for veth info, create TAP in host netns
     let hand_over = crate::rootless::enabled();
@@ -917,9 +1115,41 @@ async fn run_container_in_warm_vm(
     Ok(resp.pid)
 }
 
+/// The most volumes of a request, and files in a volume. The request line is limited too; these keep the work bounded.
+const MAX_VOLUMES: usize = 64;
+const MAX_FILES_PER_VOLUME: usize = 1024;
+
+/// The `volumes` of a request (see the shim's `volumes.rs`): [{destination, source, readonly, files: [{path, content (base64), mode}]}].
+fn volumes_from_request(request: &serde_json::Value) -> Vec<cloudhv_proto::VolumeMount> {
+    use base64::Engine;
+    let list = match request.get("volumes").and_then(|v| v.as_array()) {
+        Some(l) => l,
+        None => return Vec::new(),
+    };
+    list.iter()
+        .take(MAX_VOLUMES)
+        .map(|v| {
+            let mut m = cloudhv_proto::VolumeMount::new();
+            m.destination = v["destination"].as_str().unwrap_or("").to_string();
+            m.source = v["source"].as_str().unwrap_or("").to_string();
+            m.readonly = v["readonly"].as_bool().unwrap_or(false);
+            for f in v["files"].as_array().into_iter().flatten().take(MAX_FILES_PER_VOLUME) {
+                let mut file = cloudhv_proto::InlineFile::new();
+                file.path = f["path"].as_str().unwrap_or("").to_string();
+                file.content = base64::engine::general_purpose::STANDARD
+                    .decode(f["content"].as_str().unwrap_or(""))
+                    .unwrap_or_default();
+                file.mode = (f["mode"].as_u64().unwrap_or(0o644) as u32) & 0o777;
+                m.files.push(file);
+            }
+            m
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tap_name_tests {
-    use super::tap_name_for;
+    use super::*;
 
     #[test]
     fn the_tap_names_of_vms_that_share_a_prefix_differ_and_fit_an_interface_name() {
@@ -943,31 +1173,70 @@ mod tap_name_tests {
         // The same VM always gets the same name (the shim and the cleanup find the device by it).
         assert_eq!(tap_name_for("pool-30322-4"), names[0]);
     }
+
+    #[test]
+    fn a_tap_name_is_reserved_for_one_vm_until_it_is_given_back() {
+        let id = "test-reserve-1";
+        let name = tap_name_for(id);
+        assert!(reserve_tap_name(&name));
+        assert!(!reserve_tap_name(&name), "a second VM with the same name is refused");
+        release_tap_name_of(id);
+        assert!(reserve_tap_name(&name));
+        release_tap_name_of(id);
+    }
+
+    #[test]
+    fn the_disk_name_is_cut_by_characters_not_bytes() {
+        assert_eq!(disk_id_for("0123456789abcdef"), "ctr-0123456789ab");
+        assert_eq!(disk_id_for("abc"), "ctr-abc");
+        // a multi-byte character across byte 12 used to panic when sliced by bytes
+        assert_eq!(disk_id_for("aaaaaaaaaaaあ"), "ctr-aaaaaaaaaaaあ");
+    }
 }
 
-/// The `volumes` of a request (see the shim's `volumes.rs`): [{destination, source, readonly, files: [{path, content (base64), mode}]}].
-fn volumes_from_request(request: &serde_json::Value) -> Vec<cloudhv_proto::VolumeMount> {
-    use base64::Engine;
-    let list = match request.get("volumes").and_then(|v| v.as_array()) {
-        Some(l) => l,
-        None => return Vec::new(),
-    };
-    list.iter()
-        .map(|v| {
-            let mut m = cloudhv_proto::VolumeMount::new();
-            m.destination = v["destination"].as_str().unwrap_or("").to_string();
-            m.source = v["source"].as_str().unwrap_or("").to_string();
-            m.readonly = v["readonly"].as_bool().unwrap_or(false);
-            for f in v["files"].as_array().into_iter().flatten() {
-                let mut file = cloudhv_proto::InlineFile::new();
-                file.path = f["path"].as_str().unwrap_or("").to_string();
-                file.content = base64::engine::general_purpose::STANDARD
-                    .decode(f["content"].as_str().unwrap_or(""))
-                    .unwrap_or_default();
-                file.mode = f["mode"].as_u64().unwrap_or(0o644) as u32;
-                m.files.push(file);
-            }
-            m
-        })
-        .collect()
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_request_line_is_read_up_to_the_limit_and_no_further() {
+        let mut ok = tokio::io::BufReader::new(&b"{\"a\":1}\nnext\n"[..]);
+        let mut buf = Vec::new();
+        assert!(read_request_line(&mut ok, 64, &mut buf).await.unwrap());
+        assert_eq!(buf, b"{\"a\":1}\n");
+        assert!(read_request_line(&mut ok, 64, &mut buf).await.unwrap());
+        assert_eq!(buf, b"next\n");
+        assert!(!read_request_line(&mut ok, 64, &mut buf).await.unwrap(), "end of stream");
+
+        let long = vec![b'x'; 1000];
+        let mut r = tokio::io::BufReader::new(&long[..]);
+        assert!(read_request_line(&mut r, 100, &mut buf).await.is_err(), "no newline within the limit");
+        assert!(buf.len() <= 101, "not read on past the limit: {}", buf.len());
+
+        let mut exact = tokio::io::BufReader::new(&b"12345\n"[..]);
+        assert!(read_request_line(&mut exact, 6, &mut buf).await.is_ok(), "a line of exactly the limit");
+        let mut over = tokio::io::BufReader::new(&b"123456\n"[..]);
+        assert!(read_request_line(&mut over, 6, &mut buf).await.is_err(), "one byte over");
+    }
+
+    #[test]
+    fn the_ids_of_a_request_are_checked() {
+        let r = serde_json::json!({"vm_id": "../..", "container_id": "abc123"});
+        assert!(required_id(&r, "vm_id").is_err());
+        assert_eq!(required_id(&r, "container_id").unwrap(), "abc123");
+        assert!(required_id(&r, "missing").is_err());
+    }
+
+    #[test]
+    fn volumes_of_a_request_are_bounded_and_modes_masked() {
+        let mut vols = Vec::new();
+        for _ in 0..100 {
+            vols.push(serde_json::json!({"destination": "/d", "source": "/s", "readonly": false,
+                "files": [{"path": "f", "content": "eA==", "mode": 0o4755}]}));
+        }
+        let r = serde_json::json!({ "volumes": vols });
+        let v = volumes_from_request(&r);
+        assert_eq!(v.len(), MAX_VOLUMES);
+        assert_eq!(v[0].files[0].mode, 0o755, "the setuid bit is not passed");
+    }
 }
