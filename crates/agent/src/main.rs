@@ -15,9 +15,12 @@ mod proto {
 }
 
 mod container;
+mod disks;
 mod mount;
 mod reaper;
 mod server;
+mod spec;
+mod volumes;
 
 /// The guest agent runs as PID 1 (init) inside the Cloud Hypervisor VM.
 fn main() {
@@ -53,9 +56,13 @@ fn main() {
 
 /// PID 1 init setup: mount filesystems and configure the system.
 fn init_setup() {
+    // Without its mounts the VM cannot run a container safely (a /tmp or /dev/shm that is not locked down, no cgroups). As PID 1 an
+    // exit stops the VM, which is the right thing then: a VM that is broken must not take pods.
     if let Err(e) = mount::mount_essential_filesystems() {
-        error!("failed to mount essential filesystems: {}", e);
+        error!("failed to mount essential filesystems: {:#}", e);
+        std::process::exit(1);
     }
+    mount::apply_sysctls();
 
     reaper::set_child_subreaper();
 
@@ -63,10 +70,9 @@ fn init_setup() {
 }
 
 async fn run_agent() -> anyhow::Result<()> {
-    // NOTE: No orphan reaper — waitpid(-1) interferes with crun's internal
-    // child management (crun forks twice, and reaping its intermediate children
-    // causes it to hang). As PID 1 with PR_SET_CHILD_SUBREAPER, zombies will
-    // accumulate but this is acceptable in a short-lived VM.
+    // NOTE: no waitpid(-1) loop — it interferes with crun's own child management (crun forks twice, and reaping its intermediate
+    // children makes it hang). Orphaned zombies are reaped by reaper::reap_stale_zombies, which leaves alone every process the agent
+    // started or may be waiting for.
 
     let server = server::AgentServer::new();
     server.run().await

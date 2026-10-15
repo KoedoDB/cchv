@@ -48,18 +48,21 @@ pub fn mount_essential_filesystems() -> Result<()> {
     )?;
 
     std::fs::create_dir_all("/dev/shm").ok();
-    mount_if_needed(
+    mount_with_data(
         "tmpfs",
         "/dev/shm",
         "tmpfs",
-        MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+        MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
+        Some("size=64m,mode=1777"),
     )?;
 
-    mount_if_needed(
+    // Nothing the agent runs is in /tmp, and no container sees it (containers get the overlay rootfs), so it is as locked as /dev/shm.
+    mount_with_data(
         "tmpfs",
         "/tmp",
         "tmpfs",
-        MsFlags::MS_NOSUID, // No MS_NODEV — container rootfs copies need device nodes
+        MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
+        Some("size=64m,mode=1777"),
     )?;
 
     std::fs::create_dir_all("/run").ok();
@@ -96,6 +99,18 @@ fn mount_if_needed(
     fstype: &str,
     flags: nix::mount::MsFlags,
 ) -> Result<()> {
+    mount_with_data(source, target, fstype, flags, None)
+}
+
+/// As mount_if_needed, with mount options for the file system (such as `size=64m`).
+#[cfg(target_os = "linux")]
+fn mount_with_data(
+    source: &str,
+    target: &str,
+    fstype: &str,
+    flags: nix::mount::MsFlags,
+    data: Option<&str>,
+) -> Result<()> {
     use nix::mount::mount;
 
     if is_mounted(target) {
@@ -105,7 +120,7 @@ fn mount_if_needed(
 
     std::fs::create_dir_all(target).ok();
 
-    mount(Some(source), target, Some(fstype), flags, None::<&str>)
+    mount(Some(source), target, Some(fstype), flags, data)
         .with_context(|| format!("failed to mount {fstype} at {target}"))?;
 
     debug!("mounted {} at {}", fstype, target);
@@ -151,3 +166,53 @@ pub fn create_dev_node(path: &str, major: u64, minor: u64, mode: u32) {
 
 #[cfg(not(target_os = "linux"))]
 pub fn create_dev_node(_path: &str, _major: u64, _minor: u64, _mode: u32) {}
+
+/// Kernel settings that close doors a container's code could use, written at boot before any container exists. A setting the kernel does
+/// not have (the option is not built in) is skipped; the mounts above are required, these are hardening and must not stop a VM.
+///
+/// - `ping_group_range`: unprivileged ICMP sockets, so that `ping` works although containers do not have CAP_NET_RAW.
+/// - `max_user_namespaces=0`: a container cannot make a user namespace (and so cannot get capabilities inside one).
+#[cfg(target_os = "linux")]
+const SYSCTLS: &[(&str, &str)] = &[
+    ("kernel.dmesg_restrict", "1"),
+    ("kernel.kptr_restrict", "2"),
+    ("kernel.perf_event_paranoid", "3"),
+    ("kernel.unprivileged_bpf_disabled", "2"),
+    ("kernel.yama.ptrace_scope", "1"),
+    ("user.max_user_namespaces", "0"),
+    ("fs.protected_symlinks", "1"),
+    ("fs.protected_hardlinks", "1"),
+    ("net.ipv4.ping_group_range", "0 2147483647"),
+];
+
+/// The file of a sysctl key under /proc/sys (`kernel.yama.ptrace_scope` is `/proc/sys/kernel/yama/ptrace_scope`).
+#[cfg(target_os = "linux")]
+fn sysctl_path(key: &str) -> String {
+    format!("/proc/sys/{}", key.replace('.', "/"))
+}
+
+#[cfg(target_os = "linux")]
+pub fn apply_sysctls() {
+    for (key, value) in SYSCTLS {
+        match std::fs::write(sysctl_path(key), value) {
+            Ok(()) => debug!("sysctl {key}={value}"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => debug!("sysctl {key}: not in this kernel"),
+            Err(e) => log::warn!("sysctl {key}={value}: {e}"),
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn apply_sysctls() {}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sysctl_keys_become_paths_under_proc_sys() {
+        assert_eq!(sysctl_path("kernel.dmesg_restrict"), "/proc/sys/kernel/dmesg_restrict");
+        assert_eq!(sysctl_path("kernel.yama.ptrace_scope"), "/proc/sys/kernel/yama/ptrace_scope");
+        assert!(SYSCTLS.iter().any(|(k, v)| *k == "user.max_user_namespaces" && *v == "0"));
+    }
+}

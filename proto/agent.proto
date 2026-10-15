@@ -90,6 +90,9 @@ message CreateContainerRequest {
     // container at VM boot): sequential from /dev/vdb. For hot-plugged
     // containers, the agent should discover devices via /sys/block.
     uint32 erofs_layers = 11;
+    // Serial numbers (virtio-blk `serial` of the disk), one per erofs layer, in layer order. When the host sets them the agent finds
+    // each layer's device by serial; when empty it takes the new disks in the order they appeared (and fails if they do not come).
+    repeated string layer_serials = 12;
 }
 
 // A volume mount to inject into the container's OCI spec.
@@ -110,6 +113,9 @@ message VolumeMount {
     // When present, the agent writes these to tmpfs and bind-mounts them
     // instead of reading from a baked-in disk path.
     repeated InlineFile files = 7;
+    // For BLOCK volumes: the virtio-blk serial of the hot-plugged disk. When empty the agent takes the one new disk that appears and
+    // fails if there is none or more than one.
+    string serial = 8;
 }
 
 // A file delivered inline via RPC for tmpfs-backed volumes.

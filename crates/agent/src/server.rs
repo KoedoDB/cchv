@@ -25,6 +25,8 @@ fn proto_volumes_to_info(volumes: &[VolumeMount]) -> Vec<crate::container::Volum
             readonly: v.readonly,
             is_block: v.volume_type == crate::proto::agent::VolumeType::BLOCK.into(),
             fs_type: v.fs_type.clone(),
+            options: v.options.clone(),
+            serial: v.serial.clone(),
             inline_files: v
                 .files
                 .iter()
@@ -36,6 +38,39 @@ fn proto_volumes_to_info(volumes: &[VolumeMount]) -> Vec<crate::container::Volum
                 .collect(),
         })
         .collect()
+}
+
+/// Create a container: reserve its ID under the manager's lock, make its root file system and volumes WITHOUT the lock (waiting for a
+/// disk to appear must not stop the other calls), and register it under the lock again. A failure gives the ID back.
+async fn create_flow(
+    mgr: &Arc<tokio::sync::Mutex<ContainerManager>>,
+    req: &CreateContainerRequest,
+) -> anyhow::Result<()> {
+    let volumes = proto_volumes_to_info(&req.volumes);
+    let plan = mgr
+        .lock()
+        .await
+        .begin_create(&req.container_id, &volumes)?;
+    match crate::container::prepare(
+        plan,
+        &req.container_id,
+        &volumes,
+        &req.config_json,
+        req.rootfs_preattached,
+        req.erofs_layers,
+        &req.layer_serials,
+    )
+    .await
+    {
+        Ok(prepared) => {
+            mgr.lock().await.finish_create(prepared);
+            Ok(())
+        }
+        Err(e) => {
+            mgr.lock().await.abort_create(&req.container_id);
+            Err(e)
+        }
+    }
 }
 
 struct AgentServiceHandler {
@@ -50,21 +85,12 @@ impl AgentService for AgentServiceHandler {
         req: CreateContainerRequest,
     ) -> ttrpc::Result<CreateContainerResponse> {
         info!("RPC: create_container id={}", req.container_id);
-        let mut mgr = self.container_manager.lock().await;
-        let volumes = proto_volumes_to_info(&req.volumes);
-        let pid = mgr
-            .create(
-                &req.container_id,
-                &req.bundle_path,
-                &volumes,
-                &req.config_json,
-                req.rootfs_preattached,
-                req.erofs_layers,
-            )
+        create_flow(&self.container_manager, &req)
             .await
             .map_err(|e| ttrpc::Error::Others(format!("create_container failed: {e:#}")))?;
+        // The container exists but its process does not yet: there is no PID to report (not the agent's own, which is 1).
         let mut resp = CreateContainerResponse::new();
-        resp.pid = pid;
+        resp.pid = 0;
         Ok(resp)
     }
 
@@ -90,17 +116,14 @@ impl AgentService for AgentServiceHandler {
         req: CreateContainerRequest,
     ) -> ttrpc::Result<StartContainerResponse> {
         info!("RPC: run_container id={}", req.container_id);
-        let mut mgr = self.container_manager.lock().await;
-        let volumes = proto_volumes_to_info(&req.volumes);
-        let pid = mgr
-            .run(
-                &req.container_id,
-                &req.bundle_path,
-                &volumes,
-                &req.config_json,
-                req.rootfs_preattached,
-                req.erofs_layers,
-            )
+        create_flow(&self.container_manager, &req)
+            .await
+            .map_err(|e| ttrpc::Error::Others(format!("run_container failed: {e:#}")))?;
+        let pid = self
+            .container_manager
+            .lock()
+            .await
+            .start(&req.container_id)
             .await
             .map_err(|e| ttrpc::Error::Others(format!("run_container failed: {e:#}")))?;
         let mut resp = StartContainerResponse::new();
@@ -162,33 +185,27 @@ impl AgentService for AgentServiceHandler {
         // Clone data out of the Ref guard so we never hold a non-Send borrow across .await.
         let already_exited = { rx.borrow().clone() };
 
+        // Wait for the container to exit, however long it runs, without holding the container_manager lock. (A container that has not
+        // exited is never marked stopped: a timeout here used to do that, and then a kill of a live container was ignored. The caller has
+        // its own deadline.)
         let (exit_code, exited_at) = if let Some(status) = already_exited {
             (status.code, status.exited_at)
         } else {
-            // Wait for the container to exit without holding the container_manager lock.
-            let timeout = tokio::time::Duration::from_secs(600);
-            let result = tokio::select! {
-                changed = rx.changed() => {
-                    match changed {
-                        Ok(()) => {
-                            let status = { rx.borrow().clone() };
-                            match status {
-                                Some(s) => (s.code, s.exited_at),
-                                None => (137, chrono::Utc::now().to_rfc3339()),
-                            }
+            loop {
+                match rx.changed().await {
+                    Ok(()) => {
+                        let status = { rx.borrow().clone() };
+                        if let Some(s) = status {
+                            break (s.code, s.exited_at);
                         }
-                        Err(_) => (137, chrono::Utc::now().to_rfc3339()),
                     }
+                    // The sender is gone: the task that watched the process ended without a status.
+                    Err(_) => break (137, chrono::Utc::now().to_rfc3339()),
                 }
-                _ = tokio::time::sleep(timeout) => {
-                    info!("wait_container: timeout after 600s for {}", req.container_id);
-                    (137, chrono::Utc::now().to_rfc3339())
-                }
-            };
-            result
+            }
         };
 
-        // Briefly re-lock to mark the container as stopped.
+        // The container has exited: record it.
         {
             let mut mgr = self.container_manager.lock().await;
             mgr.mark_stopped(&req.container_id, exit_code);
@@ -515,6 +532,17 @@ impl AgentServer {
 
         info!("ttrpc server started, accepting connections");
 
+        // Children that nobody waits for (processes a container's runtime left behind) are reaped; see reaper.rs.
+        let reaper_mgr = self.container_manager.clone();
+        tokio::spawn(async move {
+            let mut seen = std::collections::HashSet::new();
+            loop {
+                tokio::time::sleep(crate::reaper::SCAN_INTERVAL).await;
+                let tracked = reaper_mgr.lock().await.tracked_pids();
+                seen = crate::reaper::reap_stale_zombies(&seen, &tracked);
+            }
+        });
+
         let mut sigterm = signal(SignalKind::terminate())?;
         let mut sigint = signal(SignalKind::interrupt())?;
 
@@ -545,7 +573,7 @@ fn create_vsock_listener(port: u32) -> Result<i32> {
     use std::mem;
 
     unsafe {
-        let fd = socket(AF_VSOCK, SOCK_STREAM, 0);
+        let fd = socket(AF_VSOCK, SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
         if fd < 0 {
             anyhow::bail!(
                 "failed to create vsock socket: {}",

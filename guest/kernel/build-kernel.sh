@@ -14,7 +14,7 @@
 #
 set -euo pipefail
 
-KERNEL_VERSION="${1:-6.18.16}"
+KERNEL_VERSION="${1:-6.18.57}"
 
 KERNEL_MAJOR="${KERNEL_VERSION%%.*}"
 KERNEL_URL="https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_MAJOR}.x/linux-${KERNEL_VERSION}.tar.xz"
@@ -36,7 +36,10 @@ echo -e "=== Building minimal kernel ${KERNEL_VERSION} (${HOST_ARCH}) ===\n"
 # Download kernel source if not present
 if [ ! -d "${KERNEL_DIR}" ]; then
     echo "Downloading kernel ${KERNEL_VERSION}..."
-    wget "${KERNEL_URL}" -O "linux-${KERNEL_VERSION}.tar.xz"
+    # The tarball is checked against the pinned SHA-256 in hacks/checksums.txt (see docs/supply-chain.md).
+    HACKS_DIR="$(cd "$(dirname "$0")/../../hacks" && pwd)"
+    . "$HACKS_DIR/verify-download.sh"
+    download_verified "${KERNEL_URL}" "linux-${KERNEL_VERSION}.tar.xz" "linux-${KERNEL_VERSION}.tar.xz"
 
     echo "Decompressing..."
     tar xf "linux-${KERNEL_VERSION}.tar.xz"
@@ -66,6 +69,29 @@ disabled="$( \
 if [ -n "${disabled}" ]; then
   echo -e "ERROR: The following options are disabled in '${CONFIG_FILE}' but enabled in the final kernel configuration:\n${disabled}"
   exit 1
+fi
+
+# Hardening that must be in the result. The checks above only see the options this config asks for; an option that a dependency
+# switches off (or that olddefconfig does not know in this kernel version) would be lost silently, so the ones that matter are
+# listed here once more and the build stops if one is missing.
+echo "Checking hardening options..."
+hardening_missing=""
+for opt in SECURITY SECURITY_YAMA SECURITY_LANDLOCK STACKPROTECTOR_STRONG HARDENED_USERCOPY SLAB_FREELIST_RANDOM \
+           SLAB_FREELIST_HARDENED INIT_ON_ALLOC_DEFAULT_ON FORTIFY_SOURCE BPF_UNPRIV_DEFAULT_OFF SECCOMP_FILTER \
+           CGROUP_BPF CGROUP_DEVICE BPF_SYSCALL; do
+    grep -q "^CONFIG_${opt}=y" .config || hardening_missing="${hardening_missing} ${opt}=y"
+done
+for opt in DEVMEM DEVPORT PROC_KCORE IO_URING USERFAULTFD POSIX_MQUEUE MODULES KALLSYMS; do
+    if grep -qE "^CONFIG_${opt}=(y|m)" .config; then
+        hardening_missing="${hardening_missing} ${opt}=n"
+    fi
+done
+if [ "${HOST_ARCH}" = "x86_64" ]; then
+    grep -q "^CONFIG_LEGACY_VSYSCALL_NONE=y" .config || hardening_missing="${hardening_missing} LEGACY_VSYSCALL_NONE=y"
+fi
+if [ -n "${hardening_missing}" ]; then
+    echo "ERROR: hardening options missing from the final kernel configuration:${hardening_missing}"
+    exit 1
 fi
 
 echo "Building kernel with ${NPROC} jobs..."

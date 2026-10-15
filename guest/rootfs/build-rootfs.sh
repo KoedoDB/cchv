@@ -41,13 +41,25 @@ chmod 755 "${ROOTFS_DIR}/bin/cloudhv-agent"
 echo "Installing crun..."
 CRUN_VERSION="1.20"
 ARCH=$(uname -m)
+# SHA-256 of the release binaries (taken from the downloads of 2026-10-16: the amd64 one twice, identical; crun's own signature
+# was not checked). The binary runs as root in every VM, so a changed download must stop the build. Check crun's security advisories
+# before changing the version, and update the hashes with it.
 case "${ARCH}" in
-    x86_64) CRUN_ARCH="amd64" ;;
-    aarch64) CRUN_ARCH="arm64" ;;
+    x86_64)
+        CRUN_ARCH="amd64"
+        CRUN_SHA256="ff8407185ec474d7c60f697032b7b1fc1fb028fbd0bf13c7d5da9a7d9a479e38" ;;
+    aarch64)
+        CRUN_ARCH="arm64"
+        CRUN_SHA256="1e06f605dd8f07c640c59113ed161143ef7786962b11e44804918070e374d5ea" ;;
     *) echo "Unsupported arch: ${ARCH}"; exit 1 ;;
 esac
 wget -q "https://github.com/containers/crun/releases/download/${CRUN_VERSION}/crun-${CRUN_VERSION}-linux-${CRUN_ARCH}-disable-systemd" \
     -O "${ROOTFS_DIR}/bin/crun"
+if ! echo "${CRUN_SHA256}  ${ROOTFS_DIR}/bin/crun" | sha256sum -c - >/dev/null 2>&1; then
+    echo "ERROR: crun ${CRUN_VERSION} (${CRUN_ARCH}) does not match its pinned SHA-256"
+    rm -f "${ROOTFS_DIR}/bin/crun"
+    exit 1
+fi
 chmod 755 "${ROOTFS_DIR}/bin/crun"
 
 # Verify crun is static (dynamically-linked crun from the host won't work in the VM)

@@ -48,6 +48,8 @@ pub struct CreateContainerRequest {
     pub rootfs_preattached: bool,
     // @@protoc_insertion_point(field:cloudhv.agent.CreateContainerRequest.erofs_layers)
     pub erofs_layers: u32,
+    // @@protoc_insertion_point(field:cloudhv.agent.CreateContainerRequest.layer_serials)
+    pub layer_serials: ::std::vec::Vec<::std::string::String>,
     // special fields
     // @@protoc_insertion_point(special_field:cloudhv.agent.CreateContainerRequest.special_fields)
     pub special_fields: ::protobuf::SpecialFields,
@@ -65,7 +67,7 @@ impl CreateContainerRequest {
     }
 
     fn generated_message_descriptor_data() -> ::protobuf::reflect::GeneratedMessageDescriptorData {
-        let mut fields = ::std::vec::Vec::with_capacity(10);
+        let mut fields = ::std::vec::Vec::with_capacity(11);
         let mut oneofs = ::std::vec::Vec::with_capacity(0);
         fields.push(::protobuf::reflect::rt::v2::make_simpler_field_accessor::<_, _>(
             "container_id",
@@ -117,6 +119,11 @@ impl CreateContainerRequest {
             |m: &CreateContainerRequest| { &m.erofs_layers },
             |m: &mut CreateContainerRequest| { &mut m.erofs_layers },
         ));
+        fields.push(::protobuf::reflect::rt::v2::make_vec_simpler_accessor::<_, _>(
+            "layer_serials",
+            |m: &CreateContainerRequest| { &m.layer_serials },
+            |m: &mut CreateContainerRequest| { &mut m.layer_serials },
+        ));
         ::protobuf::reflect::GeneratedMessageDescriptorData::new_2::<CreateContainerRequest>(
             "CreateContainerRequest",
             fields,
@@ -165,6 +172,9 @@ impl ::protobuf::Message for CreateContainerRequest {
                 88 => {
                     self.erofs_layers = is.read_uint32()?;
                 },
+                98 => {
+                    self.layer_serials.push(is.read_string()?);
+                },
                 tag => {
                     ::protobuf::rt::read_unknown_or_skip_group(tag, is, self.special_fields.mut_unknown_fields())?;
                 },
@@ -208,6 +218,9 @@ impl ::protobuf::Message for CreateContainerRequest {
         if self.erofs_layers != 0 {
             my_size += ::protobuf::rt::uint32_size(11, self.erofs_layers);
         }
+        for value in &self.layer_serials {
+            my_size += ::protobuf::rt::string_size(12, &value);
+        };
         my_size += ::protobuf::rt::unknown_fields_size(self.special_fields.unknown_fields());
         self.special_fields.cached_size().set(my_size as u32);
         my_size
@@ -244,6 +257,9 @@ impl ::protobuf::Message for CreateContainerRequest {
         if self.erofs_layers != 0 {
             os.write_uint32(11, self.erofs_layers)?;
         }
+        for v in &self.layer_serials {
+            os.write_string(12, &v)?;
+        };
         os.write_unknown_fields(self.special_fields.unknown_fields())?;
         ::std::result::Result::Ok(())
     }
@@ -271,6 +287,7 @@ impl ::protobuf::Message for CreateContainerRequest {
         self.config_json.clear();
         self.rootfs_preattached = false;
         self.erofs_layers = 0;
+        self.layer_serials.clear();
         self.special_fields.clear();
     }
 
@@ -286,6 +303,7 @@ impl ::protobuf::Message for CreateContainerRequest {
             config_json: ::std::vec::Vec::new(),
             rootfs_preattached: false,
             erofs_layers: 0,
+            layer_serials: ::std::vec::Vec::new(),
             special_fields: ::protobuf::SpecialFields::new(),
         };
         &instance
@@ -327,6 +345,8 @@ pub struct VolumeMount {
     pub fs_type: ::std::string::String,
     // @@protoc_insertion_point(field:cloudhv.agent.VolumeMount.files)
     pub files: ::std::vec::Vec<InlineFile>,
+    // @@protoc_insertion_point(field:cloudhv.agent.VolumeMount.serial)
+    pub serial: ::std::string::String,
     // special fields
     // @@protoc_insertion_point(special_field:cloudhv.agent.VolumeMount.special_fields)
     pub special_fields: ::protobuf::SpecialFields,
@@ -344,7 +364,7 @@ impl VolumeMount {
     }
 
     fn generated_message_descriptor_data() -> ::protobuf::reflect::GeneratedMessageDescriptorData {
-        let mut fields = ::std::vec::Vec::with_capacity(7);
+        let mut fields = ::std::vec::Vec::with_capacity(8);
         let mut oneofs = ::std::vec::Vec::with_capacity(0);
         fields.push(::protobuf::reflect::rt::v2::make_simpler_field_accessor::<_, _>(
             "destination",
@@ -380,6 +400,11 @@ impl VolumeMount {
             "files",
             |m: &VolumeMount| { &m.files },
             |m: &mut VolumeMount| { &mut m.files },
+        ));
+        fields.push(::protobuf::reflect::rt::v2::make_simpler_field_accessor::<_, _>(
+            "serial",
+            |m: &VolumeMount| { &m.serial },
+            |m: &mut VolumeMount| { &mut m.serial },
         ));
         ::protobuf::reflect::GeneratedMessageDescriptorData::new_2::<VolumeMount>(
             "VolumeMount",
@@ -420,6 +445,9 @@ impl ::protobuf::Message for VolumeMount {
                 58 => {
                     self.files.push(is.read_message()?);
                 },
+                66 => {
+                    self.serial = is.read_string()?;
+                },
                 tag => {
                     ::protobuf::rt::read_unknown_or_skip_group(tag, is, self.special_fields.mut_unknown_fields())?;
                 },
@@ -454,6 +482,9 @@ impl ::protobuf::Message for VolumeMount {
             let len = value.compute_size();
             my_size += 1 + ::protobuf::rt::compute_raw_varint64_size(len) + len;
         };
+        if !self.serial.is_empty() {
+            my_size += ::protobuf::rt::string_size(8, &self.serial);
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.special_fields.unknown_fields());
         self.special_fields.cached_size().set(my_size as u32);
         my_size
@@ -481,6 +512,9 @@ impl ::protobuf::Message for VolumeMount {
         for v in &self.files {
             ::protobuf::rt::write_message_field_with_cached_size(7, v, os)?;
         };
+        if !self.serial.is_empty() {
+            os.write_string(8, &self.serial)?;
+        }
         os.write_unknown_fields(self.special_fields.unknown_fields())?;
         ::std::result::Result::Ok(())
     }
@@ -505,6 +539,7 @@ impl ::protobuf::Message for VolumeMount {
         self.volume_type = ::protobuf::EnumOrUnknown::new(VolumeType::FILESYSTEM);
         self.fs_type.clear();
         self.files.clear();
+        self.serial.clear();
         self.special_fields.clear();
     }
 
@@ -517,6 +552,7 @@ impl ::protobuf::Message for VolumeMount {
             volume_type: ::protobuf::EnumOrUnknown::from_i32(0),
             fs_type: ::std::string::String::new(),
             files: ::std::vec::Vec::new(),
+            serial: ::std::string::String::new(),
             special_fields: ::protobuf::SpecialFields::new(),
         };
         &instance
@@ -4514,7 +4550,7 @@ impl ContainerState {
 }
 
 static file_descriptor_proto_data: &'static [u8] = b"\
-    \n\x0bagent.proto\x12\rcloudhv.agent\"\xe7\x02\n\x16CreateContainerReque\
+    \n\x0bagent.proto\x12\rcloudhv.agent\"\x8c\x03\n\x16CreateContainerReque\
     st\x12!\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcontainerId\x12\x1f\n\
     \x0bbundle_path\x18\x02\x20\x01(\tR\nbundlePath\x12\x14\n\x05stdin\x18\
     \x03\x20\x01(\tR\x05stdin\x12\x16\n\x06stdout\x18\x04\x20\x01(\tR\x06std\
@@ -4523,98 +4559,99 @@ static file_descriptor_proto_data: &'static [u8] = b"\
     \x0b2\x1a.cloudhv.agent.VolumeMountR\x07volumes\x12\x1f\n\x0bconfig_json\
     \x18\x08\x20\x01(\x0cR\nconfigJson\x12-\n\x12rootfs_preattached\x18\n\
     \x20\x01(\x08R\x11rootfsPreattached\x12!\n\x0cerofs_layers\x18\x0b\x20\
-    \x01(\rR\x0berofsLayers\"\x83\x02\n\x0bVolumeMount\x12\x20\n\x0bdestinat\
-    ion\x18\x01\x20\x01(\tR\x0bdestination\x12\x16\n\x06source\x18\x02\x20\
-    \x01(\tR\x06source\x12\x18\n\x07options\x18\x03\x20\x03(\tR\x07options\
-    \x12\x1a\n\x08readonly\x18\x04\x20\x01(\x08R\x08readonly\x12:\n\x0bvolum\
-    e_type\x18\x05\x20\x01(\x0e2\x19.cloudhv.agent.VolumeTypeR\nvolumeType\
-    \x12\x17\n\x07fs_type\x18\x06\x20\x01(\tR\x06fsType\x12/\n\x05files\x18\
-    \x07\x20\x03(\x0b2\x19.cloudhv.agent.InlineFileR\x05files\"N\n\nInlineFi\
-    le\x12\x12\n\x04path\x18\x01\x20\x01(\tR\x04path\x12\x18\n\x07content\
-    \x18\x02\x20\x01(\x0cR\x07content\x12\x12\n\x04mode\x18\x03\x20\x01(\rR\
-    \x04mode\"+\n\x17CreateContainerResponse\x12\x10\n\x03pid\x18\x01\x20\
-    \x01(\rR\x03pid\":\n\x15StartContainerRequest\x12!\n\x0ccontainer_id\x18\
-    \x01\x20\x01(\tR\x0bcontainerId\"*\n\x16StartContainerResponse\x12\x10\n\
-    \x03pid\x18\x01\x20\x01(\rR\x03pid\"c\n\x14KillContainerRequest\x12!\n\
-    \x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcontainerId\x12\x16\n\x06signal\
-    \x18\x02\x20\x01(\rR\x06signal\x12\x10\n\x03all\x18\x03\x20\x01(\x08R\
-    \x03all\"\x17\n\x15KillContainerResponse\";\n\x16DeleteContainerRequest\
-    \x12!\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcontainerId\"L\n\x17Delet\
-    eContainerResponse\x12\x1f\n\x0bexit_status\x18\x01\x20\x01(\rR\nexitSta\
-    tus\x12\x10\n\x03pid\x18\x02\x20\x01(\rR\x03pid\"9\n\x14WaitContainerReq\
-    uest\x12!\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcontainerId\"U\n\x15W\
-    aitContainerResponse\x12\x1f\n\x0bexit_status\x18\x01\x20\x01(\rR\nexitS\
-    tatus\x12\x1b\n\texited_at\x18\x02\x20\x01(\tR\x08exitedAt\"\xcf\x01\n\
-    \x12ExecProcessRequest\x12!\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcon\
-    tainerId\x12\x17\n\x07exec_id\x18\x02\x20\x01(\tR\x06execId\x12\x1b\n\ts\
-    pec_json\x18\x03\x20\x01(\tR\x08specJson\x12\x14\n\x05stdin\x18\x04\x20\
-    \x01(\tR\x05stdin\x12\x16\n\x06stdout\x18\x05\x20\x01(\tR\x06stdout\x12\
-    \x16\n\x06stderr\x18\x06\x20\x01(\tR\x06stderr\x12\x1a\n\x08terminal\x18\
-    \x07\x20\x01(\x08R\x08terminal\"'\n\x13ExecProcessResponse\x12\x10\n\x03\
-    pid\x18\x01\x20\x01(\rR\x03pid\":\n\x15StateContainerRequest\x12!\n\x0cc\
-    ontainer_id\x18\x01\x20\x01(\tR\x0bcontainerId\"\xc2\x01\n\x16StateConta\
-    inerResponse\x12!\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcontainerId\
-    \x12\x10\n\x03pid\x18\x02\x20\x01(\rR\x03pid\x125\n\x06status\x18\x03\
-    \x20\x01(\x0e2\x1d.cloudhv.agent.ContainerStateR\x06status\x12\x1f\n\x0b\
-    exit_status\x18\x04\x20\x01(\rR\nexitStatus\x12\x1b\n\texited_at\x18\x05\
-    \x20\x01(\tR\x08exitedAt\"\x0e\n\x0cCheckRequest\"?\n\rCheckResponse\x12\
-    \x14\n\x05ready\x18\x01\x20\x01(\x08R\x05ready\x12\x18\n\x07version\x18\
-    \x02\x20\x01(\tR\x07version\"\x13\n\x11GetMemInfoRequest\"\x82\x02\n\x12\
-    GetMemInfoResponse\x12\x20\n\x0cmem_total_kb\x18\x01\x20\x01(\x04R\nmemT\
-    otalKb\x12\x1e\n\x0bmem_free_kb\x18\x02\x20\x01(\x04R\tmemFreeKb\x12(\n\
-    \x10mem_available_kb\x18\x03\x20\x01(\x04R\x0ememAvailableKb\x12\x1d\n\n\
-    buffers_kb\x18\x04\x20\x01(\x04R\tbuffersKb\x12\x1b\n\tcached_kb\x18\x05\
-    \x20\x01(\x04R\x08cachedKb\x12\"\n\rswap_total_kb\x18\x06\x20\x01(\x04R\
-    \x0bswapTotalKb\x12\x20\n\x0cswap_free_kb\x18\x07\x20\x01(\x04R\nswapFre\
-    eKb\"T\n\x17GetContainerLogsRequest\x12!\n\x0ccontainer_id\x18\x01\x20\
-    \x01(\tR\x0bcontainerId\x12\x16\n\x06offset\x18\x02\x20\x01(\x04R\x06off\
-    set\"t\n\x18GetContainerLogsResponse\x12\x16\n\x06stdout\x18\x01\x20\x01\
-    (\x0cR\x06stdout\x12\x16\n\x06stderr\x18\x02\x20\x01(\x0cR\x06stderr\x12\
-    \x16\n\x06offset\x18\x03\x20\x01(\x04R\x06offset\x12\x10\n\x03eof\x18\
-    \x04\x20\x01(\x08R\x03eof\"\x9b\x01\n\x0fReadLogsRequest\x12!\n\x0cconta\
-    iner_id\x18\x01\x20\x01(\tR\x0bcontainerId\x12#\n\rstdout_offset\x18\x02\
-    \x20\x01(\x04R\x0cstdoutOffset\x12#\n\rstderr_offset\x18\x03\x20\x01(\
-    \x04R\x0cstderrOffset\x12\x1b\n\tmax_bytes\x18\x04\x20\x01(\rR\x08maxByt\
-    es\"\xec\x01\n\x10ReadLogsResponse\x12\x16\n\x06stdout\x18\x01\x20\x01(\
-    \x0cR\x06stdout\x12\x16\n\x06stderr\x18\x02\x20\x01(\x0cR\x06stderr\x12#\
-    \n\rstdout_offset\x18\x03\x20\x01(\x04R\x0cstdoutOffset\x12#\n\rstderr_o\
-    ffset\x18\x04\x20\x01(\x04R\x0cstderrOffset\x12\x10\n\x03eof\x18\x05\x20\
-    \x01(\x08R\x03eof\x12%\n\x0estdout_dropped\x18\x06\x20\x01(\x04R\rstdout\
-    Dropped\x12%\n\x0estderr_dropped\x18\x07\x20\x01(\x04R\rstderrDropped\"\
-    \x9b\x01\n\x17ConfigureNetworkRequest\x12\x1d\n\nip_address\x18\x01\x20\
-    \x01(\tR\tipAddress\x12\x18\n\x07gateway\x18\x02\x20\x01(\tR\x07gateway\
-    \x12\x1d\n\nprefix_len\x18\x03\x20\x01(\rR\tprefixLen\x12\x16\n\x06devic\
-    e\x18\x04\x20\x01(\tR\x06device\x12\x10\n\x03mac\x18\x05\x20\x01(\tR\x03\
-    mac\"\x1a\n\x18ConfigureNetworkResponse\"k\n\x15AdoptContainerRequest\
-    \x12(\n\x10old_container_id\x18\x01\x20\x01(\tR\x0eoldContainerId\x12(\n\
-    \x10new_container_id\x18\x02\x20\x01(\tR\x0enewContainerId\"*\n\x16Adopt\
-    ContainerResponse\x12\x10\n\x03pid\x18\x01\x20\x01(\rR\x03pid*'\n\nVolum\
-    eType\x12\x0e\n\nFILESYSTEM\x10\0\x12\t\n\x05BLOCK\x10\x01*P\n\x0eContai\
-    nerState\x12\x0b\n\x07UNKNOWN\x10\0\x12\x0b\n\x07CREATED\x10\x01\x12\x0b\
-    \n\x07RUNNING\x10\x02\x12\x0b\n\x07STOPPED\x10\x03\x12\n\n\x06PAUSED\x10\
-    \x042\xc5\t\n\x0cAgentService\x12`\n\x0fCreateContainer\x12%.cloudhv.age\
-    nt.CreateContainerRequest\x1a&.cloudhv.agent.CreateContainerResponse\x12\
-    ]\n\x0eStartContainer\x12$.cloudhv.agent.StartContainerRequest\x1a%.clou\
-    dhv.agent.StartContainerResponse\x12\\\n\x0cRunContainer\x12%.cloudhv.ag\
-    ent.CreateContainerRequest\x1a%.cloudhv.agent.StartContainerResponse\x12\
-    Z\n\rKillContainer\x12#.cloudhv.agent.KillContainerRequest\x1a$.cloudhv.\
-    agent.KillContainerResponse\x12`\n\x0fDeleteContainer\x12%.cloudhv.agent\
-    .DeleteContainerRequest\x1a&.cloudhv.agent.DeleteContainerResponse\x12Z\
-    \n\rWaitContainer\x12#.cloudhv.agent.WaitContainerRequest\x1a$.cloudhv.a\
-    gent.WaitContainerResponse\x12T\n\x0bExecProcess\x12!.cloudhv.agent.Exec\
-    ProcessRequest\x1a\".cloudhv.agent.ExecProcessResponse\x12]\n\x0eStateCo\
-    ntainer\x12$.cloudhv.agent.StateContainerRequest\x1a%.cloudhv.agent.Stat\
-    eContainerResponse\x12Q\n\nGetMemInfo\x12\x20.cloudhv.agent.GetMemInfoRe\
-    quest\x1a!.cloudhv.agent.GetMemInfoResponse\x12c\n\x10GetContainerLogs\
-    \x12&.cloudhv.agent.GetContainerLogsRequest\x1a'.cloudhv.agent.GetContai\
-    nerLogsResponse\x12K\n\x08ReadLogs\x12\x1e.cloudhv.agent.ReadLogsRequest\
-    \x1a\x1f.cloudhv.agent.ReadLogsResponse\x12c\n\x10ConfigureNetwork\x12&.\
-    cloudhv.agent.ConfigureNetworkRequest\x1a'.cloudhv.agent.ConfigureNetwor\
-    kResponse\x12]\n\x0eAdoptContainer\x12$.cloudhv.agent.AdoptContainerRequ\
-    est\x1a%.cloudhv.agent.AdoptContainerResponse2S\n\rHealthService\x12B\n\
-    \x05Check\x12\x1b.cloudhv.agent.CheckRequest\x1a\x1c.cloudhv.agent.Check\
-    ResponseB6Z4github.com/devigned/containerd-cloudhypervisor/protob\x06pro\
-    to3\
+    \x01(\rR\x0berofsLayers\x12#\n\rlayer_serials\x18\x0c\x20\x03(\tR\x0clay\
+    erSerials\"\x9b\x02\n\x0bVolumeMount\x12\x20\n\x0bdestination\x18\x01\
+    \x20\x01(\tR\x0bdestination\x12\x16\n\x06source\x18\x02\x20\x01(\tR\x06s\
+    ource\x12\x18\n\x07options\x18\x03\x20\x03(\tR\x07options\x12\x1a\n\x08r\
+    eadonly\x18\x04\x20\x01(\x08R\x08readonly\x12:\n\x0bvolume_type\x18\x05\
+    \x20\x01(\x0e2\x19.cloudhv.agent.VolumeTypeR\nvolumeType\x12\x17\n\x07fs\
+    _type\x18\x06\x20\x01(\tR\x06fsType\x12/\n\x05files\x18\x07\x20\x03(\x0b\
+    2\x19.cloudhv.agent.InlineFileR\x05files\x12\x16\n\x06serial\x18\x08\x20\
+    \x01(\tR\x06serial\"N\n\nInlineFile\x12\x12\n\x04path\x18\x01\x20\x01(\t\
+    R\x04path\x12\x18\n\x07content\x18\x02\x20\x01(\x0cR\x07content\x12\x12\
+    \n\x04mode\x18\x03\x20\x01(\rR\x04mode\"+\n\x17CreateContainerResponse\
+    \x12\x10\n\x03pid\x18\x01\x20\x01(\rR\x03pid\":\n\x15StartContainerReque\
+    st\x12!\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcontainerId\"*\n\x16Sta\
+    rtContainerResponse\x12\x10\n\x03pid\x18\x01\x20\x01(\rR\x03pid\"c\n\x14\
+    KillContainerRequest\x12!\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bconta\
+    inerId\x12\x16\n\x06signal\x18\x02\x20\x01(\rR\x06signal\x12\x10\n\x03al\
+    l\x18\x03\x20\x01(\x08R\x03all\"\x17\n\x15KillContainerResponse\";\n\x16\
+    DeleteContainerRequest\x12!\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcon\
+    tainerId\"L\n\x17DeleteContainerResponse\x12\x1f\n\x0bexit_status\x18\
+    \x01\x20\x01(\rR\nexitStatus\x12\x10\n\x03pid\x18\x02\x20\x01(\rR\x03pid\
+    \"9\n\x14WaitContainerRequest\x12!\n\x0ccontainer_id\x18\x01\x20\x01(\tR\
+    \x0bcontainerId\"U\n\x15WaitContainerResponse\x12\x1f\n\x0bexit_status\
+    \x18\x01\x20\x01(\rR\nexitStatus\x12\x1b\n\texited_at\x18\x02\x20\x01(\t\
+    R\x08exitedAt\"\xcf\x01\n\x12ExecProcessRequest\x12!\n\x0ccontainer_id\
+    \x18\x01\x20\x01(\tR\x0bcontainerId\x12\x17\n\x07exec_id\x18\x02\x20\x01\
+    (\tR\x06execId\x12\x1b\n\tspec_json\x18\x03\x20\x01(\tR\x08specJson\x12\
+    \x14\n\x05stdin\x18\x04\x20\x01(\tR\x05stdin\x12\x16\n\x06stdout\x18\x05\
+    \x20\x01(\tR\x06stdout\x12\x16\n\x06stderr\x18\x06\x20\x01(\tR\x06stderr\
+    \x12\x1a\n\x08terminal\x18\x07\x20\x01(\x08R\x08terminal\"'\n\x13ExecPro\
+    cessResponse\x12\x10\n\x03pid\x18\x01\x20\x01(\rR\x03pid\":\n\x15StateCo\
+    ntainerRequest\x12!\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcontainerId\
+    \"\xc2\x01\n\x16StateContainerResponse\x12!\n\x0ccontainer_id\x18\x01\
+    \x20\x01(\tR\x0bcontainerId\x12\x10\n\x03pid\x18\x02\x20\x01(\rR\x03pid\
+    \x125\n\x06status\x18\x03\x20\x01(\x0e2\x1d.cloudhv.agent.ContainerState\
+    R\x06status\x12\x1f\n\x0bexit_status\x18\x04\x20\x01(\rR\nexitStatus\x12\
+    \x1b\n\texited_at\x18\x05\x20\x01(\tR\x08exitedAt\"\x0e\n\x0cCheckReques\
+    t\"?\n\rCheckResponse\x12\x14\n\x05ready\x18\x01\x20\x01(\x08R\x05ready\
+    \x12\x18\n\x07version\x18\x02\x20\x01(\tR\x07version\"\x13\n\x11GetMemIn\
+    foRequest\"\x82\x02\n\x12GetMemInfoResponse\x12\x20\n\x0cmem_total_kb\
+    \x18\x01\x20\x01(\x04R\nmemTotalKb\x12\x1e\n\x0bmem_free_kb\x18\x02\x20\
+    \x01(\x04R\tmemFreeKb\x12(\n\x10mem_available_kb\x18\x03\x20\x01(\x04R\
+    \x0ememAvailableKb\x12\x1d\n\nbuffers_kb\x18\x04\x20\x01(\x04R\tbuffersK\
+    b\x12\x1b\n\tcached_kb\x18\x05\x20\x01(\x04R\x08cachedKb\x12\"\n\rswap_t\
+    otal_kb\x18\x06\x20\x01(\x04R\x0bswapTotalKb\x12\x20\n\x0cswap_free_kb\
+    \x18\x07\x20\x01(\x04R\nswapFreeKb\"T\n\x17GetContainerLogsRequest\x12!\
+    \n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcontainerId\x12\x16\n\x06offse\
+    t\x18\x02\x20\x01(\x04R\x06offset\"t\n\x18GetContainerLogsResponse\x12\
+    \x16\n\x06stdout\x18\x01\x20\x01(\x0cR\x06stdout\x12\x16\n\x06stderr\x18\
+    \x02\x20\x01(\x0cR\x06stderr\x12\x16\n\x06offset\x18\x03\x20\x01(\x04R\
+    \x06offset\x12\x10\n\x03eof\x18\x04\x20\x01(\x08R\x03eof\"\x9b\x01\n\x0f\
+    ReadLogsRequest\x12!\n\x0ccontainer_id\x18\x01\x20\x01(\tR\x0bcontainerI\
+    d\x12#\n\rstdout_offset\x18\x02\x20\x01(\x04R\x0cstdoutOffset\x12#\n\rst\
+    derr_offset\x18\x03\x20\x01(\x04R\x0cstderrOffset\x12\x1b\n\tmax_bytes\
+    \x18\x04\x20\x01(\rR\x08maxBytes\"\xec\x01\n\x10ReadLogsResponse\x12\x16\
+    \n\x06stdout\x18\x01\x20\x01(\x0cR\x06stdout\x12\x16\n\x06stderr\x18\x02\
+    \x20\x01(\x0cR\x06stderr\x12#\n\rstdout_offset\x18\x03\x20\x01(\x04R\x0c\
+    stdoutOffset\x12#\n\rstderr_offset\x18\x04\x20\x01(\x04R\x0cstderrOffset\
+    \x12\x10\n\x03eof\x18\x05\x20\x01(\x08R\x03eof\x12%\n\x0estdout_dropped\
+    \x18\x06\x20\x01(\x04R\rstdoutDropped\x12%\n\x0estderr_dropped\x18\x07\
+    \x20\x01(\x04R\rstderrDropped\"\x9b\x01\n\x17ConfigureNetworkRequest\x12\
+    \x1d\n\nip_address\x18\x01\x20\x01(\tR\tipAddress\x12\x18\n\x07gateway\
+    \x18\x02\x20\x01(\tR\x07gateway\x12\x1d\n\nprefix_len\x18\x03\x20\x01(\r\
+    R\tprefixLen\x12\x16\n\x06device\x18\x04\x20\x01(\tR\x06device\x12\x10\n\
+    \x03mac\x18\x05\x20\x01(\tR\x03mac\"\x1a\n\x18ConfigureNetworkResponse\"\
+    k\n\x15AdoptContainerRequest\x12(\n\x10old_container_id\x18\x01\x20\x01(\
+    \tR\x0eoldContainerId\x12(\n\x10new_container_id\x18\x02\x20\x01(\tR\x0e\
+    newContainerId\"*\n\x16AdoptContainerResponse\x12\x10\n\x03pid\x18\x01\
+    \x20\x01(\rR\x03pid*'\n\nVolumeType\x12\x0e\n\nFILESYSTEM\x10\0\x12\t\n\
+    \x05BLOCK\x10\x01*P\n\x0eContainerState\x12\x0b\n\x07UNKNOWN\x10\0\x12\
+    \x0b\n\x07CREATED\x10\x01\x12\x0b\n\x07RUNNING\x10\x02\x12\x0b\n\x07STOP\
+    PED\x10\x03\x12\n\n\x06PAUSED\x10\x042\xc5\t\n\x0cAgentService\x12`\n\
+    \x0fCreateContainer\x12%.cloudhv.agent.CreateContainerRequest\x1a&.cloud\
+    hv.agent.CreateContainerResponse\x12]\n\x0eStartContainer\x12$.cloudhv.a\
+    gent.StartContainerRequest\x1a%.cloudhv.agent.StartContainerResponse\x12\
+    \\\n\x0cRunContainer\x12%.cloudhv.agent.CreateContainerRequest\x1a%.clou\
+    dhv.agent.StartContainerResponse\x12Z\n\rKillContainer\x12#.cloudhv.agen\
+    t.KillContainerRequest\x1a$.cloudhv.agent.KillContainerResponse\x12`\n\
+    \x0fDeleteContainer\x12%.cloudhv.agent.DeleteContainerRequest\x1a&.cloud\
+    hv.agent.DeleteContainerResponse\x12Z\n\rWaitContainer\x12#.cloudhv.agen\
+    t.WaitContainerRequest\x1a$.cloudhv.agent.WaitContainerResponse\x12T\n\
+    \x0bExecProcess\x12!.cloudhv.agent.ExecProcessRequest\x1a\".cloudhv.agen\
+    t.ExecProcessResponse\x12]\n\x0eStateContainer\x12$.cloudhv.agent.StateC\
+    ontainerRequest\x1a%.cloudhv.agent.StateContainerResponse\x12Q\n\nGetMem\
+    Info\x12\x20.cloudhv.agent.GetMemInfoRequest\x1a!.cloudhv.agent.GetMemIn\
+    foResponse\x12c\n\x10GetContainerLogs\x12&.cloudhv.agent.GetContainerLog\
+    sRequest\x1a'.cloudhv.agent.GetContainerLogsResponse\x12K\n\x08ReadLogs\
+    \x12\x1e.cloudhv.agent.ReadLogsRequest\x1a\x1f.cloudhv.agent.ReadLogsRes\
+    ponse\x12c\n\x10ConfigureNetwork\x12&.cloudhv.agent.ConfigureNetworkRequ\
+    est\x1a'.cloudhv.agent.ConfigureNetworkResponse\x12]\n\x0eAdoptContainer\
+    \x12$.cloudhv.agent.AdoptContainerRequest\x1a%.cloudhv.agent.AdoptContai\
+    nerResponse2S\n\rHealthService\x12B\n\x05Check\x12\x1b.cloudhv.agent.Che\
+    ckRequest\x1a\x1c.cloudhv.agent.CheckResponseB6Z4github.com/devigned/con\
+    tainerd-cloudhypervisor/protob\x06proto3\
 ";
 
 /// `FileDescriptorProto` object which was a source for this generated file
