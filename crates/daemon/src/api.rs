@@ -754,12 +754,26 @@ async fn handle_delete_container(
 }
 
 /// Set up networking for a VM: create TAP in host → CH add-net → move to pod netns + TC.
+/// The name of a VM's TAP device. A Linux interface name has 15 characters at most, so the name cannot hold the VM's ID; it holds a hash of it.
+/// The name used to be the first 8 characters of the ID, which for the pool's VMs ("pool-<pid>-<n>"), the warm ones and the sized ones
+/// ("sized-<pid>-<n>") is the same for every VM of one daemon: two pods starting at about the same time were given the same TAP name,
+/// and the second failed with "Resource busy" (and a TAP was left behind in the host's network namespace).
+pub fn tap_name_for(vm_id: &str) -> String {
+    // FNV-1a, 64 bits; 44 bits of it as 11 hex digits: "tap_" and 11 digits are the 15 characters.
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in vm_id.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("tap_{:011x}", hash & 0xfff_ffff_ffff)
+}
+
 async fn setup_vm_networking(
     netns: &str,
     vm_id: &str,
     api_socket: &std::path::Path,
 ) -> anyhow::Result<(String, crate::netns::PodNetInfo)> {
-    let tap_name = format!("tap_{}", &vm_id[..8.min(vm_id.len())]);
+    let tap_name = tap_name_for(vm_id);
 
     // Phase 1: probe pod netns for veth info, create TAP in host netns
     let info = {
@@ -867,4 +881,32 @@ async fn run_container_in_warm_vm(
         container_id, resp.pid
     );
     Ok(resp.pid)
+}
+
+#[cfg(test)]
+mod tap_name_tests {
+    use super::tap_name_for;
+
+    #[test]
+    fn the_tap_names_of_vms_that_share_a_prefix_differ_and_fit_an_interface_name() {
+        let ids = [
+            "pool-30322-4",
+            "pool-30322-5",
+            "sized-26035-0",
+            "sized-26035-1",
+            "warm-245df30fdec499a2cec3811ea5403906-0",
+            "warm-245df30fdec499a2cec3811ea5403906-1",
+        ];
+        let names: Vec<String> = ids.iter().map(|id| tap_name_for(id)).collect();
+        for name in &names {
+            assert!(name.len() <= 15, "{name} is too long for an interface name");
+            assert!(name.starts_with("tap_"));
+        }
+        let mut sorted = names.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ids.len(), "{names:?}");
+        // The same VM always gets the same name (the shim and the cleanup find the device by it).
+        assert_eq!(tap_name_for("pool-30322-4"), names[0]);
+    }
 }
