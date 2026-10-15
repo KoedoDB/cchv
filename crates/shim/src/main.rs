@@ -2,8 +2,10 @@
 
 use containerd_shimkit::sandbox;
 
+mod cachekey;
 mod config;
 mod daemon_client;
+mod erofs_cache;
 mod instance;
 mod netns;
 mod vmsize;

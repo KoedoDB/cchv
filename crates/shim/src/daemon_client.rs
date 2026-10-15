@@ -3,10 +3,16 @@
 //! The shim communicates with the daemon over a Unix socket using a
 //! JSON-line protocol. All methods are async and use tokio::net::UnixStream.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use log::info;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+
+/// The longest answer read from the daemon. ReadLogs answers (a container's output, base64) are the biggest, about 1.4 MB; a daemon,
+/// or something in its place, that sends more is not read on until the shim's memory is gone.
+const MAX_RESPONSE: u64 = 16 * 1024 * 1024;
 
 /// Parameters for acquiring a sandbox VM from the daemon.
 pub struct AcquireRequest<'a> {
@@ -35,13 +41,24 @@ pub struct AcquiredVm {
 /// Async client for the sandbox daemon's Unix socket API.
 pub struct DaemonClient {
     socket_path: String,
+    /// What an ordinary request may take, and what one that boots or hot-plugs a VM may take.
+    rpc_timeout: Duration,
+    acquire_timeout: Duration,
 }
 
 impl DaemonClient {
     pub fn new(socket_path: &str) -> Self {
         Self {
             socket_path: socket_path.to_string(),
+            rpc_timeout: Duration::from_secs(30),
+            acquire_timeout: Duration::from_secs(120),
         }
+    }
+
+    pub fn with_timeouts(mut self, rpc_secs: u64, acquire_secs: u64) -> Self {
+        self.rpc_timeout = Duration::from_secs(rpc_secs.max(1));
+        self.acquire_timeout = Duration::from_secs(acquire_secs.max(1));
+        self
     }
 
     /// Acquire a pre-booted VM from the daemon.
@@ -50,7 +67,7 @@ impl DaemonClient {
         let config_b64 = base64::engine::general_purpose::STANDARD.encode(params.config_json);
 
         let resp = self
-            .rpc(&serde_json::json!({
+            .rpc_long(&serde_json::json!({
                 "method": "AcquireSandbox",
                 "netns": params.netns,
                 "image_key": params.image_key,
@@ -100,7 +117,7 @@ impl DaemonClient {
         let config_b64 = base64::engine::general_purpose::STANDARD.encode(config_json);
 
         let resp = self
-            .rpc(&serde_json::json!({
+            .rpc_long(&serde_json::json!({
                 "method": "AddContainer",
                 "vm_id": vm_id,
                 "erofs_path": erofs_path,
@@ -193,51 +210,58 @@ impl DaemonClient {
         Ok(())
     }
 
-    /// Send a JSON-line RPC with a 30s read timeout.
+    /// Send a JSON-line RPC; it must be answered within the ordinary timeout.
     async fn rpc(&self, request: &serde_json::Value) -> Result<serde_json::Value> {
-        let stream = UnixStream::connect(&self.socket_path)
-            .await
-            .with_context(|| format!("connect to daemon: {}", self.socket_path))?;
-
-        let mut msg = serde_json::to_string(request)?;
-        msg.push('\n');
-
-        let (reader, mut writer) = stream.into_split();
-        writer.write_all(msg.as_bytes()).await?;
-
-        let mut buf_reader = BufReader::new(reader);
-        let mut line = String::new();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            buf_reader.read_line(&mut line),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("daemon RPC timed out after 30s"))?
-        .context("read daemon response")?;
-
-        serde_json::from_str(line.trim()).context("parse daemon response")
+        self.rpc_with(request, Some(self.rpc_timeout)).await
     }
 
-    /// Send a JSON-line RPC without a read timeout (for long-lived RPCs).
+    /// The same for a request that boots a VM or hot-plugs a disk.
+    async fn rpc_long(&self, request: &serde_json::Value) -> Result<serde_json::Value> {
+        self.rpc_with(request, Some(self.acquire_timeout)).await
+    }
+
+    /// Send a JSON-line RPC without a timeout (for long-lived RPCs). The connection ending is still an end.
     async fn rpc_no_timeout(&self, request: &serde_json::Value) -> Result<serde_json::Value> {
-        let stream = UnixStream::connect(&self.socket_path)
-            .await
-            .with_context(|| format!("connect to daemon: {}", self.socket_path))?;
+        self.rpc_with(request, None).await
+    }
 
-        let mut msg = serde_json::to_string(request)?;
-        msg.push('\n');
+    /// Connecting, writing the request and reading the answer, all within `timeout`.
+    async fn rpc_with(
+        &self,
+        request: &serde_json::Value,
+        timeout: Option<Duration>,
+    ) -> Result<serde_json::Value> {
+        let exchange = async {
+            let stream = UnixStream::connect(&self.socket_path)
+                .await
+                .with_context(|| format!("connect to daemon: {}", self.socket_path))?;
 
-        let (reader, mut writer) = stream.into_split();
-        writer.write_all(msg.as_bytes()).await?;
+            let mut msg = serde_json::to_string(request)?;
+            msg.push('\n');
 
-        let mut buf_reader = BufReader::new(reader);
-        let mut line = String::new();
-        buf_reader
-            .read_line(&mut line)
-            .await
-            .context("read daemon response")?;
+            let (reader, mut writer) = stream.into_split();
+            writer.write_all(msg.as_bytes()).await.context("write to the daemon")?;
 
-        serde_json::from_str(line.trim()).context("parse daemon response")
+            let mut buf_reader = BufReader::new(reader.take(MAX_RESPONSE));
+            let mut line = String::new();
+            let n = buf_reader
+                .read_line(&mut line)
+                .await
+                .context("read daemon response")?;
+            if n == 0 {
+                anyhow::bail!("the daemon closed the connection without an answer");
+            }
+            if !line.ends_with('\n') && n as u64 >= MAX_RESPONSE {
+                anyhow::bail!("the daemon's answer is longer than {MAX_RESPONSE} bytes");
+            }
+            serde_json::from_str(line.trim()).context("parse daemon response")
+        };
+        match timeout {
+            Some(t) => tokio::time::timeout(t, exchange)
+                .await
+                .map_err(|_| anyhow::anyhow!("daemon RPC timed out after {}s", t.as_secs()))?,
+            None => exchange.await,
+        }
     }
 
     fn check_error(resp: &serde_json::Value, method: &str) -> Result<()> {

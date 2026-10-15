@@ -37,7 +37,7 @@ pub fn vm_size(
     let memory_mb = match limits.memory_bytes {
         Some(bytes) if bytes > 0 => {
             let pod_mb = bytes.div_ceil(1024 * 1024);
-            (pod_mb + GUEST_OVERHEAD_MB).max(default_memory_mb)
+            pod_mb.saturating_add(GUEST_OVERHEAD_MB).max(default_memory_mb)
         }
         _ => default_memory_mb,
     };
@@ -53,6 +53,18 @@ pub fn vm_size(
         .min(max_vcpus.max(1))
         .max(default_vcpus.min(max_vcpus.max(1)));
     VmSize { memory_mb, vcpus }
+}
+
+/// A pod's own limit sizes its VM, and the scheduler counts only a pod's requests, so a pod can ask for a VM of any size (a limit of
+/// 4 TiB with a request of 10 MiB). This is the shim's last say: a VM bigger than the host allows is not started.
+pub fn check_size(size: VmSize, max_memory_mb: u64) -> Result<(), String> {
+    if size.memory_mb > max_memory_mb {
+        return Err(format!(
+            "the pod's memory limit needs a VM of {} MiB, more than the {} MiB this host allows (max_memory_mb)",
+            size.memory_mb, max_memory_mb
+        ));
+    }
+    Ok(())
 }
 
 /// Read the limits from the annotations of a sandbox's OCI spec.
@@ -142,6 +154,28 @@ mod tests {
             cpu_period: None,
         };
         assert_eq!(vm_size(l, 128, 1, 8).memory_mb, 301 + GUEST_OVERHEAD_MB);
+    }
+
+    #[test]
+    fn a_vm_bigger_than_the_host_allows_is_refused() {
+        let ok = vm_size(limits(1024, 100_000), 128, 1, 8);
+        assert!(check_size(ok, 16384).is_ok());
+        // 4 TiB, and a limit so large that adding the guest's share would overflow.
+        let tib = PodLimits {
+            memory_bytes: Some(4 * 1024 * 1024 * 1024 * 1024),
+            ..PodLimits::default()
+        };
+        let e = check_size(vm_size(tib, 128, 1, 8), 16384).unwrap_err();
+        assert!(e.contains("max_memory_mb"), "{e}");
+        let huge = PodLimits {
+            memory_bytes: Some(u64::MAX),
+            ..PodLimits::default()
+        };
+        assert!(check_size(vm_size(huge, 128, 1, 8), 16384).is_err());
+        // exactly the maximum is allowed
+        let edge = VmSize { memory_mb: 16384, vcpus: 1 };
+        assert!(check_size(edge, 16384).is_ok());
+        assert!(check_size(VmSize { memory_mb: 16385, vcpus: 1 }, 16384).is_err());
     }
 
     #[test]

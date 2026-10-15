@@ -6,7 +6,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use containerd_shimkit::sandbox::instance::{Instance, InstanceConfig};
@@ -14,9 +15,10 @@ use containerd_shimkit::sandbox::sync::WaitableCell;
 use containerd_shimkit::sandbox::Error;
 use log::info;
 
-use crate::config::load_config;
+use crate::config::{load_config, load_shim_limits};
 use crate::daemon_client::{AcquireRequest, DaemonClient};
-use crate::vmsize::{limits_from_spec, vm_size, PodLimits};
+use crate::erofs_cache::{CacheConfig, Lease};
+use crate::vmsize::{check_size, limits_from_spec, vm_size, PodLimits};
 
 /// Milliseconds since Unix epoch for TIMING logs.
 pub fn epoch_ms() -> u128 {
@@ -46,6 +48,42 @@ impl<T, E: std::fmt::Display> ResultExt<T> for Result<T, E> {
 
 static VMS: LazyLock<RwLock<HashMap<String, Arc<SharedVmState>>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// One lock per sandbox: two containers of a pod that start together must not both acquire a VM for it.
+static SANDBOX_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The leases on the erofs images the sandbox runs from, kept for as long as the sandbox is (see `erofs_cache`).
+static LEASES: LazyLock<Mutex<HashMap<String, Vec<Lease>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn sandbox_lock(sandbox_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    SANDBOX_LOCKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(sandbox_id.to_string())
+        .or_default()
+        .clone()
+}
+
+/// The sandbox is over: forget its state, its lock and its leases on images.
+fn forget_sandbox(sandbox_id: &str) {
+    VMS.write().unwrap_or_else(|e| e.into_inner()).remove(sandbox_id);
+    SANDBOX_LOCKS.lock().unwrap_or_else(|e| e.into_inner()).remove(sandbox_id);
+    LEASES.lock().unwrap_or_else(|e| e.into_inner()).remove(sandbox_id);
+}
+
+/// Give the VM back to the daemon and clean up the TAP: best effort, for a sandbox that cannot go on.
+async fn release_vm(vm_state: &SharedVmState) {
+    if !vm_state.daemon_vm_id.is_empty() {
+        let client = DaemonClient::new(&vm_state.daemon_socket);
+        if let Err(e) = client.release_sandbox(&vm_state.daemon_vm_id).await {
+            info!("daemon release failed (non-fatal): {e:#}");
+        }
+    }
+    if let (Some(ref netns), Some(ref tap)) = (&vm_state.netns, &vm_state.tap_name) {
+        crate::netns::cleanup_tap(netns, tap).await;
+    }
+}
 
 fn get_vm(sandbox_id: &str) -> Option<Arc<SharedVmState>> {
     VMS.read()
@@ -160,9 +198,7 @@ impl Instance for CloudHvInstance {
                 }
                 let tap_ms = t_tap.elapsed().as_millis();
 
-                VMS.write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&self.sandbox_id);
+                forget_sandbox(&self.sandbox_id);
 
                 info!(
                     "TIMING kill_sandbox {} @{}: release={}ms tap={}ms total={}ms",
@@ -221,9 +257,7 @@ impl Instance for CloudHvInstance {
                     info!("cleaned up TAP {tap}");
                 }
 
-                VMS.write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&self.sandbox_id);
+                forget_sandbox(&self.sandbox_id);
 
                 info!(
                     "TIMING delete {} @{}: total={}ms (sandbox released)",
@@ -284,22 +318,26 @@ impl CloudHvInstance {
         let sandbox_spec = parse_sandbox_spec(&spec_path);
 
         let config = load_config(None).ctx("config error")?;
+        let limits = load_shim_limits(None).ctx("config error")?;
 
         // The size of this pod's VM, from the limits containerd put on the sandbox.
         let host_cpus = std::thread::available_parallelism()
             .map(|n| n.get() as u32)
             .unwrap_or(1);
-        let max_vcpus = if config.max_default_vcpus == 0 {
-            host_cpus
-        } else {
-            config.max_default_vcpus
-        };
+        let max_vcpus = [config.max_default_vcpus, limits.max_vcpus]
+            .into_iter()
+            .filter(|&n| n > 0)
+            .min()
+            .unwrap_or(host_cpus)
+            .min(host_cpus);
         let size = vm_size(
             sandbox_spec.limits,
             config.default_memory_mb,
             config.default_vcpus,
             max_vcpus,
         );
+        // The pod's limit makes the VM; a pod must not be able to ask for one the host cannot give.
+        check_size(size, limits.max_memory_mb).map_err(|e| Error::Any(anyhow::anyhow!(e)))?;
         info!(
             "sandbox {} needs a VM of {} MiB and {} vCPUs (limits {:?})",
             sandbox_id, size.memory_mb, size.vcpus, sandbox_spec.limits
@@ -342,47 +380,104 @@ impl CloudHvInstance {
             epoch_ms()
         );
 
+        let limits = load_shim_limits(None).ctx("config error")?;
+
+        // One container of the pod at a time up to the VM being acquired and recorded: two that start together would both find
+        // no VM and acquire one each.
+        let sandbox_lock = sandbox_lock(&self.sandbox_id);
+        let _one_at_a_time = sandbox_lock.lock().await;
+
         let vm_state = get_vm(&self.sandbox_id).ok_or_else(|| {
             Error::Any(anyhow::anyhow!("sandbox VM not found: {}", self.sandbox_id))
         })?;
 
         let rootfs_path = self.bundle.join("rootfs");
 
-        // Resolve image digest for stable cache key + warm snapshot lookup.
-        // This must happen before erofs conversion so the same image always
-        // maps to the same erofs file (regardless of container snapshot path).
-        let image_key = image_key_from_spec(&self.bundle)
-            .await
-            .unwrap_or_else(|| stable_hash_hex(&rootfs_path.to_string_lossy()));
+        // The key of the erofs image (and of the daemon's warm snapshot) says what is mounted at the rootfs: the layers of the
+        // mount, plus the image's digest if containerd gives it. When what is mounted cannot be told, the container does not start.
+        let digest = image_digest_from_spec(&self.bundle).await;
+        let image_key = crate::cachekey::rootfs_key(&rootfs_path, digest.as_deref())
+            .map_err(|e| Error::Any(anyhow::anyhow!("cannot identify the rootfs of {container_id}: {e}")))?;
 
-        // Convert rootfs to erofs (cached by image key). The shim does this
-        // because it has access to the bundle rootfs that containerd prepared.
-        // Retry on transient failures (e.g. fork pressure under heavy load).
+        // Convert rootfs to erofs (cached by the key). The shim does this because it has access to the bundle rootfs that
+        // containerd prepared. Retry on transient failures (e.g. fork pressure under heavy load); a build is a blocking job
+        // (mkfs.erofs for seconds), so it runs off the runtime's threads.
         let t_erofs = std::time::Instant::now();
+        let cache = CacheConfig {
+            dir: PathBuf::from(EROFS_CACHE_DIR),
+            max_bytes: limits.erofs_cache_max_mib.saturating_mul(1024 * 1024),
+            mkfs_candidates: limits.mkfs_candidates(),
+            mkfs_timeout: Duration::from_secs(limits.mkfs_erofs_timeout_secs),
+        };
         let erofs_path = {
             let mut last_err = None;
             let mut result = None;
-            for attempt in 0..3 {
-                match prepare_erofs(&rootfs_path, &image_key) {
-                    Ok(path) => {
+            for attempt in 0..3u64 {
+                let (cache_dir, max_bytes, cands, tmo) = (
+                    cache.dir.clone(),
+                    cache.max_bytes,
+                    cache.mkfs_candidates.clone(),
+                    cache.mkfs_timeout,
+                );
+                let (root, key) = (rootfs_path.clone(), image_key.clone());
+                let built = tokio::task::spawn_blocking(move || {
+                    crate::erofs_cache::prepare(
+                        &CacheConfig {
+                            dir: cache_dir,
+                            max_bytes,
+                            mkfs_candidates: cands,
+                            mkfs_timeout: tmo,
+                        },
+                        &root,
+                        &key,
+                    )
+                })
+                .await
+                .map_err(|e| format!("erofs build task: {e}"))
+                .and_then(|r| r);
+                match built {
+                    Ok((path, lease)) => {
+                        // The image stays in the cache while this sandbox runs.
+                        LEASES
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .entry(self.sandbox_id.clone())
+                            .or_default()
+                            .push(lease);
                         result = Some(path);
                         break;
                     }
                     Err(e) => {
                         info!("prepare_erofs attempt {attempt} failed: {e}");
+                        let fatal = e.contains("larger than the whole") || e.contains("cache is full") || e.contains("free space");
                         last_err = Some(e);
-                        std::thread::sleep(std::time::Duration::from_millis(100 * (attempt + 1)));
+                        if fatal {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(100 * (attempt + 1))).await;
                     }
                 }
             }
-            result.ok_or_else(|| last_err.unwrap())?
+            result.ok_or_else(|| Error::Any(anyhow::anyhow!("erofs image: {}", last_err.unwrap_or_default())))?
         };
         let erofs_ms = t_erofs.elapsed().as_millis();
 
         // Read OCI config for the container
         let spec_path = self.bundle.join("config.json");
         let config_json = std::fs::read(&spec_path).unwrap_or_default();
-        let volumes = crate::volumes::from_spec(&config_json);
+        // The volumes are read from the host's files: files and directories of the pod, below the roots the runtime makes them in, and
+        // never a link out of them. If one cannot be read, or is not allowed, the container is not started.
+        let volumes = {
+            let (cfg_json, roots) = (config_json.clone(), limits.volume_source_roots.clone());
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                tokio::task::spawn_blocking(move || crate::volumes::from_spec(&cfg_json, &roots)),
+            )
+            .await
+            .map_err(|_| Error::Any(anyhow::anyhow!("reading the volumes took too long")))?
+            .map_err(|e| Error::Any(anyhow::anyhow!("volume task: {e}")))?
+            .map_err(|e| Error::Any(anyhow::anyhow!("{e}")))?
+        };
 
         // Check if a VM is already acquired for this sandbox (multi-container pod).
         // Only the first container triggers daemon acquire + warm snapshot lookup.
@@ -394,7 +489,8 @@ impl CloudHvInstance {
                 self.sandbox_id, container_id
             );
             // Additional container — daemon does hot-plug + RunContainer
-            let client = DaemonClient::new(&vm_state.daemon_socket);
+            let client = DaemonClient::new(&vm_state.daemon_socket)
+                .with_timeouts(limits.rpc_timeout_secs, limits.acquire_timeout_secs);
             let t_acquire = std::time::Instant::now();
             let resp = client
                 .add_container(
@@ -411,7 +507,8 @@ impl CloudHvInstance {
         } else {
             // First container — acquire VM from daemon
             let t_acquire = std::time::Instant::now();
-            let client = DaemonClient::new(&vm_state.daemon_socket);
+            let client = DaemonClient::new(&vm_state.daemon_socket)
+                .with_timeouts(limits.rpc_timeout_secs, limits.acquire_timeout_secs);
             let acquired = client
                 .acquire_sandbox(&AcquireRequest {
                     netns: vm_state.netns.as_deref().unwrap_or(""),
@@ -465,7 +562,16 @@ impl CloudHvInstance {
             if let Some(ref cg) = new_state.cgroups_path {
                 match place_in_pod_cgroup(acquired.ch_pid, cg) {
                     Ok(()) => info!("CH pid {} placed in cgroup {}", acquired.ch_pid, cg),
-                    Err(e) => info!("cgroup placement failed (non-fatal): {e}"),
+                    Err(e) if limits.require_pod_cgroup => {
+                        // Outside the pod's cgroup the VM would run without the pod's limits: give it back and fail the pod.
+                        log::error!("cgroup placement failed, the pod does not start: {e}");
+                        release_vm(&new_state).await;
+                        forget_sandbox(&self.sandbox_id);
+                        return Err(Error::Any(anyhow::anyhow!(
+                            "cannot place the VM in the pod's cgroup {cg}: {e}"
+                        )));
+                    }
+                    Err(e) => info!("cgroup placement failed (require_pod_cgroup is off): {e}"),
                 }
             }
 
@@ -484,6 +590,7 @@ impl CloudHvInstance {
             let ch_pid = active_state.ch_pid;
             let daemon_socket = active_state.daemon_socket.clone();
             let daemon_vm_id = active_state.daemon_vm_id.clone();
+            let watched = active_state.clone();
 
             tokio::spawn(async move {
                 let t0 = std::time::Instant::now();
@@ -491,7 +598,17 @@ impl CloudHvInstance {
 
                 tokio::select! {
                     result = client.wait_container(&daemon_vm_id, &cid) => {
-                        let (exit_code, _) = result.unwrap_or((137, String::new()));
+                        let (exit_code, _) = match result {
+                            Ok(r) => r,
+                            Err(e) => {
+                                // The daemon cannot be asked about the container (it died, or the connection broke). Reporting 137
+                                // and leaving the VM would orphan a VM that may still be running: give it back to the daemon (which
+                                // stops it, or has already) before the pod is restarted.
+                                log::warn!("waiting for {cid} failed, releasing its VM: {e:#}");
+                                release_vm(&watched).await;
+                                (137, String::new())
+                            }
+                        };
                         let _ = exit.set((exit_code, Utc::now()));
                         log::info!(
                             "TIMING exit_watcher {} @{}: daemon_wait code={} took={}ms",
@@ -557,18 +674,25 @@ async fn pump_logs(
 ) {
     use tokio::io::AsyncWriteExt;
 
+    // containerd's pipes are FIFOs, which the shim opens read-write: that does not wait for a reader, so opening cannot hang; but a
+    // thread of the blocking pool is used for it, and it is given up on after a time. A write to a pipe nobody reads blocks once the
+    // pipe is full (64 KiB): that is bounded too, and the stream is dropped.
+    const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
+    const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
     let open = |cfg: InstanceConfig, stderr: bool| async move {
-        tokio::task::spawn_blocking(move || {
+        let job = tokio::task::spawn_blocking(move || {
             if stderr {
                 cfg.open_stderr()
             } else {
                 cfg.open_stdout()
             }
-        })
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-        .map(tokio::fs::File::from_std)
+        });
+        tokio::time::timeout(OPEN_TIMEOUT, job)
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .and_then(|r| r.ok())
+            .map(tokio::fs::File::from_std)
     };
     let mut out = open(cfg.clone(), false).await;
     let mut err = open(cfg, true).await;
@@ -591,14 +715,24 @@ async fn pump_logs(
                 // A pipe whose reader has gone (a write fails) is dropped; the other stream goes on.
                 if !chunk.stdout.is_empty() {
                     if let Some(f) = out.as_mut() {
-                        if f.write_all(&chunk.stdout).await.is_err() || f.flush().await.is_err() {
+                        let wrote = tokio::time::timeout(WRITE_TIMEOUT, async {
+                            f.write_all(&chunk.stdout).await?;
+                            f.flush().await
+                        })
+                        .await;
+                        if !matches!(wrote, Ok(Ok(()))) {
                             out = None;
                         }
                     }
                 }
                 if !chunk.stderr.is_empty() {
                     if let Some(f) = err.as_mut() {
-                        if f.write_all(&chunk.stderr).await.is_err() || f.flush().await.is_err() {
+                        let wrote = tokio::time::timeout(WRITE_TIMEOUT, async {
+                            f.write_all(&chunk.stderr).await?;
+                            f.flush().await
+                        })
+                        .await;
+                        if !matches!(wrote, Ok(Ok(()))) {
                             err = None;
                         }
                     }
@@ -675,12 +809,10 @@ fn parse_sandbox_spec(spec_path: &std::path::Path) -> SandboxSpec {
     }
 }
 
-/// Extract a stable image key by resolving the CRI image-name annotation
-/// to a content-addressed digest via containerd's image store.
-///
-/// Falls back to hashing the image tag if digest resolution fails, and
-/// to the rootfs path if no image annotation is present.
-async fn image_key_from_spec(bundle: &std::path::Path) -> Option<String> {
+/// The digest of the image the container was created from, if containerd's image store says one: the CRI image-name annotation,
+/// resolved there. It only adds to the cache key (what is mounted decides the key), so no digest is not an error; a value that is
+/// not a digest is dropped.
+async fn image_digest_from_spec(bundle: &std::path::Path) -> Option<String> {
     let spec_str = std::fs::read_to_string(bundle.join("config.json")).ok()?;
     let spec: serde_json::Value = serde_json::from_str(&spec_str).ok()?;
     let image_name = spec
@@ -688,19 +820,16 @@ async fn image_key_from_spec(bundle: &std::path::Path) -> Option<String> {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())?;
 
-    // Resolve tag → digest via containerd's gRPC image service.
-    // This is content-addressed and immune to tag mutation (e.g. "latest").
-    if let Some(digest) = resolve_image_digest(image_name).await {
-        info!("resolved image {} → {}", image_name, digest);
-        return Some(stable_hash_hex(&digest));
+    let digest = tokio::time::timeout(Duration::from_secs(10), resolve_image_digest(image_name))
+        .await
+        .ok()
+        .flatten()?;
+    if !crate::cachekey::valid_digest(&digest) {
+        info!("the digest of {image_name} is not a sha256 digest, left out of the cache key");
+        return None;
     }
-
-    // Fallback: hash the image reference (tag-based, not ideal but functional)
-    info!(
-        "digest resolution failed for {}, using tag hash",
-        image_name
-    );
-    Some(stable_hash_hex(image_name))
+    info!("resolved image {} → {}", image_name, digest);
+    Some(digest)
 }
 
 /// Query containerd's gRPC image service to resolve an image reference
@@ -730,66 +859,8 @@ async fn resolve_image_digest(image_ref: &str) -> Option<String> {
     image.target.map(|t| t.digest)
 }
 
-/// Prepare erofs image from rootfs (cached by image key).
-/// Uses flock to serialize concurrent mkfs.erofs for the same image.
-fn prepare_erofs(rootfs_path: &std::path::Path, cache_key: &str) -> Result<PathBuf, Error> {
-    let cache_path = PathBuf::from(EROFS_CACHE_DIR).join(format!("{cache_key}.erofs"));
-
-    if cache_path.exists() {
-        return Ok(cache_path);
-    }
-
-    std::fs::create_dir_all(EROFS_CACHE_DIR)
-        .map_err(|e| Error::Any(anyhow::anyhow!("create erofs cache dir: {e}")))?;
-
-    // Serialize concurrent mkfs.erofs for the same image via flock
-    let lock_path = PathBuf::from(EROFS_CACHE_DIR).join(format!("{cache_key}.lock"));
-    let lock_file = std::fs::File::create(&lock_path)
-        .map_err(|e| Error::Any(anyhow::anyhow!("create lock: {e}")))?;
-    use std::os::unix::io::AsRawFd;
-    let fd = lock_file.as_raw_fd();
-    let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
-    if ret != 0 {
-        return Err(Error::Any(anyhow::anyhow!(
-            "flock: {}",
-            std::io::Error::last_os_error()
-        )));
-    }
-
-    // Re-check after acquiring lock (another process may have created it)
-    if cache_path.exists() {
-        return Ok(cache_path);
-    }
-
-    let tmp_path =
-        PathBuf::from(EROFS_CACHE_DIR).join(format!("{cache_key}.{}.tmp", std::process::id()));
-
-    let status = std::process::Command::new("mkfs.erofs")
-        .arg(&tmp_path)
-        .arg(rootfs_path)
-        .output()
-        .map_err(|e| Error::Any(anyhow::anyhow!("mkfs.erofs: {e}")))?;
-
-    if !status.status.success() {
-        let stderr = String::from_utf8_lossy(&status.stderr);
-        return Err(Error::Any(anyhow::anyhow!("mkfs.erofs failed: {stderr}")));
-    }
-
-    // The image is the customer's: root only. A rootless Cloud Hypervisor is given read access to the images of its own VM by the
-    // daemon (an ACL), and to no other.
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| Error::Any(anyhow::anyhow!("chmod erofs: {e}")))?;
-    }
-
-    std::fs::rename(&tmp_path, &cache_path)
-        .map_err(|e| Error::Any(anyhow::anyhow!("rename erofs: {e}")))?;
-
-    Ok(cache_path)
-}
-
-/// Stable FNV-1a 128-bit hash → hex string.
+/// Stable FNV-1a 128-bit hash → hex string. (Not used for any key any more; the benchmark times it.)
+#[allow(dead_code)]
 pub fn stable_hash_hex(input: &str) -> String {
     let mut hash: u128 = 0x6c62272e07bb0142_62b821756295c58d;
     for byte in input.bytes() {
@@ -799,11 +870,35 @@ pub fn stable_hash_hex(input: &str) -> String {
     format!("{hash:032x}")
 }
 
+/// A cgroups path as containerd writes it: the direct form `/k8s.io/<id>` (components of letters, digits and `_.-`; no `..`, no empty
+/// component), or the systemd form `<slice>:<prefix>:<id>` (a `.slice` name, a prefix and an id of the same characters, no `/`).
+fn valid_cgroups_path(p: &str) -> bool {
+    let word = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 255
+            && s != "."
+            && s != ".."
+            && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+    };
+    if p.contains(':') {
+        let parts: Vec<&str> = p.split(':').collect();
+        return parts.len() == 3 && parts[0].ends_with(".slice") && parts.iter().all(|x| word(x));
+    }
+    let trimmed = p.strip_prefix('/').unwrap_or(p);
+    !trimmed.is_empty() && trimmed.len() <= 1024 && trimmed.split('/').all(word)
+}
+
 /// Place a process in a pod cgroup. Supports cgroup v2 (unified) with both
 /// direct paths (/k8s.io/<id>) and systemd-style paths
 /// (kubepods-burstable-pod<uid>.slice:cri-containerd:<id>).
 fn place_in_pod_cgroup(pid: u32, cgroups_path: &str) -> Result<(), String> {
     let cgroup_base = "/sys/fs/cgroup";
+
+    // The value comes from the sandbox's OCI spec and is used here, as root, to make a directory and write to a file under the
+    // cgroup file system: only the two forms the runtime writes are accepted, and nothing in them may lead out of the tree.
+    if !valid_cgroups_path(cgroups_path) {
+        return Err(format!("the cgroup path {cgroups_path:?} is not one the runtime writes"));
+    }
 
     // Direct v2 path (e.g. /k8s.io/<id>)
     let full_path = format!("{cgroup_base}/{cgroups_path}/cgroup.procs");
@@ -865,4 +960,21 @@ fn build_systemd_cgroup_path(slice: &str) -> String {
     }
 
     parts.join("/")
+}
+
+#[cfg(test)]
+mod cgroup_path_tests {
+    use super::valid_cgroups_path as ok;
+
+    #[test]
+    fn cgroups_paths_are_checked() {
+        assert!(ok("/k8s.io/0123abcd"));
+        assert!(ok("kubepods-burstable-podabc_1.slice:cri-containerd:0123abcd"));
+        for bad in [
+            "", "/", "/k8s.io/../..", "..", "/a//b", "/a/./b", "a b", "x.slice:cri:../x", "x.slice:cri",
+            "x.slice:a:b:c", "notaslice:a:b", "/a/b\n",
+        ] {
+            assert!(!ok(bad), "{bad:?} must be refused");
+        }
+    }
 }
