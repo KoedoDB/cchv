@@ -15,6 +15,9 @@ pub struct AcquireRequest<'a> {
     pub erofs_path: &'a str,
     pub container_id: &'a str,
     pub config_json: &'a [u8],
+    /// The VM the pod needs (0: the daemon's default). The daemon serves the default size from its pool and boots any other size.
+    pub memory_mb: u64,
+    pub vcpus: u32,
 }
 
 /// Response from AcquireSandbox.
@@ -52,6 +55,8 @@ impl DaemonClient {
                 "erofs_path": params.erofs_path,
                 "container_id": params.container_id,
                 "config_json": config_b64,
+                "memory_mb": params.memory_mb,
+                "vcpus": params.vcpus,
             }))
             .await?;
 

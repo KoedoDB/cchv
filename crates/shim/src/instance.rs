@@ -16,6 +16,7 @@ use log::info;
 
 use crate::config::load_config;
 use crate::daemon_client::{AcquireRequest, DaemonClient};
+use crate::vmsize::{limits_from_spec, vm_size, PodLimits};
 
 /// Milliseconds since Unix epoch for TIMING logs.
 pub fn epoch_ms() -> u128 {
@@ -70,6 +71,9 @@ struct SharedVmState {
     daemon_vm_id: String,
     /// Daemon socket path.
     daemon_socket: String,
+    /// The VM this pod needs, from its limits (0: the daemon's default). The VM is acquired when the first container starts.
+    memory_mb: u64,
+    vcpus: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +285,26 @@ impl CloudHvInstance {
 
         let config = load_config(None).ctx("config error")?;
 
+        // The size of this pod's VM, from the limits containerd put on the sandbox.
+        let host_cpus = std::thread::available_parallelism()
+            .map(|n| n.get() as u32)
+            .unwrap_or(1);
+        let max_vcpus = if config.max_default_vcpus == 0 {
+            host_cpus
+        } else {
+            config.max_default_vcpus
+        };
+        let size = vm_size(
+            sandbox_spec.limits,
+            config.default_memory_mb,
+            config.default_vcpus,
+            max_vcpus,
+        );
+        info!(
+            "sandbox {} needs a VM of {} MiB and {} vCPUs (limits {:?})",
+            sandbox_id, size.memory_mb, size.vcpus, sandbox_spec.limits
+        );
+
         // Store sandbox state — no VM yet (daemon provides it in start_container)
         let vm_state = Arc::new(SharedVmState {
             ch_pid: 0,
@@ -290,6 +314,8 @@ impl CloudHvInstance {
             cgroups_path: sandbox_spec.cgroups_path.clone(),
             daemon_vm_id: String::new(),
             daemon_socket: config.daemon_socket.clone(),
+            memory_mb: size.memory_mb,
+            vcpus: size.vcpus,
         });
 
         VMS.write()
@@ -391,6 +417,8 @@ impl CloudHvInstance {
                     erofs_path: &erofs_path.to_string_lossy(),
                     container_id,
                     config_json: &config_json,
+                    memory_mb: vm_state.memory_mb,
+                    vcpus: vm_state.vcpus,
                 })
                 .await
                 .ctx("daemon acquire")?;
@@ -419,6 +447,8 @@ impl CloudHvInstance {
                 cgroups_path: vm_state.cgroups_path.clone(),
                 daemon_vm_id: acquired.vm_id.clone(),
                 daemon_socket: vm_state.daemon_socket.clone(),
+                memory_mb: vm_state.memory_mb,
+                vcpus: vm_state.vcpus,
             });
 
             VMS.write()
@@ -599,6 +629,7 @@ async fn pump_logs(
 struct SandboxSpec {
     netns: Option<String>,
     cgroups_path: Option<String>,
+    limits: PodLimits,
 }
 
 /// Poll /proc/{pid} until the process exits.
@@ -637,6 +668,7 @@ fn parse_sandbox_spec(spec_path: &std::path::Path) -> SandboxSpec {
     SandboxSpec {
         netns,
         cgroups_path,
+        limits: limits_from_spec(&spec),
     }
 }
 

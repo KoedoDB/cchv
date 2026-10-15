@@ -149,6 +149,33 @@ async fn handle_acquire(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
+    // A pod whose limits ask for a VM of another size than the pool's (and the warm snapshots') cannot be served from them: their
+    // memory and CPUs are those of the snapshot. Such a pod gets a VM of its own size, booted for it.
+    let want_memory = request
+        .get("memory_mb")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let want_vcpus = request.get("vcpus").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    if is_other_size(config, want_memory, want_vcpus) {
+        return acquire_sized(
+            pool,
+            config,
+            agents,
+            &RunContainerParams {
+                api_socket: std::path::Path::new(""), // filled in once the VM exists
+                vsock_socket: std::path::Path::new(""),
+                vm_id: "",
+                netns,
+                erofs_path,
+                container_id,
+                config_json_b64,
+            },
+            want_memory,
+            want_vcpus,
+        )
+        .await;
+    }
+
     // Check for warm workload snapshot
     if !image_key.is_empty()
         && snapshots
@@ -315,7 +342,114 @@ async fn handle_acquire(
     }
 }
 
+/// Whether a requested VM size differs from the pool's (0 means "the default").
+fn is_other_size(config: &DaemonConfig, memory_mb: u64, vcpus: u32) -> bool {
+    (memory_mb != 0 && memory_mb != config.default_memory_mb)
+        || (vcpus != 0 && vcpus != config.default_vcpus)
+}
+
+static SIZED_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Boot a VM of the requested size, hot-plug the pod's rootfs and run its container. The cost is a normal boot (a few hundred
+/// milliseconds) instead of a restore from the pool (some tens), which a pod that runs for hours does not mind. A failure
+/// takes the VM down again.
+async fn acquire_sized(
+    pool: &Arc<Pool>,
+    config: &DaemonConfig,
+    agents: &AgentRegistry,
+    params: &RunContainerParams<'_>,
+    memory_mb: u64,
+    vcpus: u32,
+) -> serde_json::Value {
+    let memory_mb = if memory_mb == 0 {
+        config.default_memory_mb
+    } else {
+        memory_mb
+    };
+    let vcpus = if vcpus == 0 {
+        config.default_vcpus
+    } else {
+        vcpus
+    };
+    let seq = SIZED_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let vm_id = format!("sized-{}-{}", std::process::id(), seq);
+    let state_dir = std::path::PathBuf::from(&config.state_dir).join(&vm_id);
+    if let Err(e) = std::fs::create_dir_all(&state_dir) {
+        return serde_json::json!({"error": format!("create state dir: {e}")});
+    }
+    let api_socket = state_dir.join("api.sock");
+    let vsock_socket = state_dir.join("vsock.sock");
+    let cid = pool.next_cid_pub();
+    let t0 = std::time::Instant::now();
+
+    let ch_pid = match crate::vm_lifecycle::boot_vm_sized(
+        config,
+        &vm_id,
+        &state_dir,
+        cid,
+        None,
+        None,
+        &[],
+        memory_mb,
+        vcpus,
+        false,
+    )
+    .await
+    {
+        Ok(pid) => pid,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&state_dir);
+            return serde_json::json!({"error": format!("boot a VM of {memory_mb} MiB: {e:#}")});
+        }
+    };
+    if let Err(e) = crate::vm_lifecycle::wait_for_agent(&vsock_socket).await {
+        crate::vm_lifecycle::shutdown_and_destroy(&api_socket, ch_pid, &state_dir).await;
+        return serde_json::json!({"error": format!("agent of the new VM: {e:#}")});
+    }
+    pool.register_active(crate::pool::PoolVm {
+        vm_id: vm_id.clone(),
+        api_socket: api_socket.clone(),
+        vsock_socket: vsock_socket.clone(),
+        cid,
+        ch_pid,
+        created_at: std::time::Instant::now(),
+    })
+    .await;
+
+    let run = RunContainerParams {
+        api_socket: &api_socket,
+        vsock_socket: &vsock_socket,
+        vm_id: &vm_id,
+        ..*params
+    };
+    let (container_pid, tap_name) = match run_container_in_vm(&run, agents).await {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = pool.release(&vm_id).await;
+            return serde_json::json!({"error": format!("run container: {e:#}")});
+        }
+    };
+    info!(
+        "sized VM {} ({} MiB, {} vCPUs) ready in {}ms",
+        vm_id,
+        memory_mb,
+        vcpus,
+        t0.elapsed().as_millis()
+    );
+    serde_json::json!({
+        "vm_id": vm_id,
+        "api_socket": api_socket.to_string_lossy(),
+        "vsock_socket": vsock_socket.to_string_lossy(),
+        "cid": cid,
+        "ch_pid": ch_pid,
+        "from_snapshot": false,
+        "container_pid": container_pid,
+        "tap_name": tap_name,
+    })
+}
+
 /// Parameters for running a container inside a VM.
+#[derive(Clone, Copy)]
 struct RunContainerParams<'a> {
     api_socket: &'a std::path::Path,
     vsock_socket: &'a std::path::Path,

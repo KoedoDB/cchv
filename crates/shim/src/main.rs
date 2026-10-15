@@ -6,6 +6,7 @@ mod config;
 mod daemon_client;
 mod instance;
 mod netns;
+mod vmsize;
 
 use instance::CloudHvInstance;
 

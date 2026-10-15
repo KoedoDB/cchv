@@ -12,7 +12,7 @@ use tokio::process::Command;
 
 use crate::config::DaemonConfig;
 
-/// Boot a VM from scratch (cold boot). Returns the CH process PID.
+/// Boot a VM from scratch (cold boot) of the default size. Returns the CH process PID.
 pub async fn boot_vm(
     config: &DaemonConfig,
     vm_id: &str,
@@ -21,6 +21,36 @@ pub async fn boot_vm(
     tap_name: Option<&str>,
     tap_mac: Option<&str>,
     extra_disks: &[(String, String, bool)], // (path, id, readonly)
+) -> Result<u32> {
+    boot_vm_sized(
+        config,
+        vm_id,
+        state_dir,
+        cid,
+        tap_name,
+        tap_mac,
+        extra_disks,
+        config.default_memory_mb,
+        config.default_vcpus,
+        true, // the base VM is snapshotted, and a snapshot of a shared (memfd) guest is what the pool is restored from
+    )
+    .await
+}
+
+/// Boot a VM from scratch with the given memory and vCPUs. `shared` backs the guest's RAM with a shared (memfd) mapping, which a VM
+/// that will be snapshotted needs; a VM that will not be (a pod's VM of its own size) uses ordinary anonymous memory.
+#[allow(clippy::too_many_arguments)]
+pub async fn boot_vm_sized(
+    config: &DaemonConfig,
+    vm_id: &str,
+    state_dir: &Path,
+    cid: u64,
+    tap_name: Option<&str>,
+    tap_mac: Option<&str>,
+    extra_disks: &[(String, String, bool)], // (path, id, readonly)
+    memory_mb: u64,
+    vcpus: u32,
+    shared: bool,
 ) -> Result<u32> {
     let ch_pid = spawn_ch(config, state_dir).await?;
     let api_socket = state_dir.join("api.sock");
@@ -60,12 +90,12 @@ pub async fn boot_vm(
             "cmdline": config.kernel_args,
         },
         "cpus": {
-            "boot_vcpus": config.default_vcpus,
-            "max_vcpus": config.default_vcpus,
+            "boot_vcpus": vcpus,
+            "max_vcpus": vcpus,
         },
         "memory": {
-            "size": config.default_memory_mb * 1024 * 1024,
-            "shared": true,
+            "size": memory_mb * 1024 * 1024,
+            "shared": shared,
         },
         "disks": disks,
         "net": net,
@@ -86,7 +116,10 @@ pub async fn boot_vm(
     // Save PID for cleanup
     std::fs::write(state_dir.join("ch.pid"), ch_pid.to_string())?;
 
-    info!("VM {} booted (pid={}, cid={})", vm_id, ch_pid, cid);
+    info!(
+        "VM {} booted (pid={}, cid={}, {} MiB, {} vCPUs)",
+        vm_id, ch_pid, cid, memory_mb, vcpus
+    );
     Ok(ch_pid)
 }
 
