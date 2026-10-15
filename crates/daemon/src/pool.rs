@@ -34,6 +34,8 @@ pub struct Pool {
     active: Mutex<HashMap<String, PoolVm>>,
     /// Count of VMs currently acquired by shims.
     active_count: std::sync::atomic::AtomicUsize,
+    /// Held while a VM is being restored for the pool, so that two refills do not both see "one short" and make two.
+    refill: Mutex<()>,
     /// Next CID to assign (incremented per VM).
     next_cid: std::sync::atomic::AtomicU64,
 }
@@ -47,6 +49,7 @@ impl Pool {
             ready: Mutex::new(Vec::new()),
             active: Mutex::new(HashMap::new()),
             active_count: std::sync::atomic::AtomicUsize::new(0),
+            refill: Mutex::new(()),
             next_cid: std::sync::atomic::AtomicU64::new(3), // CID 0-2 reserved
         })
     }
@@ -160,6 +163,7 @@ impl Pool {
     /// Replenish the pool by restoring one VM from the base snapshot.
     /// Called asynchronously after each acquire.
     pub async fn replenish_one(&self) {
+        let _refilling = self.refill.lock().await;
         let current = self.ready.lock().await.len();
         if current >= self.config.pool_size {
             return;
@@ -197,7 +201,13 @@ impl Pool {
                         let _ = std::fs::remove_dir_all(dir);
                     }
                 }
-                for _ in 0..dead.len() {
+                // Make up the pool to its size: what died, and what was taken and not made up (a pod's VM that was released, the VM a
+                // shadow snapshot used). Without this the pool only ever shrank.
+                let missing = pool
+                    .config
+                    .pool_size
+                    .saturating_sub(pool.ready_count().await);
+                for _ in 0..missing {
                     pool.replenish_one().await;
                 }
             }
