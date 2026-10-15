@@ -12,6 +12,7 @@ use ttrpc::r#async::TtrpcContext;
 use cloudhv_common::AGENT_VSOCK_PORT;
 
 use crate::container::ContainerManager;
+use crate::exec::ExecManager;
 
 // --- AgentService implementation ---
 
@@ -59,6 +60,7 @@ async fn create_flow(
         req.rootfs_preattached,
         req.erofs_layers,
         &req.layer_serials,
+        req.terminal,
     )
     .await
     {
@@ -75,6 +77,12 @@ async fn create_flow(
 
 struct AgentServiceHandler {
     container_manager: Arc<tokio::sync::Mutex<ContainerManager>>,
+    exec_manager: Arc<ExecManager>,
+}
+
+/// An error answer of an exec call.
+fn exec_err(what: &str, e: anyhow::Error) -> ttrpc::Error {
+    ttrpc::Error::Others(format!("{what}: {e:#}"))
 }
 
 #[async_trait]
@@ -153,6 +161,8 @@ impl AgentService for AgentServiceHandler {
         req: DeleteContainerRequest,
     ) -> ttrpc::Result<DeleteContainerResponse> {
         info!("RPC: delete_container id={}", req.container_id);
+        // Its execs go first: their processes are in the container.
+        self.exec_manager.remove_container(&req.container_id).await;
         let mut mgr = self.container_manager.lock().await;
         let (pid, exit_code) = mgr
             .delete(&req.container_id)
@@ -230,6 +240,203 @@ impl AgentService for AgentServiceHandler {
             ttrpc::Code::UNIMPLEMENTED,
             "exec_process not yet implemented".to_string(),
         )))
+    }
+
+    // --- Exec. The calls log ids and sizes only: a process definition and what is written or read can hold secrets. ---
+
+    async fn exec_create(
+        &self,
+        _ctx: &TtrpcContext,
+        req: ExecCreateRequest,
+    ) -> ttrpc::Result<ExecCreateResponse> {
+        info!(
+            "RPC: exec_create container={} exec_id={} terminal={} ({} bytes)",
+            req.container_id,
+            req.exec_id,
+            req.terminal,
+            req.process_json.len()
+        );
+        let target = self
+            .container_manager
+            .lock()
+            .await
+            .exec_target(&req.container_id)
+            .map_err(|e| exec_err("exec_create", e))?;
+        self.exec_manager
+            .create(&req.container_id, &req.exec_id, &req.process_json, req.terminal, target.as_ref())
+            .await
+            .map_err(|e| exec_err("exec_create", e))?;
+        Ok(ExecCreateResponse::new())
+    }
+
+    async fn exec_start(
+        &self,
+        _ctx: &TtrpcContext,
+        req: ExecStartRequest,
+    ) -> ttrpc::Result<ExecStartResponse> {
+        info!("RPC: exec_start container={} exec_id={}", req.container_id, req.exec_id);
+        let pid = self
+            .exec_manager
+            .start(&req.container_id, &req.exec_id)
+            .await
+            .map_err(|e| exec_err("exec_start", e))?;
+        let mut resp = ExecStartResponse::new();
+        resp.pid = pid;
+        Ok(resp)
+    }
+
+    async fn exec_kill(
+        &self,
+        _ctx: &TtrpcContext,
+        req: ExecKillRequest,
+    ) -> ttrpc::Result<ExecKillResponse> {
+        info!(
+            "RPC: exec_kill container={} exec_id={} signal={}",
+            req.container_id, req.exec_id, req.signal
+        );
+        self.exec_manager
+            .kill(&req.container_id, &req.exec_id, req.signal)
+            .await
+            .map_err(|e| exec_err("exec_kill", e))?;
+        Ok(ExecKillResponse::new())
+    }
+
+    async fn exec_wait(
+        &self,
+        _ctx: &TtrpcContext,
+        req: ExecWaitRequest,
+    ) -> ttrpc::Result<ExecWaitResponse> {
+        info!("RPC: exec_wait container={} exec_id={}", req.container_id, req.exec_id);
+        let status = self
+            .exec_manager
+            .wait(&req.container_id, &req.exec_id)
+            .await
+            .map_err(|e| exec_err("exec_wait", e))?;
+        let mut resp = ExecWaitResponse::new();
+        resp.exit_status = status.code as u32;
+        resp.exited_at = status.exited_at;
+        Ok(resp)
+    }
+
+    async fn exec_delete(
+        &self,
+        _ctx: &TtrpcContext,
+        req: ExecDeleteRequest,
+    ) -> ttrpc::Result<ExecDeleteResponse> {
+        info!("RPC: exec_delete container={} exec_id={}", req.container_id, req.exec_id);
+        self.exec_manager
+            .delete(&req.container_id, &req.exec_id)
+            .await
+            .map_err(|e| exec_err("exec_delete", e))?;
+        Ok(ExecDeleteResponse::new())
+    }
+
+    async fn exec_write(
+        &self,
+        _ctx: &TtrpcContext,
+        req: ExecWriteRequest,
+    ) -> ttrpc::Result<ExecWriteResponse> {
+        debug!(
+            "RPC: exec_write container={} exec_id={} ({} bytes)",
+            req.container_id,
+            req.exec_id,
+            req.data.len()
+        );
+        let n = if req.exec_id == crate::exec::INIT_EXEC_ID {
+            // The container's own terminal.
+            let master = self
+                .container_manager
+                .lock()
+                .await
+                .terminal_master(&req.container_id)
+                .map_err(|e| exec_err("exec_write", e))?;
+            crate::exec::write_terminal(&master, &req.data)
+                .await
+                .map_err(|e| exec_err("exec_write", e))?
+        } else {
+            self.exec_manager
+                .write(&req.container_id, &req.exec_id, &req.data)
+                .await
+                .map_err(|e| exec_err("exec_write", e))?
+        };
+        let mut resp = ExecWriteResponse::new();
+        resp.written = n as u32;
+        Ok(resp)
+    }
+
+    async fn exec_close_stdin(
+        &self,
+        _ctx: &TtrpcContext,
+        req: ExecCloseStdinRequest,
+    ) -> ttrpc::Result<ExecCloseStdinResponse> {
+        info!("RPC: exec_close_stdin container={} exec_id={}", req.container_id, req.exec_id);
+        if req.exec_id == crate::exec::INIT_EXEC_ID {
+            // A terminal has no end of input (the client sends ^D if it wants one): accepted, nothing to do. A container with no
+            // terminal has no input to close either.
+            return Ok(ExecCloseStdinResponse::new());
+        }
+        self.exec_manager
+            .close_stdin(&req.container_id, &req.exec_id)
+            .await
+            .map_err(|e| exec_err("exec_close_stdin", e))?;
+        Ok(ExecCloseStdinResponse::new())
+    }
+
+    async fn exec_read(
+        &self,
+        _ctx: &TtrpcContext,
+        req: ExecReadRequest,
+    ) -> ttrpc::Result<ExecReadResponse> {
+        let r = self
+            .exec_manager
+            .read(
+                &req.container_id,
+                &req.exec_id,
+                req.stdout_offset,
+                req.stderr_offset,
+                req.max_bytes as usize,
+            )
+            .await
+            .map_err(|e| exec_err("exec_read", e))?;
+        let mut resp = ExecReadResponse::new();
+        resp.stdout = r.stdout;
+        resp.stderr = r.stderr;
+        resp.stdout_offset = r.stdout_next;
+        resp.stderr_offset = r.stderr_next;
+        resp.eof = r.eof;
+        resp.stdout_dropped = r.stdout_dropped;
+        resp.stderr_dropped = r.stderr_dropped;
+        Ok(resp)
+    }
+
+    async fn exec_resize(
+        &self,
+        _ctx: &TtrpcContext,
+        req: ExecResizeRequest,
+    ) -> ttrpc::Result<ExecResizeResponse> {
+        debug!(
+            "RPC: exec_resize container={} exec_id={} {}x{}",
+            req.container_id, req.exec_id, req.width, req.height
+        );
+        if req.exec_id == crate::exec::INIT_EXEC_ID {
+            if !crate::exec::valid_terminal_size(req.width, req.height) {
+                return Err(exec_err("exec_resize", anyhow::anyhow!("invalid terminal size")));
+            }
+            let master = self
+                .container_manager
+                .lock()
+                .await
+                .terminal_master(&req.container_id)
+                .map_err(|e| exec_err("exec_resize", e))?;
+            crate::exec::set_window_size(master.raw_fd(), req.width as u16, req.height as u16)
+                .map_err(|e| exec_err("exec_resize", anyhow::Error::new(e).context("TIOCSWINSZ")))?;
+            return Ok(ExecResizeResponse::new());
+        }
+        self.exec_manager
+            .resize(&req.container_id, &req.exec_id, req.width, req.height)
+            .await
+            .map_err(|e| exec_err("exec_resize", e))?;
+        Ok(ExecResizeResponse::new())
     }
 
     async fn state_container(
@@ -473,6 +680,7 @@ impl HealthService for HealthServiceHandler {
 /// ttrpc server that listens on vsock and handles container lifecycle RPCs.
 pub struct AgentServer {
     container_manager: Arc<tokio::sync::Mutex<ContainerManager>>,
+    exec_manager: Arc<ExecManager>,
 }
 
 impl Default for AgentServer {
@@ -485,6 +693,7 @@ impl AgentServer {
     pub fn new() -> Self {
         Self {
             container_manager: Arc::new(tokio::sync::Mutex::new(ContainerManager::new())),
+            exec_manager: Arc::new(ExecManager::new()),
         }
     }
 
@@ -500,6 +709,7 @@ impl AgentServer {
 
         let agent_service = Arc::new(AgentServiceHandler {
             container_manager: self.container_manager.clone(),
+            exec_manager: self.exec_manager.clone(),
         });
         let health_service = Arc::new(HealthServiceHandler);
 
@@ -534,11 +744,13 @@ impl AgentServer {
 
         // Children that nobody waits for (processes a container's runtime left behind) are reaped; see reaper.rs.
         let reaper_mgr = self.container_manager.clone();
+        let reaper_execs = self.exec_manager.clone();
         tokio::spawn(async move {
             let mut seen = std::collections::HashSet::new();
             loop {
                 tokio::time::sleep(crate::reaper::SCAN_INTERVAL).await;
-                let tracked = reaper_mgr.lock().await.tracked_pids();
+                let mut tracked = reaper_mgr.lock().await.tracked_pids();
+                tracked.extend(reaper_execs.tracked_pids().await);
                 seen = crate::reaper::reap_stale_zombies(&seen, &tracked);
             }
         });

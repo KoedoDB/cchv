@@ -45,6 +45,17 @@ pub fn check_size(config: &DaemonConfig, memory_mb: u64, vcpus: u64) -> Result<(
 /// Whether `path` names a network namespace the daemon may enter: `/var/run/netns/<name>`, `/run/netns/<name>` (where the runtime
 /// puts a pod's) or `/proc/<pid>/ns/net`. Lexical only; `netns::open_checked` looks at what the path really is.
 pub fn netns_path_allowed(path: &str) -> bool {
+    netns_path_allowed_with(path, ALLOW_PROC_NETNS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Set once at start from the configuration (`allow_proc_netns`).
+static ALLOW_PROC_NETNS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn init(config: &DaemonConfig) {
+    ALLOW_PROC_NETNS.store(config.allow_proc_netns, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn netns_path_allowed_with(path: &str, allow_proc: bool) -> bool {
     if path.is_empty() || path.contains('\0') || path.contains('\n') {
         return false;
     }
@@ -60,7 +71,8 @@ pub fn netns_path_allowed(path: &str) -> bool {
     }
     if let Ok(rest) = p.strip_prefix("/proc") {
         let parts: Vec<_> = rest.components().collect();
-        return parts.len() == 3
+        return allow_proc
+            && parts.len() == 3
             && matches!(parts[0], Component::Normal(n) if n.to_str().map(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())).unwrap_or(false))
             && matches!(parts[1], Component::Normal(n) if n == "ns")
             && matches!(parts[2], Component::Normal(n) if n == "net");
@@ -131,6 +143,23 @@ const MUST_BE_UNSET: &[&str] = &[
     "net", "gdb", "ivshmem", "pvmemcontrol",
 ];
 
+/// The size every warm snapshot has: the pool's (a warm VM is made from a pool VM, and a pod with other limits gets a VM of its own size
+/// and no snapshot). A configuration that asks for more would have the host give a restored VM more than the pod was sized for.
+#[derive(Clone, Copy)]
+pub struct SnapshotSize {
+    pub memory_bytes: u64,
+    pub vcpus: u32,
+}
+
+impl SnapshotSize {
+    pub fn of(config: &DaemonConfig) -> SnapshotSize {
+        SnapshotSize {
+            memory_bytes: config.default_memory_mb.saturating_mul(1024 * 1024),
+            vcpus: config.default_vcpus,
+        }
+    }
+}
+
 /// Check the configuration of a snapshot before a Cloud Hypervisor is told to restore it. The disks may only be the platform's rootfs
 /// and the image of the pod (`extra_disk`); no device that reaches the host; the kernel is the daemon's own; the console is off or a
 /// file (whose path the daemon sets). Anything else is refused.
@@ -139,6 +168,7 @@ pub fn validate_snapshot_config(
     kernel: &str,
     rootfs: &str,
     extra_disk: Option<&str>,
+    size: SnapshotSize,
 ) -> Result<()> {
     let obj = cfg.as_object().context("the configuration is not an object")?;
     for k in obj.keys() {
@@ -163,7 +193,37 @@ pub fn validate_snapshot_config(
         }
     }
 
-    // memory: guest RAM, not a file of the host
+    // cpus: exactly the pool's count, and no topology, affinity or features to bend it
+    let cpus = obj.get("cpus").and_then(|c| c.as_object()).context("no cpus")?;
+    let boot = cpus.get("boot_vcpus").and_then(|v| v.as_u64()).context("no cpus.boot_vcpus")?;
+    let max = cpus.get("max_vcpus").and_then(|v| v.as_u64()).unwrap_or(boot);
+    if boot != size.vcpus as u64 || max != size.vcpus as u64 {
+        anyhow::bail!("cpus ({boot} booted, {max} at most) are not the {} of the pool", size.vcpus);
+    }
+    for (k, v) in cpus {
+        let ok = match k.as_str() {
+            "boot_vcpus" | "max_vcpus" | "max_phys_bits" => true,
+            // what Cloud Hypervisor writes for a default VM: the host's CPU model, core scheduling by VM, no CPU features switched on
+            "core_scheduling" => matches!(v.as_str(), Some("Vm" | "Vcpu" | "Off")),
+            "profile" => v.as_str() == Some("Host"),
+            "features" => v.as_object().map(|o| o.values().all(|x| x == &serde_json::Value::Bool(false))).unwrap_or(unset(Some(v))),
+            _ => unset(Some(v)),
+        };
+        if !ok {
+            anyhow::bail!("cpus.{k} is set");
+        }
+    }
+
+    // memory: guest RAM, not a file of the host, and as much as the pool's VMs have
+    let memory = obj.get("memory").and_then(|m| m.as_object()).context("no memory")?;
+    if memory.get("size").and_then(|v| v.as_u64()) != Some(size.memory_bytes) {
+        anyhow::bail!("memory.size is not the {} bytes of the pool", size.memory_bytes);
+    }
+    for k in ["hotplug_size", "hotplugged_size", "hugepages", "hugepage_size", "mergeable", "prefault"] {
+        if !unset(memory.get(k)) {
+            anyhow::bail!("memory.{k} is set");
+        }
+    }
     if let Some(m) = obj.get("memory").and_then(|m| m.as_object()) {
         // (`file` is there for a Cloud Hypervisor that has it)
         for k in ["file", "zones"] {
@@ -259,9 +319,11 @@ mod tests {
 
     #[test]
     fn a_netns_is_one_of_the_runtimes_or_a_process() {
-        for ok in ["/var/run/netns/cni-1234-abcd", "/run/netns/x", "/proc/4242/ns/net"] {
-            assert!(netns_path_allowed(ok), "{ok}");
+        for ok in ["/var/run/netns/cni-1234-abcd", "/run/netns/x"] {
+            assert!(netns_path_allowed_with(ok, false), "{ok}");
         }
+        assert!(!netns_path_allowed_with("/proc/4242/ns/net", false), "a process's namespace only when the configuration allows it");
+        assert!(netns_path_allowed_with("/proc/4242/ns/net", true));
         for bad in [
             "",
             "/proc/1/ns/mnt",
@@ -278,7 +340,7 @@ mod tests {
             "/proc//ns/net",
             "/run/netns2/x",
         ] {
-            assert!(!netns_path_allowed(bad), "{bad:?}");
+            assert!(!netns_path_allowed_with(bad, true), "{bad:?}");
         }
     }
 
@@ -301,9 +363,11 @@ mod tests {
         }
     }
 
+    const SIZE: SnapshotSize = SnapshotSize { memory_bytes: 134217728, vcpus: 1 };
+
     fn good_config() -> serde_json::Value {
         json!({
-            "cpus": {"boot_vcpus": 1, "max_vcpus": 1},
+            "cpus": {"boot_vcpus": 1, "max_vcpus": 1, "kvm_hyperv": false, "max_phys_bits": 46, "features": {"amx": false}, "nested": false, "core_scheduling": "Vm", "profile": "Host"},
             "memory": {"size": 134217728, "shared": true, "zones": null},
             "payload": {"kernel": "/k", "cmdline": "console=ttyS0", "initramfs": null, "firmware": null},
             "disks": [
@@ -322,8 +386,34 @@ mod tests {
 
     #[test]
     fn the_configuration_of_a_good_snapshot_passes() {
-        assert!(validate_snapshot_config(&good_config(), "/k", "/r", Some("/cache/x.erofs")).is_ok());
-        assert!(validate_snapshot_config(&good_config(), "/k", "/r", Some("/cache/y.erofs")).is_err(), "another image");
+        assert!(validate_snapshot_config(&good_config(), "/k", "/r", Some("/cache/x.erofs"), SIZE).is_ok());
+        assert!(validate_snapshot_config(&good_config(), "/k", "/r", Some("/cache/y.erofs"), SIZE).is_err(), "another image");
+    }
+
+    #[test]
+    fn a_snapshot_that_asks_for_more_than_the_pool_has_is_refused() {
+        let cases: Vec<(&str, Box<dyn Fn(&mut serde_json::Value)>)> = vec![
+            ("more memory", Box::new(|c| c["memory"]["size"] = json!(1u64 << 40))),
+            ("less memory", Box::new(|c| c["memory"]["size"] = json!(1u64 << 20))),
+            ("no memory size", Box::new(|c| c["memory"].as_object_mut().unwrap().remove("size").map(|_| ()).unwrap_or(()))),
+            ("hot-pluggable memory", Box::new(|c| c["memory"]["hotplug_size"] = json!(1u64 << 40))),
+            ("huge pages", Box::new(|c| c["memory"]["hugepages"] = json!(true))),
+            ("more vcpus", Box::new(|c| c["cpus"]["boot_vcpus"] = json!(64))),
+            ("room for more vcpus", Box::new(|c| c["cpus"]["max_vcpus"] = json!(240))),
+            ("a topology", Box::new(|c| c["cpus"]["topology"] = json!({"threads_per_core": 2}))),
+            ("a CPU feature switched on", Box::new(|c| c["cpus"]["features"] = json!({"amx": true}))),
+            ("nested virtualization", Box::new(|c| c["cpus"]["nested"] = json!(true))),
+            ("another CPU profile", Box::new(|c| c["cpus"]["profile"] = json!("Sapphire"))),
+            ("no cpus", Box::new(|c| { c.as_object_mut().unwrap().remove("cpus"); })),
+        ];
+        for (what, change) in cases {
+            let mut c = good_config();
+            change(&mut c);
+            assert!(
+                validate_snapshot_config(&c, "/k", "/r", Some("/cache/x.erofs"), SIZE).is_err(),
+                "{what} must be refused"
+            );
+        }
     }
 
     #[test]
@@ -355,10 +445,10 @@ mod tests {
             let mut c = good_config();
             mutate(&mut c);
             assert!(
-                validate_snapshot_config(&c, "/k", "/r", Some("/cache/x.erofs")).is_err(),
+                validate_snapshot_config(&c, "/k", "/r", Some("/cache/x.erofs"), SIZE).is_err(),
                 "{what} must be refused"
             );
         }
-        assert!(validate_snapshot_config(&json!([]), "/k", "/r", None).is_err());
+        assert!(validate_snapshot_config(&json!([]), "/k", "/r", None, SIZE).is_err());
     }
 }

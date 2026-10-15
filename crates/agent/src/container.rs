@@ -62,6 +62,9 @@ struct Container {
     state: ContainerState,
     /// The directories of the volumes it uses, so that deleting it can release them.
     volumes: Vec<VolumeUse>,
+    /// Whether the container's process has a terminal, and its master once the container has started (`crun run --console-socket`).
+    terminal: bool,
+    master: Option<Arc<crate::exec::Master>>,
 }
 
 /// A volume directory a container uses.
@@ -240,6 +243,7 @@ pub struct CreatePlan {
 pub struct Prepared {
     id: String,
     volumes: Vec<VolumeUse>,
+    terminal: bool,
 }
 
 /// Manages container lifecycle via crun.
@@ -331,12 +335,37 @@ impl ContainerManager {
                 exit_code: None,
                 state: ContainerState::Created,
                 volumes: p.volumes,
+                terminal: p.terminal,
+                master: None,
             },
         );
         info!("container created: id={}", p.id);
     }
 
     /// The PIDs of the processes the manager started (the `crun run` of each container).
+    /// For an exec: the container must be running. Returns the process section of its bundle's config.json (already cut down when the
+    /// container was created), which bounds what an exec in it may have.
+    pub fn exec_target(&self, container_id: &str) -> Result<Option<serde_json::Value>> {
+        if !valid_container_id(container_id) {
+            anyhow::bail!("invalid container id");
+        }
+        let c = self
+            .containers
+            .get(container_id)
+            .ok_or_else(|| anyhow::anyhow!("container not found: {container_id}"))?;
+        let exited = self
+            .exit_receivers
+            .get(container_id)
+            .is_some_and(|rx| rx.borrow().is_some());
+        if c.state != ContainerState::Running || exited {
+            anyhow::bail!("container {container_id} is not running");
+        }
+        let text = std::fs::read_to_string(bundle_of(container_id).join("config.json")).ok();
+        Ok(text
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v.get("process").cloned()))
+    }
+
     pub fn tracked_pids(&self) -> HashSet<u32> {
         self.containers.values().filter_map(|c| c.pid).collect()
     }
@@ -353,11 +382,26 @@ impl ContainerManager {
         // Bundle path matches the mount point created in prepare().
         let bundle = bundle_of(container_id);
 
+        let terminal = self
+            .containers
+            .get(container_id)
+            .map(|c| c.terminal)
+            .unwrap_or(false);
+        // With a terminal crun makes the pty and sends its master over a unix socket (see exec.rs, which does the same for an exec).
+        let console_sock = bundle.join("console.sock");
+        let listener = if terminal {
+            let _ = std::fs::remove_file(&console_sock);
+            Some(std::os::unix::net::UnixListener::bind(&console_sock).context("bind the console socket")?)
+        } else {
+            None
+        };
+
         let mut cmd = Command::new("/bin/crun");
-        cmd.arg("run")
-            .arg("--bundle")
-            .arg(&bundle)
-            .arg(container_id)
+        cmd.arg("run").arg("--bundle").arg(&bundle);
+        if terminal {
+            cmd.arg("--console-socket").arg(&console_sock);
+        }
+        cmd.arg(container_id)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -432,12 +476,18 @@ impl ContainerManager {
             });
         }
 
+        // The terminal's output is read from the master; the end of the output is reported only after it has been read.
+        let master_reader = Arc::new(tokio::sync::Notify::new());
+        let master_read = Arc::new(std::sync::atomic::AtomicBool::new(!terminal));
+
         // Wait for exit in background using pidfd for reliable PID 1 behavior.
         // Tokio's SIGCHLD-based child.wait() is unreliable as PID 1 because
         // signals can be lost in the init context. pidfd provides a file
         // descriptor that becomes readable when the process exits — no signals.
         let container_id_owned = container_id.to_string();
         let child_pid = pid;
+        let (reader_done, reader_flag) = (master_reader.clone(), master_read.clone());
+        let log_for_exit = log_buf.clone();
         tokio::spawn(async move {
             let code = wait_for_exit_pidfd(child_pid, child).await;
             info!("container exited: id={} code={}", container_id_owned, code);
@@ -449,12 +499,68 @@ impl ContainerManager {
                 exited_at: chrono::Utc::now().to_rfc3339(),
             }));
 
-            log_buf.lock().await.eof = true;
+            // What the process wrote to its terminal is read before the end of the output is reported (a process it left behind may hold
+            // the terminal open: a limit on the wait).
+            if !reader_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                let notified = reader_done.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if !reader_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    let _ = tokio::time::timeout(crate::exec::DRAIN_WAIT, notified).await;
+                }
+            }
+            log_for_exit.lock().await.eof = true;
         });
+
+        if let Some(listener) = listener {
+            let received = crate::exec::receive_master(listener, rx.clone()).await;
+            let _ = std::fs::remove_file(&console_sock);
+            match received {
+                Ok(master) => {
+                    let master = Arc::new(master);
+                    let (m, l) = (master.clone(), log_buf.clone());
+                    let (done, flag) = (master_reader.clone(), master_read.clone());
+                    tokio::spawn(async move {
+                        crate::exec::read_master(m, l).await;
+                        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        done.notify_waiters();
+                    });
+                    if let Some(c) = self.containers.get_mut(container_id) {
+                        c.master = Some(master);
+                    }
+                }
+                Err(e) => {
+                    // The container cannot be used without its terminal: stop it, and say why.
+                    warn!("container {container_id}: no terminal: {e:#}");
+                    master_read.store(true, std::sync::atomic::Ordering::SeqCst);
+                    master_reader.notify_waiters();
+                    unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+                    self.exit_receivers.insert(container_id.to_string(), rx);
+                    return Err(e.context("the container's terminal"));
+                }
+            }
+        }
 
         self.exit_receivers.insert(container_id.to_string(), rx);
 
         Ok(pid)
+    }
+
+    /// The master of a running container's terminal, to write to or to resize.
+    pub fn terminal_master(&self, container_id: &str) -> Result<Arc<crate::exec::Master>> {
+        if !valid_container_id(container_id) {
+            anyhow::bail!("invalid container id");
+        }
+        let c = self
+            .containers
+            .get(container_id)
+            .ok_or_else(|| anyhow::anyhow!("container not found: {container_id}"))?;
+        if !c.terminal {
+            anyhow::bail!("container {container_id} has no terminal");
+        }
+        c.master
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("container {container_id} is not running"))
     }
 
     /// Send a signal to a container.
@@ -694,6 +800,7 @@ enum Resolved {
 ///
 /// The erofs snapshotter creates layer.erofs blobs per image layer. The shim passes these as read-only virtio-blk devices to the VM.
 /// This runs without the manager's lock: waiting for a disk to appear must not stop the other containers' calls.
+#[allow(clippy::too_many_arguments)]
 pub async fn prepare(
     plan: CreatePlan,
     container_id: &str,
@@ -702,10 +809,11 @@ pub async fn prepare(
     rootfs_preattached: bool,
     erofs_layers: u32,
     layer_serials: &[String],
+    terminal: bool,
 ) -> Result<Prepared> {
     info!(
-        "creating container: id={} erofs_layers={} preattached={}",
-        container_id, erofs_layers, rootfs_preattached
+        "creating container: id={} erofs_layers={} preattached={} terminal={}",
+        container_id, erofs_layers, rootfs_preattached, terminal
     );
     if erofs_layers == 0 {
         anyhow::bail!("erofs_layers must be > 0: the erofs snapshotter is required");
@@ -723,6 +831,7 @@ pub async fn prepare(
         rootfs_preattached,
         erofs_layers,
         layer_serials,
+        terminal,
     )
     .await;
     if result.is_err() {
@@ -743,6 +852,7 @@ async fn prepare_inner(
     rootfs_preattached: bool,
     erofs_layers: u32,
     layer_serials: &[String],
+    terminal: bool,
 ) -> Result<Prepared> {
     let deadline = Instant::now() + DISK_WAIT;
     std::fs::create_dir_all(mount_point)?;
@@ -945,7 +1055,12 @@ async fn prepare_inner(
     }
 
     // The spec crun gets: rebuilt from an allowlist (see spec.rs).
-    let clean = spec::sanitize_spec(&spec_value, container_id, mounts)?;
+    let mut clean = spec::sanitize_spec(&spec_value, container_id, mounts)?;
+    // Whether the process has a terminal is what the task was created with, not what the JSON says (as for an exec): crun needs
+    // `--console-socket` exactly when it is true.
+    if let Some(p) = clean.get_mut("process").and_then(|p| p.as_object_mut()) {
+        p.insert("terminal".to_string(), serde_json::json!(terminal));
+    }
     std::fs::write(
         mount_point.join("config.json"),
         serde_json::to_string_pretty(&clean)?,
@@ -955,6 +1070,7 @@ async fn prepare_inner(
     Ok(Prepared {
         id: container_id.to_string(),
         volumes: uses,
+        terminal,
     })
 }
 
@@ -1139,7 +1255,7 @@ async fn wait_for_dev_inotify(dev_path: &str, deadline: std::time::Instant) -> R
 ///
 /// pidfd is immune to the SIGCHLD delivery issues that affect
 /// tokio::process::Child::wait() when running as PID 1 (init).
-async fn wait_for_exit_pidfd(pid: u32, mut child: tokio::process::Child) -> i32 {
+pub(crate) async fn wait_for_exit_pidfd(pid: u32, mut child: tokio::process::Child) -> i32 {
     #[cfg(target_os = "linux")]
     {
         // Try pidfd_open
@@ -1317,7 +1433,7 @@ mod manager_tests {
     fn manager_with(id: &str) -> ContainerManager {
         let mut m = ContainerManager::new();
         m.begin_create(id, &[]).unwrap();
-        m.finish_create(Prepared { id: id.to_string(), volumes: vec![] });
+        m.finish_create(Prepared { id: id.to_string(), volumes: vec![], terminal: false });
         m
     }
 
@@ -1339,7 +1455,7 @@ mod manager_tests {
         assert!(m.begin_create("c1", &[]).is_err(), "reserved");
         m.abort_create("c1");
         m.begin_create("c1", &[]).unwrap();
-        m.finish_create(Prepared { id: "c1".into(), volumes: vec![] });
+        m.finish_create(Prepared { id: "c1".into(), volumes: vec![], terminal: false });
         assert!(m.begin_create("c1", &[]).is_err(), "exists");
         assert!(m.begin_create("../c2", &[]).is_err(), "unsafe id");
     }
@@ -1357,7 +1473,7 @@ mod manager_tests {
         let mut m = manager_with("old");
         m.containers.get_mut("old").unwrap().pid = Some(42);
         m.begin_create("other", &[]).unwrap();
-        m.finish_create(Prepared { id: "other".into(), volumes: vec![] });
+        m.finish_create(Prepared { id: "other".into(), volumes: vec![], terminal: false });
         assert!(m.adopt("old", "other").is_err(), "must not overwrite another container");
         assert!(m.containers.contains_key("old"), "a refused adopt loses nothing");
         assert!(m.adopt("old", "old").is_err());
@@ -1388,6 +1504,7 @@ mod manager_tests {
         m.finish_create(Prepared {
             id: "c1".into(),
             volumes: vec![VolumeUse { root: PathBuf::from(VOLUME_ROOT), name: "abc123".into(), has_files: true }],
+            terminal: false,
         });
         let plan = m.begin_create("c2", std::slice::from_ref(&vol)).unwrap();
         assert_eq!(plan.busy.len(), 1);

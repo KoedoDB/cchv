@@ -9,6 +9,7 @@ mod cgroup;
 mod config;
 mod confine;
 mod ctl;
+mod exec;
 mod fsutil;
 mod imagekey;
 mod netns;
@@ -50,6 +51,7 @@ async fn daemon_main() -> Result<()> {
 
     let config = config::DaemonConfig::load(&config_path)?;
     rootless::init(&config)?;
+    validate::init(&config);
     cgroup::init(&config)?;
     info!(
         "pool_size: {}, memory: {}MiB, vcpus: {}",

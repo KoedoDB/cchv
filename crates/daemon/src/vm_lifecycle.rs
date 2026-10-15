@@ -561,7 +561,13 @@ pub fn prepare_snapshot(
             }
         }
     }
-    crate::validate::validate_snapshot_config(&cfg, &config.kernel_path, &config.rootfs_path, image)
+    crate::validate::validate_snapshot_config(
+        &cfg,
+        &config.kernel_path,
+        &config.rootfs_path,
+        image,
+        crate::validate::SnapshotSize::of(config),
+    )
         .context("the snapshot's configuration is not accepted")?;
 
     // Hardlink large files
@@ -846,7 +852,8 @@ pub async fn connect_agent(
     use std::os::unix::io::IntoRawFd;
     let fd = std_stream.into_raw_fd();
 
-    let client = ttrpc::asynchronous::Client::new(fd);
+    // ttrpc 0.10 takes a Socket; the descriptor is a connected unix socket that this function owns.
+    let client = unsafe { ttrpc::asynchronous::Client::from_raw_unix_socket_fd(fd) };
     let agent = cloudhv_proto::AgentServiceClient::new(client.clone());
     let health = cloudhv_proto::HealthServiceClient::new(client);
 

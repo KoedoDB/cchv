@@ -245,6 +245,7 @@ impl SnapshotManager {
                 &self.config.kernel_path,
                 &self.config.rootfs_path,
                 Some(erofs_path),
+                crate::validate::SnapshotSize::of(&self.config),
             )
             .context("the snapshot's configuration is not accepted")?;
             Ok(())

@@ -54,6 +54,38 @@ service AgentService {
     // different container ID. The agent moves the internal bookkeeping so
     // that kill/wait/state RPCs work with the new ID.
     rpc AdoptContainer(AdoptContainerRequest) returns (AdoptContainerResponse);
+
+    // --- Exec: `kubectl exec` and exec probes. A process is made, started, fed and read, and deleted, like a container; the
+    // shim carries the pipes containerd gave it (stdin, stdout, stderr, or a terminal) to and from these calls. ---
+
+    // ExecCreate records a process to run in a running container (nothing runs yet). The process is checked and cut down
+    // like a container's: capabilities, no_new_privs, rlimits. At most 8 execs per container exist at once.
+    rpc ExecCreate(ExecCreateRequest) returns (ExecCreateResponse);
+
+    // ExecStart starts a created process and returns its pid.
+    rpc ExecStart(ExecStartRequest) returns (ExecStartResponse);
+
+    // ExecKill sends a signal to a started process.
+    rpc ExecKill(ExecKillRequest) returns (ExecKillResponse);
+
+    // ExecWait blocks until the process has exited, however long that takes.
+    rpc ExecWait(ExecWaitRequest) returns (ExecWaitResponse);
+
+    // ExecDelete kills the process if it still runs and forgets it (its output buffers, descriptors, files).
+    rpc ExecDelete(ExecDeleteRequest) returns (ExecDeleteResponse);
+
+    // ExecWrite writes to the process's stdin (or its terminal).
+    rpc ExecWrite(ExecWriteRequest) returns (ExecWriteResponse);
+
+    // ExecCloseStdin closes the process's stdin (end of input).
+    rpc ExecCloseStdin(ExecCloseStdinRequest) returns (ExecCloseStdinResponse);
+
+    // ExecRead returns the output the process has written since the offsets the caller gives, as ReadLogs does for a container
+    // (the offsets acknowledge what was taken). With a terminal everything is on stdout.
+    rpc ExecRead(ExecReadRequest) returns (ExecReadResponse);
+
+    // ExecResize sets the size of the process's terminal.
+    rpc ExecResize(ExecResizeRequest) returns (ExecResizeResponse);
 }
 
 // HealthService provides health checking for the guest agent.
@@ -295,3 +327,93 @@ message AdoptContainerRequest {
 message AdoptContainerResponse {
     uint32 pid = 1;  // PID of the adopted container process
 }
+
+// --- Exec ---
+
+message ExecCreateRequest {
+    string container_id = 1;
+    string exec_id = 2;
+    // The OCI Process object as JSON (args, env, cwd, user, capabilities, rlimits, ...). It may hold secrets in its environment.
+    bytes process_json = 3;
+    bool terminal = 4;
+}
+
+message ExecCreateResponse {}
+
+message ExecStartRequest {
+    string container_id = 1;
+    string exec_id = 2;
+}
+
+message ExecStartResponse {
+    uint32 pid = 1;
+}
+
+message ExecKillRequest {
+    string container_id = 1;
+    string exec_id = 2;
+    uint32 signal = 3;
+}
+
+message ExecKillResponse {}
+
+message ExecWaitRequest {
+    string container_id = 1;
+    string exec_id = 2;
+}
+
+message ExecWaitResponse {
+    uint32 exit_status = 1;
+    string exited_at = 2;  // RFC 3339
+}
+
+message ExecDeleteRequest {
+    string container_id = 1;
+    string exec_id = 2;
+}
+
+message ExecDeleteResponse {}
+
+message ExecWriteRequest {
+    string container_id = 1;
+    string exec_id = 2;
+    bytes data = 3;  // at most 64 KiB
+}
+
+message ExecWriteResponse {
+    uint32 written = 1;
+}
+
+message ExecCloseStdinRequest {
+    string container_id = 1;
+    string exec_id = 2;
+}
+
+message ExecCloseStdinResponse {}
+
+message ExecReadRequest {
+    string container_id = 1;
+    string exec_id = 2;
+    uint64 stdout_offset = 3;  // absolute position in the stdout stream to read from; everything before it is dropped
+    uint64 stderr_offset = 4;
+    uint32 max_bytes = 5;      // most bytes to return for each stream in one reply (0: 256 KiB)
+}
+
+message ExecReadResponse {
+    bytes stdout = 1;
+    bytes stderr = 2;
+    uint64 stdout_offset = 3;  // position after the returned stdout; the next call starts here
+    uint64 stderr_offset = 4;
+    bool eof = 5;              // the process has exited and everything it wrote has been returned
+    uint64 stdout_dropped = 6; // bytes lost because the buffer was full (the caller was too slow), cumulative
+    uint64 stderr_dropped = 7;
+}
+
+message ExecResizeRequest {
+    string container_id = 1;
+    string exec_id = 2;
+    uint32 width = 3;   // columns
+    uint32 height = 4;  // rows
+}
+
+message ExecResizeResponse {}

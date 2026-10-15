@@ -71,6 +71,11 @@ pub struct DaemonConfig {
     #[serde(default)]
     pub ch_gid: Option<u32>,
 
+    /// Accept `/proc/<pid>/ns/net` as a pod's network namespace. Off by default: a runtime that pins namespaces under /var/run/netns (the
+    /// CNI way, which k3s and containerd use) does not need it, and a path of that form can name any process's namespace.
+    #[serde(default)]
+    pub allow_proc_netns: bool,
+
     /// Maximum number of cached workload snapshots.
     /// Oldest (LRU) snapshots are evicted when this limit is reached.
     #[serde(default = "default_max_snapshots")]

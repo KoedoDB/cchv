@@ -25,7 +25,7 @@ use crate::validate;
 static WARM_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Per-VM agent connection, stored after first container start.
-type AgentRegistry = Arc<Mutex<HashMap<String, cloudhv_proto::AgentServiceClient>>>;
+pub(crate) type AgentRegistry = Arc<Mutex<HashMap<String, cloudhv_proto::AgentServiceClient>>>;
 
 /// The names of the TAP devices of the VMs that have one. A name is a hash of the VM's ID (see `tap_name_for`); two VMs whose hashes
 /// collide must not both have it, or the second would delete the first's device. Taken when a VM's network is set up, given back when
@@ -212,6 +212,7 @@ async fn handle_connection(
             "KillContainer" => handle_kill_container(agents, &request).await,
             "WaitContainer" => handle_wait_container(agents, &request).await,
             "ReadLogs" => handle_read_logs(agents, &request).await,
+            m if crate::exec::is_exec_method(m) => crate::exec::handle(m, pool, agents, &request).await,
             "DeleteContainer" => handle_delete_container(agents, &request).await,
             "Status" => handle_status(pool, snapshots).await,
             _ => serde_json::json!({"error": format!("unknown method: {}", method)}),
@@ -284,6 +285,7 @@ async fn handle_acquire(
         return serde_json::json!({"error": format!("{} VMs are active, the most max_active_vms allows", pool.active_count())});
     }
     let volumes = volumes_from_request(request);
+    let terminal = terminal_from_request(request);
 
     // The key of the warm snapshot is made here, from the content of the image. The one the caller sends is not used: with it, a pod
     // could be given the warm guest of another pod's image.
@@ -315,6 +317,7 @@ async fn handle_acquire(
                 container_id,
                 config_json_b64,
                 volumes: &volumes,
+                terminal,
             },
             want_memory,
             want_vcpus,
@@ -351,6 +354,7 @@ async fn handle_acquire(
                     container_id,
                     config_json_b64,
                     &volumes,
+                    terminal,
                 )
                 .await
                 {
@@ -397,6 +401,7 @@ async fn handle_acquire(
                             container_id,
                             config_json_b64,
                             volumes: &volumes,
+                            terminal,
                         },
                         agents,
                     )
@@ -446,6 +451,7 @@ async fn finish_warm_restore(
     container_id: &str,
     config_json_b64: &str,
     volumes: &[cloudhv_proto::VolumeMount],
+    terminal: bool,
 ) -> Result<serde_json::Value> {
     // Connect to the guest agent of the restored VM. It is needed for the network configuration
     // and, always, to hand the warm container over to the pod's container ID (below).
@@ -473,7 +479,7 @@ async fn finish_warm_restore(
     // run, with its own OCI config and under the ID the pod's runtime uses; without this the pod's
     // runtime asks the agent about an ID it does not know ("unknown container", exit 137), or, if the
     // shadow's container is simply handed over, gets the exit status of a container that ended long ago.
-    let container_pid = run_container_in_warm_vm(&agent, container_id, config_json_b64, volumes)
+    let container_pid = run_container_in_warm_vm(&agent, container_id, config_json_b64, volumes, terminal)
         .await
         .context("run container")?;
 
@@ -620,6 +626,8 @@ struct RunContainerParams<'a> {
     config_json_b64: &'a str,
     /// What the pod's runtime bind-mounts into the container; the agent writes it into the VM.
     volumes: &'a [cloudhv_proto::VolumeMount],
+    /// Whether the container's process has a terminal (`tty: true`).
+    terminal: bool,
 }
 
 /// The first characters of a container ID, for the name of its disk (the ID is a plain identifier here, but never slice by bytes).
@@ -705,6 +713,7 @@ async fn run_container_in_vm(
     req.container_id = params.container_id.to_string();
     req.config_json = config_json;
     req.volumes = params.volumes.to_vec();
+    req.terminal = params.terminal;
     req.rootfs_preattached = false;
     req.erofs_layers = 1;
 
@@ -741,6 +750,7 @@ async fn handle_add_container(
     }
     let config_json_b64 = field(request, "config_json");
     let volumes = volumes_from_request(request);
+    let terminal = terminal_from_request(request);
 
     let vm = match pool.get_active(vm_id).await {
         Some(vm) => vm,
@@ -759,6 +769,7 @@ async fn handle_add_container(
             container_id,
             config_json_b64,
             volumes: &volumes,
+            terminal,
         },
         agents,
     )
@@ -1088,6 +1099,7 @@ async fn run_container_in_warm_vm(
     container_id: &str,
     config_json_b64: &str,
     volumes: &[cloudhv_proto::VolumeMount],
+    terminal: bool,
 ) -> Result<u32> {
     use base64::Engine;
     let config_json = if config_json_b64.is_empty() {
@@ -1101,6 +1113,7 @@ async fn run_container_in_warm_vm(
     req.container_id = container_id.to_string();
     req.config_json = config_json;
     req.volumes = volumes.to_vec();
+    req.terminal = terminal;
     req.rootfs_preattached = true;
     req.erofs_layers = 1;
     let ctx = ttrpc::context::with_duration(std::time::Duration::from_secs(30));
@@ -1118,6 +1131,12 @@ async fn run_container_in_warm_vm(
 /// The most volumes of a request, and files in a volume. The request line is limited too; these keep the work bounded.
 const MAX_VOLUMES: usize = 64;
 const MAX_FILES_PER_VOLUME: usize = 1024;
+
+/// Whether the container's process has a terminal (`tty: true`): the optional boolean `terminal` of AcquireSandbox and AddContainer.
+/// Anything but `true` is no terminal.
+fn terminal_from_request(request: &serde_json::Value) -> bool {
+    request.get("terminal").and_then(|v| v.as_bool()).unwrap_or(false)
+}
 
 /// The `volumes` of a request (see the shim's `volumes.rs`): [{destination, source, readonly, files: [{path, content (base64), mode}]}].
 fn volumes_from_request(request: &serde_json::Value) -> Vec<cloudhv_proto::VolumeMount> {
@@ -1225,6 +1244,15 @@ mod request_tests {
         assert!(required_id(&r, "vm_id").is_err());
         assert_eq!(required_id(&r, "container_id").unwrap(), "abc123");
         assert!(required_id(&r, "missing").is_err());
+    }
+
+    #[test]
+    fn the_terminal_flag_of_a_request_is_a_boolean_that_defaults_to_false() {
+        use serde_json::json;
+        assert!(terminal_from_request(&json!({"terminal": true})));
+        for no in [json!({}), json!({"terminal": false}), json!({"terminal": "true"}), json!({"terminal": 1}), json!({"terminal": null})] {
+            assert!(!terminal_from_request(&no), "{no}");
+        }
     }
 
     #[test]

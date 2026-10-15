@@ -16,6 +16,7 @@ mod proto {
 
 mod container;
 mod disks;
+mod exec;
 mod mount;
 mod reaper;
 mod seccomp;

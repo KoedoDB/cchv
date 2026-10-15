@@ -15,8 +15,8 @@ cloudhv-common = { path = "../common" }
 # Async runtime (single-threaded for minimal memory)
 tokio = { version = "1", features = ["rt", "net", "time", "io-util", "sync", "macros", "signal", "process", "fs"] }
 
-# RPC — agent uses ttrpc 0.9 for vsock server support
-ttrpc = { version = "0.9", features = ["async"] }
+# RPC — vsock server support (ttrpc 0.9 and later)
+ttrpc = { version = "0.10", features = ["async"] }
 protobuf = "3"
 async-trait = "0.1"
 
@@ -39,6 +39,6 @@ libc = "0.2"
 chrono = { version = "0.4", features = ["serde"] }
 
 [build-dependencies]
-ttrpc-codegen = "0.6"
+ttrpc-codegen = "0.7"
 
 [workspace]

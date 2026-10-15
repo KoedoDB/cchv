@@ -137,6 +137,186 @@ fn sanitize_process(process: &Map<String, Value>) -> Value {
     Value::Object(out)
 }
 
+/// The most arguments or environment entries an exec's process may have, and the most bytes in all of its strings.
+const MAX_EXEC_STRINGS: usize = 4096;
+const MAX_EXEC_BYTES: usize = 512 * 1024;
+const MAX_EXEC_CWD: usize = 4096;
+
+/// Intersect an exec's capability list with the container's: nothing the container does not have.
+fn cap_intersection(asked: &[Value], container: Option<&Value>) -> Vec<Value> {
+    match container.and_then(|c| c.as_array()) {
+        Some(have) => asked.iter().filter(|c| have.contains(c)).cloned().collect(),
+        None => asked.to_vec(),
+    }
+}
+
+/// The OCI `Process` object for `crun exec`, from what a client sent (`process`, a JSON object) and the process section of the
+/// container it runs in (`container`, from the container's bundle: already cut down by `sanitize_process`).
+///
+/// The same rules as a container's process, and never more than the container has:
+/// - `args` (at least one), `env` (`NAME=value`), `cwd` (absolute) and `user` are kept after checking; strings have no NUL and the
+///   whole is bounded;
+/// - the five capability sets are cut to ALLOWED_CAPS and to the container's own set; without any, the container's sets;
+/// - `rlimits` are the container's, each lowered (never raised) to what the exec asks;
+/// - `noNewPrivileges` is on, `terminal` is `terminal` (the request's flag, not the JSON's);
+/// - `apparmorProfile`, `selinuxLabel`, `oomScoreAdj` and everything else are dropped.
+pub fn sanitize_exec_process(process: &Value, container: Option<&Value>, terminal: bool) -> Result<Value> {
+    let p = process
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("the process is not an object"))?;
+    let mut total = 0usize;
+    let mut strings = |what: &str, v: Option<&Value>, need_eq: bool| -> Result<Vec<Value>> {
+        let list = match v {
+            None => return Ok(Vec::new()),
+            Some(v) => v
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("{what} is not a list"))?,
+        };
+        if list.len() > MAX_EXEC_STRINGS {
+            anyhow::bail!("{what} has more than {MAX_EXEC_STRINGS} entries");
+        }
+        let mut out = Vec::with_capacity(list.len());
+        for e in list {
+            let s = e
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("an entry of {what} is not a string"))?;
+            if s.contains('\0') {
+                anyhow::bail!("an entry of {what} has a NUL");
+            }
+            if need_eq && !s.contains('=') {
+                anyhow::bail!("an entry of {what} is not NAME=value");
+            }
+            total += s.len();
+            if total > MAX_EXEC_BYTES {
+                anyhow::bail!("the process is larger than {MAX_EXEC_BYTES} bytes");
+            }
+            out.push(e.clone());
+        }
+        Ok(out)
+    };
+    let args = strings("args", p.get("args"), false)?;
+    if args.is_empty() {
+        anyhow::bail!("the process has no args");
+    }
+    let env = strings("env", p.get("env"), true)?;
+
+    let cwd = match p.get("cwd") {
+        None => json!("/"),
+        Some(c) => {
+            let c = c
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("cwd is not a string"))?;
+            if c.is_empty() {
+                json!("/")
+            } else if !c.starts_with('/') || c.len() > MAX_EXEC_CWD || c.contains('\0') {
+                anyhow::bail!("cwd is not an absolute path");
+            } else {
+                json!(c)
+            }
+        }
+    };
+
+    let id = |v: Option<&Value>| -> Result<u32> {
+        v.and_then(|x| x.as_u64())
+            .and_then(|x| u32::try_from(x).ok())
+            .ok_or_else(|| anyhow::anyhow!("user id is not a number"))
+    };
+    // The user: the exec's, or else the container's.
+    let user = match p.get("user") {
+        Some(u) => {
+            let u = u
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("user is not an object"))?;
+            let mut out = Map::new();
+            out.insert("uid".to_string(), json!(id(u.get("uid"))?));
+            out.insert("gid".to_string(), json!(id(u.get("gid"))?));
+            if let Some(g) = u.get("additionalGids") {
+                let g = g
+                    .as_array()
+                    .ok_or_else(|| anyhow::anyhow!("additionalGids is not a list"))?;
+                if g.len() > 64 {
+                    anyhow::bail!("more than 64 additional groups");
+                }
+                let mut gids = Vec::new();
+                for x in g {
+                    gids.push(json!(id(Some(x))?));
+                }
+                out.insert("additionalGids".to_string(), Value::Array(gids));
+            }
+            if let Some(m) = u.get("umask").and_then(|m| m.as_u64()) {
+                out.insert("umask".to_string(), json!(m & 0o777));
+            }
+            Value::Object(out)
+        }
+        None => container
+            .and_then(|c| c.get("user"))
+            .cloned()
+            .unwrap_or_else(|| json!({"uid": 0, "gid": 0})),
+    };
+
+    // Capabilities: cut to the allowed set, and to the container's own.
+    let container_caps = container.and_then(|c| c.get("capabilities")).and_then(|c| c.as_object());
+    let asked_caps = p.get("capabilities").and_then(|c| c.as_object());
+    let mut caps = Map::new();
+    for set in ["bounding", "effective", "inheritable", "permitted", "ambient"] {
+        // What the container has in this set (a container without any capabilities section has the allowed set, except for
+        // inheritable and ambient, as `sanitize_capabilities` gives it).
+        let have: Vec<Value> = match container_caps {
+            Some(c) => filter_caps(c.get(set)),
+            None if matches!(set, "inheritable" | "ambient") => Vec::new(),
+            None => ALLOWED_CAPS.iter().map(|c| json!(c)).collect(),
+        };
+        let list = match asked_caps {
+            Some(asked) => cap_intersection(&filter_caps(asked.get(set)), Some(&Value::Array(have))),
+            None => have,
+        };
+        caps.insert(set.to_string(), Value::Array(list));
+    }
+
+    // Resource limits: the container's, lowered to what the exec asks for. An exec cannot raise a limit, and without any it keeps the
+    // container's (not the agent's, which are root's).
+    let mut rlimits = Vec::new();
+    let container_limits = sanitize_rlimits(container.and_then(|c| c.get("rlimits")));
+    let asked_limits = sanitize_rlimits(p.get("rlimits"));
+    for l in container_limits.as_array().into_iter().flatten() {
+        let kind = l.get("type").cloned().unwrap_or(Value::Null);
+        let (mut hard, mut soft) = (
+            l.get("hard").and_then(|v| v.as_u64()).unwrap_or(0),
+            l.get("soft").and_then(|v| v.as_u64()).unwrap_or(0),
+        );
+        if let Some(a) = asked_limits
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|a| a.get("type") == Some(&kind))
+        {
+            hard = hard.min(a.get("hard").and_then(|v| v.as_u64()).unwrap_or(hard));
+            soft = soft.min(a.get("soft").and_then(|v| v.as_u64()).unwrap_or(soft));
+        }
+        rlimits.push(json!({"type": kind, "hard": hard, "soft": soft.min(hard)}));
+    }
+
+    let mut out = Map::new();
+    out.insert("terminal".to_string(), json!(terminal));
+    out.insert("user".to_string(), user);
+    out.insert("args".to_string(), Value::Array(args));
+    out.insert("env".to_string(), Value::Array(env));
+    out.insert("cwd".to_string(), cwd);
+    out.insert("capabilities".to_string(), Value::Object(caps));
+    out.insert("rlimits".to_string(), Value::Array(rlimits));
+    out.insert("noNewPrivileges".to_string(), json!(true));
+    if terminal {
+        if let Some(sz) = p.get("consoleSize").and_then(|c| c.as_object()) {
+            let dim = |k: &str| sz.get(k).and_then(|v| v.as_u64()).map(|v| v.min(1000)).unwrap_or(0);
+            out.insert(
+                "consoleSize".to_string(),
+                json!({"height": dim("height"), "width": dim("width")}),
+            );
+        }
+    }
+    Ok(Value::Object(out))
+}
+
 /// The device cgroup rules: nothing is allowed except the standard devices, which are the ones crun puts in the container's /dev.
 /// (A device node that is not allowed cannot be opened even if one is made; making one needs CAP_MKNOD, which is not granted.)
 pub fn default_devices() -> Value {
@@ -527,5 +707,113 @@ mod tests {
         }
         let shm = m.iter().find(|x| x["destination"] == "/dev/shm").unwrap();
         assert!(shm["options"].to_string().contains("noexec"));
+    }
+
+    fn container_process() -> Value {
+        json!({
+            "user": {"uid": 1000, "gid": 1000},
+            "capabilities": {
+                "bounding": ["CAP_CHOWN", "CAP_KILL", "CAP_SETUID"],
+                "effective": ["CAP_CHOWN"],
+                "inheritable": [],
+                "permitted": ["CAP_CHOWN", "CAP_KILL"],
+                "ambient": []
+            },
+            "rlimits": [{"type": "RLIMIT_NOFILE", "hard": 1024, "soft": 512}, {"type": "RLIMIT_NPROC", "hard": 100, "soft": 100}]
+        })
+    }
+
+    #[test]
+    fn an_exec_gets_the_hardening_of_a_container_and_never_more_than_the_container_has() {
+        let asked = json!({
+            "args": ["sh", "-c", "id"],
+            "env": ["A=b", "PATH=/usr/bin"],
+            "cwd": "/tmp",
+            "terminal": false,
+            "apparmorProfile": "x", "selinuxLabel": "y", "oomScoreAdj": -1000,
+            "noNewPrivileges": false,
+            "capabilities": {
+                "bounding": ["CAP_SYS_ADMIN", "CAP_CHOWN", "CAP_NET_RAW", "CAP_SETFCAP"],
+                "effective": ["CAP_SYS_ADMIN", "CAP_CHOWN", "CAP_KILL"],
+                "permitted": ["CAP_CHOWN"],
+                "ambient": ["CAP_CHOWN"]
+            },
+            "rlimits": [{"type": "RLIMIT_NOFILE", "hard": 4096, "soft": 4096}, {"type": "RLIMIT_NPROC", "hard": 10, "soft": 5},
+                        {"type": "RLIMIT_CORE", "hard": 99, "soft": 99}]
+        });
+        let p = sanitize_exec_process(&asked, Some(&container_process()), false).unwrap();
+        assert_eq!(p["args"], json!(["sh", "-c", "id"]));
+        assert_eq!(p["env"], json!(["A=b", "PATH=/usr/bin"]));
+        assert_eq!(p["cwd"], json!("/tmp"));
+        assert_eq!(p["terminal"], json!(false));
+        assert_eq!(p["noNewPrivileges"], json!(true), "forced on");
+        assert!(p.get("apparmorProfile").is_none() && p.get("selinuxLabel").is_none() && p.get("oomScoreAdj").is_none());
+        // The user is the container's when the exec names none.
+        assert_eq!(p["user"], json!({"uid": 1000, "gid": 1000}));
+        // Capabilities: in the allowed list AND in the container's set. SYS_ADMIN and NET_RAW never; SETFCAP and KILL are allowed in
+        // general but this container's bounding set has no SETFCAP, and its effective set has no KILL.
+        assert_eq!(p["capabilities"]["bounding"], json!(["CAP_CHOWN"]));
+        assert_eq!(p["capabilities"]["effective"], json!(["CAP_CHOWN"]));
+        assert_eq!(p["capabilities"]["permitted"], json!(["CAP_CHOWN"]));
+        assert_eq!(p["capabilities"]["ambient"], json!([]), "the container has no ambient set");
+        // Limits: the container's, lowered. NOFILE 4096 is above the container's 1024, so it stays 1024; NPROC is lowered; CORE is not
+        // one the container has.
+        let lim = p["rlimits"].as_array().unwrap();
+        assert_eq!(lim.len(), 2);
+        assert_eq!(lim[0], json!({"type": "RLIMIT_NOFILE", "hard": 1024, "soft": 512}));
+        assert_eq!(lim[1], json!({"type": "RLIMIT_NPROC", "hard": 10, "soft": 5}));
+    }
+
+    #[test]
+    fn an_exec_without_capabilities_or_limits_of_its_own_has_the_containers() {
+        let p = sanitize_exec_process(&json!({"args": ["ls"]}), Some(&container_process()), false).unwrap();
+        assert_eq!(p["capabilities"]["bounding"], json!(["CAP_CHOWN", "CAP_KILL", "CAP_SETUID"]));
+        assert_eq!(p["capabilities"]["permitted"], json!(["CAP_CHOWN", "CAP_KILL"]));
+        assert_eq!(p["rlimits"].as_array().unwrap().len(), 2);
+        assert_eq!(p["cwd"], json!("/"), "no cwd means /");
+        // A container that has no capabilities section gets the allowed list, like a container does.
+        let q = sanitize_exec_process(&json!({"args": ["ls"]}), None, false).unwrap();
+        assert_eq!(q["capabilities"]["bounding"].as_array().unwrap().len(), ALLOWED_CAPS.len());
+        assert_eq!(q["capabilities"]["ambient"], json!([]));
+        assert_eq!(q["user"], json!({"uid": 0, "gid": 0}));
+    }
+
+    #[test]
+    fn an_exec_with_a_user_of_its_own_and_a_terminal() {
+        let asked = json!({"args": ["sh"], "user": {"uid": 5, "gid": 6, "additionalGids": [7, 8], "umask": 18},
+                           "consoleSize": {"height": 50000, "width": 80}, "terminal": false});
+        let p = sanitize_exec_process(&asked, Some(&container_process()), true).unwrap();
+        assert_eq!(p["terminal"], json!(true), "the request's flag decides, not the JSON's");
+        assert_eq!(p["user"], json!({"uid": 5, "gid": 6, "additionalGids": [7, 8], "umask": 18}));
+        assert_eq!(p["consoleSize"], json!({"height": 1000, "width": 80}));
+        let no_term = sanitize_exec_process(&asked, Some(&container_process()), false).unwrap();
+        assert!(no_term.get("consoleSize").is_none());
+    }
+
+    #[test]
+    fn a_bad_exec_process_is_refused() {
+        let c = Some(container_process());
+        let bad = |v: Value| sanitize_exec_process(&v, c.as_ref(), false).is_err();
+        assert!(bad(json!("sh")), "not an object");
+        assert!(bad(json!({})), "no args");
+        assert!(bad(json!({"args": []})));
+        assert!(bad(json!({"args": "sh"})));
+        assert!(bad(json!({"args": [1]})));
+        assert!(bad(json!({"args": ["a\u{0}b"]})), "NUL");
+        assert!(bad(json!({"args": ["x"], "env": ["NOEQUALS"]})));
+        assert!(bad(json!({"args": ["x"], "env": "A=b"})));
+        assert!(bad(json!({"args": ["x"], "cwd": "relative"})));
+        assert!(bad(json!({"args": ["x"], "cwd": 5})));
+        assert!(bad(json!({"args": ["x"], "user": {"uid": -1, "gid": 0}})));
+        assert!(bad(json!({"args": ["x"], "user": {"uid": 0}})));
+        assert!(bad(json!({"args": ["x"], "user": {"uid": 0, "gid": 0, "additionalGids": (0..65).collect::<Vec<u32>>()}})));
+        assert!(bad(json!({"args": (0..4097).map(|_| "a").collect::<Vec<_>>()})), "too many args");
+        let big = "x".repeat(MAX_EXEC_BYTES + 1);
+        assert!(bad(json!({"args": [big]})), "too large");
+        // An empty cwd is the root.
+        assert_eq!(
+            sanitize_exec_process(&json!({"args": ["x"], "cwd": ""}), c.as_ref(), false).unwrap()["cwd"],
+            json!("/")
+        );
     }
 }
