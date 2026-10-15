@@ -45,6 +45,8 @@ async fn main() -> Result<()> {
         info!("stopped {swept} Cloud Hypervisor processes left by an earlier daemon");
     }
     pool.initialize().await?;
+    // A pool VM whose process died on its own (OOM kill, crash) is replaced within a few seconds, not when a pod is given it.
+    pool.spawn_reaper(std::time::Duration::from_secs(5));
 
     // Initialize snapshot manager (for warm workload snapshots)
     let snapshots = shadow::SnapshotManager::new(config.clone(), Arc::clone(&pool));

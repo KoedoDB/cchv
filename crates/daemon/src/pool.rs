@@ -178,6 +178,42 @@ impl Pool {
         }
     }
 
+    /// Start a task that, every `interval`, finds the ready VMs whose Cloud Hypervisor process has died on its own (killed by the OOM
+    /// killer, crashed), takes them out of the pool, removes their directories and makes up the difference. Without it a dead VM stays
+    /// in the pool until a pod is given it, and that pod fails to start. A VM that has been handed to a pod is not looked at here: the
+    /// shim watches its process, and releasing it removes it.
+    pub fn spawn_reaper(self: &Arc<Self>, interval: std::time::Duration) {
+        let pool = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                let dead = pool.take_dead_ready().await;
+                for vm in &dead {
+                    warn!(
+                        "pool VM {} (pid {}) died on its own, removing it",
+                        vm.vm_id, vm.ch_pid
+                    );
+                    if let Some(dir) = vm.api_socket.parent() {
+                        let _ = std::fs::remove_dir_all(dir);
+                    }
+                }
+                for _ in 0..dead.len() {
+                    pool.replenish_one().await;
+                }
+            }
+        });
+    }
+
+    /// Remove from the ready list, and return, the VMs whose process no longer exists.
+    async fn take_dead_ready(&self) -> Vec<PoolVm> {
+        let mut ready = self.ready.lock().await;
+        let (alive, dead): (Vec<PoolVm>, Vec<PoolVm>) = ready
+            .drain(..)
+            .partition(|vm| std::path::Path::new(&format!("/proc/{}", vm.ch_pid)).exists());
+        *ready = alive;
+        dead
+    }
+
     /// Number of ready VMs in the pool.
     pub async fn ready_count(&self) -> usize {
         self.ready.lock().await.len()
@@ -333,9 +369,14 @@ impl Pool {
         }
     }
 
-    /// Stop the Cloud Hypervisor processes recorded in `<state_dir>/<vm>/ch.pid` that no pool knows about. The process is checked
-    /// (its command line names cloud-hypervisor and this VM's directory) before it is signalled, so that a PID the system has given to
-    /// something else is left alone. Returns how many were stopped. Run at start, for the VMs of a daemon that died without cleaning up.
+    /// Stop every Cloud Hypervisor process the state directory records, and remove every VM directory in it. The directories kept are the
+    /// base snapshot and the cache of warm snapshots; everything else (`pool-*`, `warm-*`, `shadow-*`, the base VM's) belongs to a VM that
+    /// is, or was, someone's, and when this runs (at start, before the pool is filled; at stop, after the VMs were stopped) nothing is
+    /// using it. A process is signalled only if its command line names cloud-hypervisor and that VM's directory, so that a PID the
+    /// system has given to something else is left alone. Returns how many processes were stopped.
+    ///
+    /// This is what makes the cleanup certain. A daemon that is stopped (SIGTERM, SIGINT) cleans up before it exits; one that is killed
+    /// (SIGKILL, the OOM killer, a crash) cannot run anything, and its VMs and directories are removed by the next daemon at its start.
     pub async fn sweep_orphans(&self) -> usize {
         let root = PathBuf::from(&self.config.state_dir);
         let mut stopped = 0;
@@ -344,20 +385,24 @@ impl Pool {
         };
         for entry in entries.flatten() {
             let dir = entry.path();
-            let Ok(text) = std::fs::read_to_string(dir.join("ch.pid")) else {
-                continue;
-            };
-            let Ok(pid) = text.trim().parse::<u32>() else {
-                continue;
-            };
-            let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-            let cmdline = String::from_utf8_lossy(&cmdline).replace('\0', " ");
-            if !cmdline.contains("cloud-hypervisor") || !cmdline.contains(&*dir.to_string_lossy()) {
-                let _ = std::fs::remove_dir_all(&dir);
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !dir.is_dir() || name == "base-snapshot" || name == "snapshot-cache" {
                 continue;
             }
-            vm_lifecycle_stop(pid, &dir).await;
-            stopped += 1;
+            let pid = std::fs::read_to_string(dir.join("ch.pid"))
+                .ok()
+                .and_then(|t| t.trim().parse::<u32>().ok());
+            if let Some(pid) = pid {
+                let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+                let cmdline = String::from_utf8_lossy(&cmdline).replace('\0', " ");
+                if cmdline.contains("cloud-hypervisor") && cmdline.contains(&*dir.to_string_lossy())
+                {
+                    vm_lifecycle_stop(pid, &dir).await;
+                    stopped += 1;
+                    continue;
+                }
+            }
+            let _ = std::fs::remove_dir_all(&dir);
         }
         stopped
     }
@@ -404,4 +449,39 @@ async fn vm_lifecycle_stop(pid: u32, dir: &std::path::Path) {
         libc::kill(pid as i32, libc::SIGKILL);
     }
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vm(id: &str, pid: u32) -> PoolVm {
+        PoolVm {
+            vm_id: id.to_string(),
+            api_socket: PathBuf::from(format!("/nonexistent/{id}/api.sock")),
+            vsock_socket: PathBuf::from(format!("/nonexistent/{id}/vsock.sock")),
+            cid: 3,
+            ch_pid: pid,
+            created_at: std::time::Instant::now(),
+        }
+    }
+
+    fn test_config() -> DaemonConfig {
+        serde_json::from_str(r#"{"kernel_path":"/k","rootfs_path":"/r"}"#).expect("config")
+    }
+
+    #[tokio::test]
+    async fn the_reaper_takes_out_only_the_vms_whose_process_is_gone() {
+        let pool = Pool::new(test_config());
+        let me = std::process::id(); // a process that exists
+        let gone = 4_194_300; // above the usual pid_max, so no such process
+        pool.ready.lock().await.push(vm("alive", me));
+        pool.ready.lock().await.push(vm("dead", gone));
+        let dead = pool.take_dead_ready().await;
+        assert_eq!(dead.len(), 1);
+        assert_eq!(dead[0].vm_id, "dead");
+        let ready = pool.ready.lock().await;
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].vm_id, "alive");
+    }
 }
