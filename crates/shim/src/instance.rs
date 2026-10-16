@@ -799,6 +799,20 @@ impl CloudHvInstance {
             )
         };
 
+        // Carry the container's stdout and stderr from the guest to the pipes containerd gave us. Without this the output
+        // reaches nobody and `kubectl logs` is empty. The exit watcher below waits for this to finish before it reports the exit:
+        // containerd (and `ctr run --rm`) tear the container down at the exit, and the last output of a short-lived container
+        // would be lost if the exit came first.
+        let pump = {
+            let cfg = self.cfg.clone();
+            let daemon_socket = active_state.daemon_socket.clone();
+            let daemon_vm_id = active_state.daemon_vm_id.clone();
+            let cid = container_id.to_string();
+            tokio::spawn(async move {
+                pump_logs(cfg, daemon_socket, daemon_vm_id, cid).await;
+            })
+        };
+
         // Set up exit watcher — daemon proxies WaitContainer, CH PID as backup
         {
             let exit = self.exit.clone();
@@ -825,6 +839,11 @@ impl CloudHvInstance {
                                 (137, String::new())
                             }
                         };
+                        // The output the container wrote before it exited is still in the guest: let the pump carry it first (a pump
+                        // that cannot finish, as the pipes have no reader, does not hold the exit for long).
+                        if exit_code != 137 {
+                            let _ = tokio::time::timeout(LOG_DRAIN_TIMEOUT, pump).await;
+                        }
                         let _ = exit.set((exit_code, Utc::now()));
                         log::info!(
                             "TIMING exit_watcher {} @{}: daemon_wait code={} took={}ms",
@@ -839,18 +858,6 @@ impl CloudHvInstance {
                         );
                     }
                 }
-            });
-        }
-
-        // Carry the container's stdout and stderr from the guest to the pipes containerd gave us. Without this the output
-        // reaches nobody and `kubectl logs` is empty.
-        {
-            let cfg = self.cfg.clone();
-            let daemon_socket = active_state.daemon_socket.clone();
-            let daemon_vm_id = active_state.daemon_vm_id.clone();
-            let cid = container_id.to_string();
-            tokio::spawn(async move {
-                pump_logs(cfg, daemon_socket, daemon_vm_id, cid).await;
             });
         }
 
@@ -991,6 +998,9 @@ async fn pump_logs(
         }
     }
 }
+
+/// How long the exit of a container waits for its output to reach containerd's pipes.
+const LOG_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct SandboxSpec {
     netns: Option<String>,
