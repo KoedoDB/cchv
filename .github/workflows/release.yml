@@ -33,6 +33,10 @@ jobs:
         with:
           persist-credentials: false
 
+      # What `--version` of the binaries says (crates/common/build.rs reads it). The build containers have no .git.
+      - name: Record what is being built
+        run: printf 'version=%s\ncommit=%s\n' "$GITHUB_REF_NAME" "$GITHUB_SHA" > BUILD-INFO
+
       - name: Build complete Guest (kernel, agent, and root FS)
         run: |
           bash hacks/build-guest.sh
@@ -57,6 +61,65 @@ jobs:
             vmlinux.kconfig
             containerd-shim-cloudhv-v1
             containerd-cloudhypervisor.raw
+
+  # The licenses of the Rust crates and the SBOMs. Read-only, like the build jobs: cargo runs build scripts of the dependencies.
+  # The tools are built from source at pinned versions with --locked (no binary is downloaded).
+  sbom-and-licenses:
+    name: SBOMs and third-party licenses
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable branch
+        with:
+          toolchain: stable
+
+      - name: Install protoc (the shim's dependencies need it to build)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
+
+      - name: Install cargo-about and cargo-cyclonedx (pinned, from source)
+        run: |
+          cargo install --locked --features cli cargo-about@0.9.2
+          cargo install --locked cargo-cyclonedx@0.5.9
+
+      - name: Third-party licenses of the Rust crates
+        run: |
+          mkdir -p out
+          {
+            echo "Third-party licenses of containerd-cloudhypervisor ${GITHUB_REF_NAME} (KoedoDB's fork), for the Rust crates compiled into"
+            echo "containerd-shim-cloudhv-v1 and cloudhv-sandbox-daemon (workspace) and cloudhv-agent (crates/agent), from Cargo.lock."
+            echo "The programs the release bundles besides these (Cloud Hypervisor, crun, CNI plugins, the Linux kernel) are not here:"
+            echo "see THIRD-PARTY.md in the repository and sbom-bundled-components.cdx.json."
+            echo
+            echo "=== workspace: shim and daemon ==="
+            cargo about generate --locked --workspace -c about.toml about.hbs
+            echo
+            echo "=== crates/agent ==="
+            (cd crates/agent && cargo about generate --locked -c ../../about.toml ../../about.hbs)
+          } > out/THIRD-PARTY-LICENSES.txt
+          wc -l out/THIRD-PARTY-LICENSES.txt
+
+      - name: SBOMs (CycloneDX)
+        run: |
+          # one per shipped binary, from Cargo.lock; cargo-cyclonedx writes <package>.cdx.json next to each Cargo.toml
+          cargo cyclonedx --format json --spec-version 1.5
+          (cd crates/agent && cargo cyclonedx --format json --spec-version 1.5)
+          cp crates/shim/containerd-shim-cloudhv.cdx.json out/sbom-containerd-shim-cloudhv-v1.cdx.json
+          cp crates/daemon/cloudhv-sandbox-daemon.cdx.json out/sbom-cloudhv-sandbox-daemon.cdx.json
+          cp crates/agent/cloudhv-agent.cdx.json out/sbom-cloudhv-agent.cdx.json
+          # what the release bundles that is not a crate: Cloud Hypervisor, CNI plugins, crun, the kernel
+          python3 hacks/gen-bundled-sbom.py "$GITHUB_REF_NAME" out/sbom-bundled-components.cdx.json
+          ls -l out
+
+      - name: Upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sbom-and-licenses
+          path: out/
 
   build-installer-image:
     name: Build Installer Image
@@ -186,11 +249,12 @@ jobs:
   release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [build-everything,build-installer-image]
+    needs: [build-everything, build-installer-image, sbom-and-licenses]
     # The only job that writes. It runs no build code: the checkout is only read by shell commands written in this file.
     permissions:
       contents: write
       packages: write
+      id-token: write   # keyless signature of the checksums file (cosign)
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -208,6 +272,12 @@ jobs:
         with:
           name: build-x86_64
           path: /tmp/artifacts/amd64
+
+      - name: Download SBOMs and licenses
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: sbom-and-licenses
+          path: /tmp/artifacts/sbom
 
       - name: Prepare release assets
         run: |
@@ -241,8 +311,11 @@ jobs:
           chmod +x /tmp/release/cloudhv-agent-linux-arm64
           chmod +x /tmp/release/cloudhv-sandbox-daemon-linux-arm64
 
-          # Generate checksums
-          cd /tmp/release && sha256sum * > checksums-sha256.txt
+          # Licenses and SBOMs (made by the sbom-and-licenses job)
+          cp -v /tmp/artifacts/sbom/* /tmp/release/
+          test -s /tmp/release/THIRD-PARTY-LICENSES.txt
+          test -s /tmp/release/sbom-bundled-components.cdx.json
+          cp -v "$GITHUB_WORKSPACE/THIRD-PARTY.md" /tmp/release/THIRD-PARTY.md
 
       - name: Package and push Helm chart to GHCR
         env:
@@ -269,6 +342,22 @@ jobs:
           # Push to GHCR as an OCI artifact
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
           helm push /tmp/release/cloudhv-installer-$VERSION.tgz oci://${{ env.REGISTRY }}/${OWNER_LC}/charts
+
+      # After the chart is packaged, so that the checksums cover every file of the release. The signature (keyless, GitHub's OIDC
+      # identity of this workflow) covers the checksums file, and so everything in it. Verify with: cosign verify-blob
+      # --bundle checksums-sha256.txt.sigstore.json --certificate-identity-regexp '^https://github.com/<owner>/<repo>/'
+      # --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums-sha256.txt
+      # REVIEW: not exercised yet; it needs a real tag run to prove.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Checksums of the release files, and their signature
+        run: |
+          cd /tmp/release
+          rm -f checksums-sha256.txt checksums-sha256.txt.sigstore.json
+          sha256sum -- * > checksums-sha256.txt
+          cat checksums-sha256.txt
+          cosign sign-blob --yes --bundle checksums-sha256.txt.sigstore.json checksums-sha256.txt
 
       - name: Generate release notes
         id: notes
@@ -358,12 +447,37 @@ jobs:
           sudo mkdir -p /opt/cloudhv
           sudo cp vmlinux rootfs.erofs /opt/cloudhv/
           ```
+
+          ### Verify the files
+
+          `checksums-sha256.txt` lists every file of this release, and is signed (keyless, cosign, the identity of this workflow):
+
+          ```bash
+          cosign verify-blob --bundle checksums-sha256.txt.sigstore.json \
+            --certificate-identity-regexp '^https://github.com/@@REPO@@/' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums-sha256.txt
+          sha256sum -c checksums-sha256.txt --ignore-missing
+          ```
+
+          ### Licenses, SBOMs and source of the GPL parts
+
+          The code of this repository is MIT. `THIRD-PARTY-LICENSES.txt` has the licenses of the Rust crates inside the binaries;
+          `sbom-*.cdx.json` are CycloneDX SBOMs (the three binaries' crates, and `sbom-bundled-components` for Cloud Hypervisor, the CNI
+          plugins, crun and the Linux kernel). `THIRD-PARTY.md` lists everything bundled and its license.
+
+          **GPL source offer.** The guest root file system contains **crun** (GPL-2.0-or-later) and `vmlinux` is **Linux** (GPL-2.0-only):
+          crun @@CRUN@@, https://github.com/containers/crun/releases/download/@@CRUN@@/crun-@@CRUN@@.tar.gz ; Linux @@KERNEL@@,
+          https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-@@KERNEL@@.tar.xz, with our configuration in `guest/kernel/configs/` at tag TAG
+          (and `vmlinux-*.kconfig`, attached). If a link stops working, write to security@koedodb.com (subject "GPL source"): we send the
+          source for at least three years.
           INSTALL
 
           # Replace the placeholders
           sed -i -e "s|@@REPO@@|${GITHUB_REPOSITORY}|g" \
                  -e "s|@@OWNER@@|${GITHUB_REPOSITORY_OWNER,,}|g" \
                  -e "s|@@DIGEST@@|${INSTALLER_DIGEST}|g" \
+                 -e "s|@@CRUN@@|$(sed -n 's/.*\${CRUN_VERSION:=\([^}]*\)}.*/\1/p' hacks/versions.env)|g" \
+                 -e "s|@@KERNEL@@|$(sed -n 's/.*\${KERNEL_VERSION:=\([^}]*\)}.*/\1/p' hacks/versions.env)|g" \
                  -e "s/TAG/${GITHUB_REF_NAME}/g" /tmp/release-notes.md
 
       - name: Create GitHub Release

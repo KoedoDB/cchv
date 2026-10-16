@@ -48,3 +48,4 @@ typescript
 
 # written by the release workflow (see crates/common/build.rs)
 /BUILD-INFO
+*.cdx.json
