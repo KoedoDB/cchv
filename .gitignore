@@ -45,3 +45,6 @@ __.SYMDEF
 lib.rmeta
 *.rcgu.o
 typescript
+
+# written by the release workflow (see crates/common/build.rs)
+/BUILD-INFO

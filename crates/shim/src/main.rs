@@ -20,11 +20,26 @@ fn main() {
     if std::env::var_os(dockermode::HOLDER_ENV).is_some() {
         dockermode::holder_main();
     }
+    // `-v`, `-version` and `--version` are answered by the shim's flag parser (and `-info` by containerd's own call), which print
+    // these two. The revision carries what the binary was made from; it is built once, at start, and lives as long as the process
+    // (the field is a `&'static str`; the build's `cargo:rustc-env` values are not visible outside cloudhv-common, so they are
+    // read through its constants).
+    use cloudhv_common::buildinfo as b;
+    let revision: &'static str = Box::leak(
+        format!(
+            "{} (containerd-shimkit {}, containerd-shim {}; release bundles Cloud Hypervisor {})",
+            b::COMMIT,
+            b::SHIMKIT_VERSION,
+            b::CONTAINERD_SHIM_VERSION,
+            b::CH_VERSION
+        )
+        .into_boxed_str(),
+    );
     sandbox::cli::shim_main::<CloudHvInstance>(
         "io.containerd.cloudhv.v1",
         sandbox::cli::Version {
-            version: env!("CARGO_PKG_VERSION"),
-            revision: "dev",
+            version: b::VERSION,
+            revision,
         },
         None,
     );

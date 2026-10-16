@@ -21,6 +21,17 @@ mod validate;
 mod vm_lifecycle;
 
 fn main() -> Result<()> {
+    if cloudhv_common::buildinfo::wants_version(std::env::args().nth(1).as_deref()) {
+        use cloudhv_common::buildinfo as b;
+        print!(
+            "{}",
+            b::report(
+                "cloudhv-sandbox-daemon",
+                &[("release bundles Cloud Hypervisor", b::CH_VERSION)]
+            )
+        );
+        return Ok(());
+    }
     // The launcher of a confined Cloud Hypervisor is this same binary: it must not start a runtime (it forks and unshares).
     if std::env::args().nth(1).as_deref() == Some("--ch-launcher") {
         confine::launcher_main();

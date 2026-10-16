@@ -26,12 +26,26 @@ mod volumes;
 
 /// The guest agent runs as PID 1 (init) inside the Cloud Hypervisor VM.
 fn main() {
+    if cloudhv_common::buildinfo::wants_version(std::env::args().nth(1).as_deref()) {
+        use cloudhv_common::buildinfo as b;
+        print!(
+            "{}",
+            b::report(
+                "cloudhv-agent",
+                &[
+                    ("runs crun", b::CRUN_VERSION),
+                    ("guest kernel", b::KERNEL_VERSION)
+                ]
+            )
+        );
+        return;
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let pid = getpid();
     info!(
         "cloudhv-agent starting (version {}, pid={})",
-        env!("CARGO_PKG_VERSION"),
+        cloudhv_common::buildinfo::VERSION,
         pid
     );
 
