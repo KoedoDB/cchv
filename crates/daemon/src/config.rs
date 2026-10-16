@@ -101,7 +101,7 @@ pub struct DaemonConfig {
     #[serde(default = "default_max_shadow_vms")]
     pub max_shadow_vms: usize,
 
-    /// The longest request line, in bytes, and the most connections the API serves at once.
+    /// The longest request line, in bytes, and the most connections the API serves at once (see `default_max_connections`).
     #[serde(default = "default_max_request_bytes")]
     pub max_request_bytes: usize,
     #[serde(default = "default_max_connections")]
@@ -175,7 +175,10 @@ fn default_max_request_bytes() -> usize {
     8 * 1024 * 1024
 }
 fn default_max_connections() -> usize {
-    64
+    // Each running container holds a connection of its shim for as long as it runs (Wait blocks), and its log pump and any exec use
+    // more: with up to `max_active_vms` VMs of several containers each, tens of connections would stop pods from starting. Only root can
+    // connect (the socket is 0600 and the peer is checked), so the limit only guards against a runaway shim.
+    8192
 }
 fn default_ch_max_processes() -> u64 {
     1024

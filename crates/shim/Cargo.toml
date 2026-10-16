@@ -12,8 +12,8 @@ path = "src/main.rs"
 [dependencies]
 cloudhv-common = { workspace = true }
 
-# containerd shim protocol (via shimkit, without libcontainer/libseccomp/dbus)
-containerd-shimkit = { path = "../../third_party/containerd-shimkit", default-features = false }
+# containerd task service for a shim whose containers run in a VM: our cut-down shimkit (a start from containerd/runwasi), pinned by commit
+containerd-shimkit = { git = "https://github.com/KoedoDB/containerd-shimkit.git", rev = "e8f7dadb94959bad77b1a6d4cc090ca042d85559" }
 
 # containerd gRPC client (for image digest resolution)
 containerd-client = "0.8.0"

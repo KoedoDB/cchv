@@ -42,7 +42,7 @@ share a key; a tag that was moved cannot put one image's files under another's k
 
 ## Exec (`kubectl exec`, exec probes)
 
-containerd's `Exec` task calls are served by the vendored shimkit (`third_party/containerd-shimkit`, see its `KOEDODB.md`): it keeps the
+containerd's `Exec` task calls are served by our shimkit ([KoedoDB/containerd-shimkit](https://github.com/KoedoDB/containerd-shimkit), pinned by commit in `crates/shim/Cargo.toml`; see its `KOEDODB.md`): it keeps the
 exec table of each task with a small state machine (created, starting, started, exited, deleting), checks the order of the calls, and
 publishes `TaskExecAdded`, `TaskExecStarted` and `TaskExit` (with the exec id as `id`). It calls the optional `exec_*` methods of
 the `Instance`; this shim implements them in `crates/shim/src/exec.rs` by asking the daemon, which asks the guest agent. The process
