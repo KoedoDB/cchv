@@ -55,6 +55,20 @@ function demo() {
     trap cleanup exit
   fi
 
+  # The daemon opens its socket only after it has made the base snapshot and filled its pool of VMs, which takes a while on a
+  # slow (emulated) machine: wait for it instead of failing on the first start.
+  announce "Waiting for the sandbox daemon (up to 5 minutes)"
+  local waited
+  for waited in $(seq 1 150); do
+    [[ -S /run/cloudhv/daemon.sock ]] && break
+    sleep 2
+  done
+  if [[ ! -S /run/cloudhv/daemon.sock ]]; then
+    echo "The sandbox daemon has no socket after 5 minutes; its log:"
+    journalctl -u cloudhv-sandbox-daemon --no-pager | tail -40
+    return 1
+  fi
+
   announce "Pulling 'echo' container image"
   crictl pull hashicorp/http-echo:latest
 

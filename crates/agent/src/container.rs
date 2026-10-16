@@ -1408,7 +1408,9 @@ pub(crate) async fn wait_for_exit_pidfd(pid: u32, mut child: tokio::process::Chi
             let fd = fd as std::os::unix::io::RawFd;
             // SAFETY: fd is a valid pidfd from pidfd_open
             let owned = unsafe { std::os::unix::io::OwnedFd::from_raw_fd(fd) };
-            match tokio::io::unix::AsyncFd::new(owned) {
+            // SAFETY: `owned` is an open pidfd, and the AsyncFd owns it until it is dropped.
+            match unsafe { tokio::io::unix::AsyncFd::register(owned) }.map_err(std::io::Error::from)
+            {
                 Ok(async_fd) => {
                     // Wait for the fd to become readable (process exited)
                     match async_fd.readable().await {

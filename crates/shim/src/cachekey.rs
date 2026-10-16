@@ -59,7 +59,7 @@ fn unescape(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'\\'
-            && i + 3 < b.len() + 0
+            && i + 3 < b.len()
             && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c))
         {
             let v = (b[i + 1] - b'0') * 64 + (b[i + 2] - b'0') * 8 + (b[i + 3] - b'0');

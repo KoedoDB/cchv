@@ -837,7 +837,10 @@ pub(crate) async fn receive_master(
     .context("receiving the terminal panicked")??;
     set_nonblocking(fd.as_raw_fd())?;
     Ok(Master {
-        fd: AsyncFd::new(fd).context("register the terminal")?,
+        // SAFETY: `fd` is the open terminal master, and the AsyncFd owns it until it is dropped.
+        fd: unsafe { AsyncFd::register(fd) }
+            .map_err(std::io::Error::from)
+            .context("register the terminal")?,
     })
 }
 
@@ -1186,7 +1189,10 @@ mod tests {
         let slave = unsafe { OwnedFd::from_raw_fd(slave) };
         Some((
             Arc::new(Master {
-                fd: AsyncFd::new(master).unwrap(),
+                // SAFETY: `master` is an open terminal master, and the AsyncFd owns it until it is dropped.
+                fd: unsafe { AsyncFd::register(master) }
+                    .map_err(std::io::Error::from)
+                    .unwrap(),
             }),
             slave,
         ))

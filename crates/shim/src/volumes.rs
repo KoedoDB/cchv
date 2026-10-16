@@ -497,7 +497,7 @@ fn resolve_beneath_by_hand(root: &OwnedFd, rel: &str) -> std::io::Result<OwnedFd
                 let n = unsafe {
                     libc::readlinkat(
                         fd.as_raw_fd(),
-                        b"\0".as_ptr() as *const libc::c_char,
+                        c"".as_ptr(),
                         buf.as_mut_ptr() as *mut libc::c_char,
                         buf.len(),
                     )
