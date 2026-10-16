@@ -16,6 +16,7 @@ use containerd_shimkit::sandbox::Error;
 use log::info;
 
 use crate::config::{load_config, load_shim_limits};
+use crate::dockermode::{self, NetnsHolder};
 use crate::daemon_client::{AcquireRequest, DaemonClient};
 use crate::erofs_cache::{CacheConfig, Lease};
 use crate::exec::ExecProc;
@@ -81,6 +82,9 @@ async fn release_vm(vm_state: &SharedVmState) {
             info!("daemon release failed (non-fatal): {e:#}");
         }
     }
+    if let Some(ref cg) = vm_state.cgroups_path {
+        remove_pod_cgroup_child(cg);
+    }
     if let (Some(ref netns), Some(ref tap)) = (&vm_state.netns, &vm_state.tap_name) {
         crate::netns::cleanup_tap(netns, tap).await;
     }
@@ -130,6 +134,11 @@ pub struct CloudHvInstance {
     execs: Mutex<HashMap<String, Arc<ExecProc>>>,
     /// The forwarding of the stdin pipe to the container's terminal, for a container that has both (`kubectl run -it`, `attach`).
     init_input: Mutex<Option<Arc<ExecProc>>>,
+    /// The spec has no CRI annotations: a client that is not Kubernetes (Docker, nerdctl). The one container is the whole "pod"
+    /// (see `dockermode.rs`).
+    docker: bool,
+    /// The process that holds the container's network namespace, when the spec asks the runtime to make one (Docker does).
+    holder: Option<Arc<NetnsHolder>>,
 }
 
 impl Instance for CloudHvInstance {
@@ -146,6 +155,20 @@ impl Instance for CloudHvInstance {
             .unwrap_or(&id)
             .to_string();
 
+        // Not Kubernetes: no CRI annotations. If the spec asks for a new network namespace, make it now: the client takes it from the pid
+        // that `State` shows right after `Create`, and sets its network up before `Start`.
+        let docker = !dockermode::is_cri(&spec);
+        let holder = if docker && dockermode::wants_new_netns(&spec) {
+            let h = tokio::task::spawn_blocking(NetnsHolder::spawn)
+                .await
+                .map_err(|e| Error::Any(anyhow::anyhow!("namespace holder task: {e}")))?
+                .map_err(|e| Error::Any(anyhow::anyhow!("{e}")))?;
+            info!("container {id}: network namespace made by holder pid {}", h.pid());
+            Some(Arc::new(h))
+        } else {
+            None
+        };
+
         Ok(Self {
             id: id.clone(),
             sandbox_id,
@@ -154,7 +177,13 @@ impl Instance for CloudHvInstance {
             cfg: cfg.clone(),
             execs: Mutex::default(),
             init_input: Mutex::default(),
+            docker,
+            holder,
         })
+    }
+
+    fn pid_hint(&self) -> Option<u32> {
+        self.holder.as_ref().map(|h| h.pid())
     }
 
     async fn start(&self) -> Result<u32, Error> {
@@ -169,14 +198,16 @@ impl Instance for CloudHvInstance {
             .unwrap_or("container");
 
         match container_type {
-            "sandbox" => self.start_sandbox().await,
+            "sandbox" => self.start_sandbox(None).await,
+            _ if self.docker => self.start_docker().await,
             _ => self.start_container().await,
         }
     }
 
     async fn kill(&self, signal: u32) -> Result<(), Error> {
         let t0 = std::time::Instant::now();
-        let is_sandbox = self.id == self.sandbox_id;
+        // (Under Docker the container is its own sandbox, but a signal is for the container: the VM is given back at delete.)
+        let is_sandbox = self.id == self.sandbox_id && !self.docker;
         info!(
             "TIMING kill_enter {} @{} signal={} is_sandbox={}",
             self.id,
@@ -194,6 +225,9 @@ impl Instance for CloudHvInstance {
                     let client = DaemonClient::new(&vm_state.daemon_socket);
                     if let Err(e) = client.release_sandbox(&vm_state.daemon_vm_id).await {
                         info!("daemon release failed (non-fatal): {e:#}");
+                    }
+                    if let Some(ref cg) = vm_state.cgroups_path {
+                        remove_pod_cgroup_child(cg);
                     }
                 }
 
@@ -260,6 +294,9 @@ impl Instance for CloudHvInstance {
                 if let Err(e) = client.release_sandbox(&vm_state.daemon_vm_id).await {
                     info!("daemon release failed (non-fatal): {e:#}");
                 }
+                if let Some(ref cg) = vm_state.cgroups_path {
+                    remove_pod_cgroup_child(cg);
+                }
 
                 // Clean up TAP
                 if let (Some(ref netns), Some(ref tap)) = (&vm_state.netns, &vm_state.tap_name) {
@@ -290,6 +327,11 @@ impl Instance for CloudHvInstance {
                     prev - 1
                 );
             }
+        }
+
+        // The network namespace of a Docker container is not needed any more (dockerd removes its own bind mount of it).
+        if let Some(h) = &self.holder {
+            h.kill();
         }
 
         let _ = self.exit.set((0, Utc::now()));
@@ -331,7 +373,8 @@ impl Instance for CloudHvInstance {
     }
 
     async fn exec_create(&self, cfg: &ExecConfig) -> Result<(), Error> {
-        if self.id == self.sandbox_id {
+        // (Under Docker the container is its own sandbox, and is the one that runs the exec.)
+        if self.id == self.sandbox_id && !self.docker {
             return Err(Error::FailedPrecondition(
                 "the sandbox (pause) container cannot run an exec process".into(),
             ));
@@ -403,12 +446,14 @@ impl CloudHvInstance {
 impl CloudHvInstance {
     /// Set up sandbox state. No VM interaction — the daemon provides the
     /// VM (including networking) when the first container starts.
-    async fn start_sandbox(&self) -> Result<u32, Error> {
+    ///
+    /// `netns`: the network namespace to use instead of the one of the spec (`Some(None)`: no network), for a client that made its own.
+    async fn start_sandbox(&self, netns: Option<Option<String>>) -> Result<u32, Error> {
         let sandbox_id = self.id.clone();
         let t_total = std::time::Instant::now();
 
         let spec_path = self.bundle.join("config.json");
-        let sandbox_spec = parse_sandbox_spec(&spec_path);
+        let sandbox_spec = parse_sandbox_spec(&spec_path, self.docker);
 
         let config = load_config(None).ctx("config error")?;
         let limits = load_shim_limits(None).ctx("config error")?;
@@ -441,7 +486,7 @@ impl CloudHvInstance {
             ch_pid: 0,
             container_count: AtomicUsize::new(1),
             tap_name: None,
-            netns: sandbox_spec.netns.clone(),
+            netns: netns.unwrap_or_else(|| sandbox_spec.netns.clone()),
             cgroups_path: sandbox_spec.cgroups_path.clone(),
             daemon_vm_id: String::new(),
             daemon_socket: config.daemon_socket.clone(),
@@ -461,6 +506,32 @@ impl CloudHvInstance {
         );
 
         Ok(std::process::id())
+    }
+
+    /// A container of a client that is not Kubernetes: no sandbox came first, so the sandbox's state is made here, then the container is
+    /// started in it. The client has already set up the network in the namespace the holder keeps (it does so before `Start`); with
+    /// none there (`--network none`) the VM has no network. A namespace of the spec's own (a path) is used as it is.
+    async fn start_docker(&self) -> Result<u32, Error> {
+        let netns = match &self.holder {
+            Some(h) if h.has_interface() => Some(Some(h.netns_path())),
+            Some(_) => Some(None),
+            None => None,
+        };
+        self.start_sandbox(netns).await?;
+        // The sandbox is not a container of its own here: the one container is counted once, so that its delete gives the VM back.
+        if let Some(vm) = get_vm(&self.sandbox_id) {
+            vm.container_count.store(0, Ordering::SeqCst);
+        }
+        let pid = self.start_container().await;
+        match pid {
+            // dockerd keeps the task's pid (it already took the namespace from it): the same as `State` showed since `Create`.
+            Ok(pid) => Ok(self.holder.as_ref().map(|h| h.pid()).unwrap_or(pid)),
+            Err(e) => {
+                // The task does not start: the sandbox state made above must not stay.
+                forget_sandbox(&self.sandbox_id);
+                Err(e)
+            }
+        }
     }
 
     /// Acquire a VM from the daemon and start the container.
@@ -484,7 +555,13 @@ impl CloudHvInstance {
             Error::Any(anyhow::anyhow!("sandbox VM not found: {}", self.sandbox_id))
         })?;
 
-        let rootfs_path = self.bundle.join("rootfs");
+        let rootfs_path = {
+            let spec: serde_json::Value = std::fs::read_to_string(self.bundle.join("config.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok())
+                .unwrap_or_default();
+            dockermode::rootfs_path(&self.bundle, &spec, self.docker)
+        };
 
         // The key of the erofs image (and of the daemon's warm snapshot) says what is mounted at the rootfs: the layers of the
         // mount, plus the image's digest if containerd gives it. When what is mounted cannot be told, the container does not start.
@@ -655,7 +732,7 @@ impl CloudHvInstance {
             // CH there so containerd can track the VM process for resource
             // accounting and lifecycle management.
             if let Some(ref cg) = new_state.cgroups_path {
-                match place_in_pod_cgroup(acquired.ch_pid, cg) {
+                match place_vm_in_pod_cgroup(acquired.ch_pid, acquired.ch_cgroup.as_deref(), cg) {
                     Ok(()) => info!("CH pid {} placed in cgroup {}", acquired.ch_pid, cg),
                     Err(e) if limits.require_pod_cgroup => {
                         // Outside the pod's cgroup the VM would run without the pod's limits: give it back and fail the pod.
@@ -888,7 +965,7 @@ async fn wait_for_pid_exit(pid: u32) {
     }
 }
 
-fn parse_sandbox_spec(spec_path: &std::path::Path) -> SandboxSpec {
+fn parse_sandbox_spec(spec_path: &std::path::Path, docker: bool) -> SandboxSpec {
     let spec_str = std::fs::read_to_string(spec_path).unwrap_or_default();
     let spec: serde_json::Value = serde_json::from_str(&spec_str).unwrap_or_default();
 
@@ -913,7 +990,12 @@ fn parse_sandbox_spec(spec_path: &std::path::Path) -> SandboxSpec {
     SandboxSpec {
         netns,
         cgroups_path,
-        limits: limits_from_spec(&spec),
+        // Kubernetes puts a pod's limits on the sandbox as annotations; Docker puts a container's on its own resources.
+        limits: if docker {
+            dockermode::limits_from_resources(&spec)
+        } else {
+            limits_from_spec(&spec)
+        },
     }
 }
 
@@ -980,7 +1062,7 @@ pub fn stable_hash_hex(input: &str) -> String {
 
 /// A cgroups path as containerd writes it: the direct form `/k8s.io/<id>` (components of letters, digits and `_.-`; no `..`, no empty
 /// component), or the systemd form `<slice>:<prefix>:<id>` (a `.slice` name, a prefix and an id of the same characters, no `/`).
-fn valid_cgroups_path(p: &str) -> bool {
+pub fn valid_cgroups_path(p: &str) -> bool {
     let word = |s: &str| {
         !s.is_empty()
             && s.len() <= 255
@@ -994,6 +1076,54 @@ fn valid_cgroups_path(p: &str) -> bool {
     }
     let trimmed = p.strip_prefix('/').unwrap_or(p);
     !trimmed.is_empty() && trimmed.len() <= 1024 && trimmed.split('/').all(word)
+}
+
+/// Put the whole VM into the pod's cgroup: the process the daemon names (`ch_pid`, the launcher of an unprivileged Cloud Hypervisor) and
+/// everything else in the VM's cgroup in the daemon's hierarchy (Cloud Hypervisor itself is the launcher's child and would otherwise stay
+/// outside, with none of the pod's limits).
+fn place_vm_in_pod_cgroup(ch_pid: u32, vm_cgroup: Option<&str>, cgroups_path: &str) -> Result<(), String> {
+    place_in_pod_cgroup(ch_pid, cgroups_path)?;
+    let Some(vm_cg) = vm_cgroup else { return Ok(()) };
+    if !vm_cg.starts_with("/sys/fs/cgroup/") || vm_cg.contains("..") || vm_cg.contains('\n') {
+        return Err(format!("the VM's cgroup {vm_cg:?} is not under /sys/fs/cgroup"));
+    }
+    // Where did the launcher land? (/proc/<pid>/cgroup says: `0::/kubepods/burstable/pod<uid>/<id>`)
+    let line = std::fs::read_to_string(format!("/proc/{ch_pid}/cgroup")).map_err(|e| format!("read the cgroup of {ch_pid}: {e}"))?;
+    let dest = dest_cgroup_of(&line).ok_or_else(|| format!("no cgroup in {line:?}"))?;
+    let dest_procs = format!("/sys/fs/cgroup{dest}/cgroup.procs");
+    for _ in 0..5 {
+        let pids = std::fs::read_to_string(format!("{vm_cg}/cgroup.procs")).unwrap_or_default();
+        let mut moved = 0;
+        for pid in pids.lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
+            if std::fs::write(&dest_procs, pid.to_string()).is_ok() {
+                moved += 1;
+            }
+        }
+        if moved == 0 {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+/// The cgroup v2 path in the text of /proc/<pid>/cgroup (the `0::<path>` line).
+fn dest_cgroup_of(proc_cgroup: &str) -> Option<String> {
+    let line = proc_cgroup.lines().find(|l| l.starts_with("0::"))?;
+    let path = line.trim_start_matches("0::").trim();
+    if path.is_empty() || path == "/" || path.contains("..") {
+        return None;
+    }
+    Some(path.to_string())
+}
+
+/// Take away the child cgroup `place_in_pod_cgroup` made for the VM (best effort: the Cloud Hypervisor process is gone by now, and a
+/// cgroup that still has processes cannot be removed, which is fine). The kubelet could not remove the pod's cgroup while it was there.
+fn remove_pod_cgroup_child(cgroups_path: &str) {
+    if cgroups_path.contains(':') || !valid_cgroups_path(cgroups_path) {
+        return;
+    }
+    let dir = format!("/sys/fs/cgroup/{}", cgroups_path.trim_start_matches('/'));
+    let _ = std::fs::remove_dir(&dir);
 }
 
 /// Place a process in a pod cgroup. Supports cgroup v2 (unified) with both
@@ -1013,6 +1143,25 @@ fn place_in_pod_cgroup(pid: u32, cgroups_path: &str) -> Result<(), String> {
     if std::path::Path::new(&full_path).exists() {
         std::fs::write(&full_path, pid.to_string()).map_err(|e| format!("{e}"))?;
         return Ok(());
+    }
+
+    // The cgroup of the container itself is made by the runtime that runs it (runc); a VM runtime has nothing that makes it. The pod's
+    // cgroup (its parent) is the kubelet's and exists with the pod's limits, so the VM goes into a child of it, made here: the pod's
+    // CPU and memory limits then apply to the Cloud Hypervisor process, as they would to a container. `remove_pod_cgroup_child` takes it away again.
+    if !cgroups_path.contains(':') {
+        let dir = format!("{cgroup_base}/{}", cgroups_path.trim_start_matches('/'));
+        if let Some(parent) = std::path::Path::new(&dir).parent() {
+            if parent.join("cgroup.procs").exists() {
+                match std::fs::create_dir(&dir) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => return Err(format!("create cgroup {dir}: {e}")),
+                }
+                std::fs::write(format!("{dir}/cgroup.procs"), pid.to_string())
+                    .map_err(|e| format!("write to {dir}/cgroup.procs: {e}"))?;
+                return Ok(());
+            }
+        }
     }
 
     // Systemd cgroup v2: slice:scope_prefix:id
@@ -1073,6 +1222,16 @@ fn build_systemd_cgroup_path(slice: &str) -> String {
 #[cfg(test)]
 mod cgroup_path_tests {
     use super::valid_cgroups_path as ok;
+
+    #[test]
+    fn the_cgroup_of_a_process_is_read_from_its_cgroup_file() {
+        use super::dest_cgroup_of as d;
+        assert_eq!(d("0::/kubepods/burstable/pod1/abc\n").as_deref(), Some("/kubepods/burstable/pod1/abc"));
+        assert_eq!(d("12:cpu:/x\n0::/a/b\n").as_deref(), Some("/a/b"));
+        assert_eq!(d("0::/\n"), None);
+        assert_eq!(d("0::/a/../b\n"), None);
+        assert_eq!(d(""), None);
+    }
 
     #[test]
     fn cgroups_paths_are_checked() {

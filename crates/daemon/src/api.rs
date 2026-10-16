@@ -238,7 +238,7 @@ fn error(what: &str, e: impl std::fmt::Display) -> serde_json::Value {
 }
 
 /// An identifier field of a request that must be there and must be plain.
-fn required_id<'a>(request: &'a serde_json::Value, key: &str) -> Result<&'a str, serde_json::Value> {
+pub(crate) fn required_id<'a>(request: &'a serde_json::Value, key: &str) -> Result<&'a str, serde_json::Value> {
     let v = field(request, key);
     validate::check_id(key, v).map_err(|e| error("bad request", e))?;
     Ok(v)
@@ -425,6 +425,7 @@ async fn handle_acquire(
                 "vsock_socket": vm.vsock_socket.to_string_lossy(),
                 "cid": vm.cid,
                 "ch_pid": vm.ch_pid,
+                "ch_cgroup": cgroup_of(&vm.vm_id),
                 "from_snapshot": false,
                 "container_pid": container_pid,
                 "tap_name": tap_name_out,
@@ -500,6 +501,7 @@ async fn finish_warm_restore(
         "vsock_socket": vsock_socket.to_string_lossy(),
         "cid": cid,
         "ch_pid": ch_pid,
+        "ch_cgroup": cgroup_of(vm_id),
         "from_snapshot": true,
         "container_pid": container_pid,
         "tap_name": tap_name_out,
@@ -608,6 +610,7 @@ async fn acquire_sized(
         "vsock_socket": vsock_socket.to_string_lossy(),
         "cid": cid,
         "ch_pid": ch_pid,
+        "ch_cgroup": cgroup_of(&vm_id),
         "from_snapshot": false,
         "container_pid": container_pid,
         "tap_name": tap_name,
@@ -1139,7 +1142,7 @@ fn terminal_from_request(request: &serde_json::Value) -> bool {
 }
 
 /// The `volumes` of a request (see the shim's `volumes.rs`): [{destination, source, readonly, files: [{path, content (base64), mode}]}].
-fn volumes_from_request(request: &serde_json::Value) -> Vec<cloudhv_proto::VolumeMount> {
+pub(crate) fn volumes_from_request(request: &serde_json::Value) -> Vec<cloudhv_proto::VolumeMount> {
     use base64::Engine;
     let list = match request.get("volumes").and_then(|v| v.as_array()) {
         Some(l) => l,
@@ -1267,4 +1270,12 @@ mod request_tests {
         assert_eq!(v.len(), MAX_VOLUMES);
         assert_eq!(v[0].files[0].mode, 0o755, "the setuid bit is not passed");
     }
+}
+
+/// The cgroup directory of the VM (null when cgroups are not in use). `ch_pid` is the launcher's; Cloud Hypervisor itself is its child,
+/// in this same cgroup. The shim moves everything in it into the pod's cgroup, so that the pod's limits apply to the VM.
+fn cgroup_of(vm_id: &str) -> Option<String> {
+    crate::cgroup::path_of(vm_id)
+        .filter(|p| p.exists())
+        .map(|p| p.to_string_lossy().to_string())
 }

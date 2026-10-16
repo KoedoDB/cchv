@@ -35,6 +35,8 @@ pub struct AcquireRequest<'a> {
 pub struct AcquiredVm {
     pub vm_id: String,
     pub ch_pid: u32,
+    /// The VM's cgroup directory in the daemon's hierarchy (all of its processes are in it), when the daemon uses cgroups.
+    pub ch_cgroup: Option<String>,
     pub from_snapshot: bool,
     pub container_pid: u32,
     pub tap_name: String,
@@ -89,6 +91,7 @@ impl DaemonClient {
         Ok(AcquiredVm {
             vm_id: resp["vm_id"].as_str().context("missing vm_id")?.to_string(),
             ch_pid: resp["ch_pid"].as_u64().context("missing ch_pid")? as u32,
+            ch_cgroup: resp["ch_cgroup"].as_str().map(String::from),
             from_snapshot: resp["from_snapshot"].as_bool().unwrap_or(false),
             container_pid: resp["container_pid"].as_u64().unwrap_or(0) as u32,
             tap_name: resp["tap_name"].as_str().unwrap_or("").to_string(),

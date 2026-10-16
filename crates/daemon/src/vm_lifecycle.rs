@@ -770,7 +770,7 @@ pub async fn api_request_with_fds(
     let fds = fds.to_vec();
     let (method, path) = (method.to_string(), path.to_string());
     tokio::task::spawn_blocking(move || -> Result<()> {
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::os::unix::io::AsRawFd;
         let mut stream = std::os::unix::net::UnixStream::connect(&socket_path)
             .with_context(|| format!("connect {}", socket_path.display()))?;
@@ -803,14 +803,11 @@ pub async fn api_request_with_fds(
         }
         stream.write_all(&bytes[sent as usize..])?;
 
-        // The answer is small; a Cloud Hypervisor that keeps writing is not read for more than a megabyte.
-        let mut answer = Vec::new();
-        let _ = stream.take(1 << 20).read_to_end(&mut answer);
-        let text = String::from_utf8_lossy(&answer);
-        let status = text.split_whitespace().nth(1).unwrap_or("?");
-        if !status.starts_with('2') {
-            let body = text.split("\r\n\r\n").nth(1).unwrap_or("");
-            anyhow::bail!("CH API {method} {path}: {status} {body}");
+        // One answer, read by its Content-Length: Cloud Hypervisor does not close the connection after it (`Connection: close` is not
+        // honoured), so waiting for the end of the stream waited for the read timeout, ten seconds, on every request.
+        let (status, answer) = read_http_answer(&mut stream).context("read the answer")?;
+        if !(200..300).contains(&status) {
+            anyhow::bail!("CH API {method} {path}: {status} {}", String::from_utf8_lossy(&answer));
         }
         Ok(())
     })
@@ -858,4 +855,105 @@ pub async fn connect_agent(
     let health = cloudhv_proto::HealthServiceClient::new(client);
 
     Ok((agent, health))
+}
+
+/// Read one HTTP/1.1 answer from a stream that may stay open: the status line and headers, then exactly `Content-Length` bytes of body
+/// (none if there is no such header). The head is limited to 64 KiB and the body to 1 MiB, so a Cloud Hypervisor that misbehaves cannot make
+/// this read without end.
+fn read_http_answer<R: std::io::Read>(r: &mut R) -> std::io::Result<(u16, Vec<u8>)> {
+    use std::io::{Error, ErrorKind};
+    const MAX_HEAD: usize = 64 * 1024;
+    const MAX_BODY: usize = 1 << 20;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let head_end = loop {
+        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i + 4;
+        }
+        if buf.len() > MAX_HEAD {
+            return Err(Error::new(ErrorKind::InvalidData, "the answer's head is too long"));
+        }
+        let n = r.read(&mut chunk)?;
+        if n == 0 {
+            return Err(Error::new(ErrorKind::UnexpectedEof, "the connection closed before the end of the answer's head"));
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    };
+    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+    let status: u16 = head
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|c| c.parse().ok())
+        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "no status in the answer"))?;
+    let length: usize = head
+        .lines()
+        .skip(1)
+        .find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.trim().eq_ignore_ascii_case("content-length").then(|| v.trim().parse().ok())?
+        })
+        .unwrap_or(0);
+    if length > MAX_BODY {
+        return Err(Error::new(ErrorKind::InvalidData, "the answer's body is too long"));
+    }
+    while buf.len() < head_end + length {
+        let n = r.read(&mut chunk)?;
+        if n == 0 {
+            break; // a short body: what there is
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+    let end = (head_end + length).min(buf.len());
+    Ok((status, buf[head_end..end].to_vec()))
+}
+
+#[cfg(test)]
+mod http_answer_tests {
+    use super::read_http_answer;
+
+    /// A reader that gives its data in small pieces and then blocks forever (a connection that stays open): reading to the end of the stream
+    /// would never return; reading the answer by its length does.
+    struct OpenStream {
+        data: Vec<u8>,
+        pos: usize,
+        step: usize,
+    }
+    impl std::io::Read for OpenStream {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            if self.pos >= self.data.len() {
+                // would block: the test fails by this error instead of hanging
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "the connection stayed open and nothing more came"));
+            }
+            let n = self.step.min(out.len()).min(self.data.len() - self.pos);
+            out[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    fn open(data: &str, step: usize) -> OpenStream {
+        OpenStream { data: data.as_bytes().to_vec(), pos: 0, step }
+    }
+
+    #[test]
+    fn the_answer_is_read_by_its_length_without_waiting_for_the_connection_to_close() {
+        let (st, body) = read_http_answer(&mut open("HTTP/1.1 204 No Content\r\nServer: x\r\n\r\n", 7)).unwrap();
+        assert_eq!((st, body.len()), (204, 0));
+        let (st, body) = read_http_answer(&mut open("HTTP/1.1 500 Internal Server Error\r\ncontent-length: 11\r\n\r\nhello world", 3)).unwrap();
+        assert_eq!(st, 500);
+        assert_eq!(body, b"hello world");
+        let (st, body) = read_http_answer(&mut open("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}", 1000)).unwrap();
+        assert_eq!((st, body.as_slice()), (200, &b"{}"[..]));
+    }
+
+    #[test]
+    fn an_odd_answer_is_an_error_not_a_hang() {
+        assert!(read_http_answer(&mut open("", 10)).is_err(), "closed with nothing");
+        assert!(read_http_answer(&mut open("HTTP/1.1 200 OK\r\nContent-Le", 10)).is_err(), "no end of head");
+        assert!(read_http_answer(&mut open("garbage\r\n\r\n", 10)).is_err(), "no status");
+        assert!(read_http_answer(&mut open("HTTP/1.1 200 OK\r\nContent-Length: 99999999\r\n\r\n", 10)).is_err(), "a body that is too long");
+        let long = format!("HTTP/1.1 200 OK\r\n{}", "X: y\r\n".repeat(20000));
+        assert!(read_http_answer(&mut open(&long, 4096)).is_err(), "a head that is too long");
+    }
 }
