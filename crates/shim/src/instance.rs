@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Duration;
 
@@ -110,6 +110,9 @@ fn get_vm(sandbox_id: &str) -> Option<Arc<SharedVmState>> {
 // Shared VM state (thin — daemon owns the VM)
 // ---------------------------------------------------------------------------
 
+/// The exit status of an instance, set once.
+type ExitCell = Arc<WaitableCell<(u32, DateTime<Utc>)>>;
+
 struct SharedVmState {
     /// Cloud Hypervisor process PID (for exit watching + cgroup placement).
     ch_pid: u32,
@@ -126,6 +129,28 @@ struct SharedVmState {
     /// The VM this pod needs, from its limits (0: the daemon's default). The VM is acquired when the first container starts.
     memory_mb: u64,
     vcpus: u32,
+    /// The exit of the sandbox (pause) instance of this pod. Kubernetes re-creates a pod's sandbox only when the sandbox task exits,
+    /// and the sandbox acquires no VM of its own, so when the pod's VM is lost this is what ends the sandbox (see `vm_lost`).
+    sandbox_exit: Option<ExitCell>,
+    /// The pod's VM is gone (killed, the daemon restarted, out of memory on the host). Shared by the state made at the sandbox and
+    /// the one made when the VM was acquired.
+    lost: Arc<AtomicBool>,
+}
+
+/// The pod's VM is lost: end the sandbox with 137, so that containerd reports it not ready and the kubelet makes the pod again, and
+/// make every container that starts later in this sandbox fail at once (not on the daemon's "VM not found").
+fn vm_lost(vm: &SharedVmState, why: &str) {
+    if !vm.lost.swap(true, Ordering::SeqCst) {
+        log::warn!("the VM of the sandbox is lost ({why}): the sandbox ends with exit code 137");
+    }
+    if let Some(cell) = &vm.sandbox_exit {
+        let _ = cell.set((137, Utc::now()));
+    }
+}
+
+/// Whether the process the daemon named for the VM (the launcher of Cloud Hypervisor) is still there. 0 means no VM yet.
+fn vm_process_alive(ch_pid: u32) -> bool {
+    ch_pid == 0 || std::path::Path::new(&format!("/proc/{ch_pid}")).exists()
 }
 
 // ---------------------------------------------------------------------------
@@ -148,6 +173,10 @@ pub struct CloudHvInstance {
     docker: bool,
     /// The process that holds the container's network namespace, when the spec asks the runtime to make one (Docker does).
     holder: Option<Arc<NetnsHolder>>,
+    /// This container was counted in its sandbox's container count (it started). A container that never started was not counted
+    /// and must not be taken off the count at its delete: the kubelet deletes every failed attempt, and each delete made the count
+    /// of a pod that was restarting smaller, until the sandbox was taken for finished and its state forgotten.
+    counted: AtomicBool,
 }
 
 impl Instance for CloudHvInstance {
@@ -191,6 +220,7 @@ impl Instance for CloudHvInstance {
             init_input: Mutex::default(),
             docker,
             holder,
+            counted: AtomicBool::new(false),
         })
     }
 
@@ -302,8 +332,16 @@ impl Instance for CloudHvInstance {
         }
         let t_total = std::time::Instant::now();
 
+        // A container of a pod (not the sandbox, not Docker's single container) that never started was never counted.
+        let never_counted =
+            !self.docker && self.id != self.sandbox_id && !self.counted.load(Ordering::SeqCst);
+
         if let Some(vm_state) = get_vm(&self.sandbox_id) {
-            let prev = vm_state.container_count.fetch_sub(1, Ordering::SeqCst);
+            let prev = if never_counted {
+                usize::MAX
+            } else {
+                vm_state.container_count.fetch_sub(1, Ordering::SeqCst)
+            };
 
             if prev <= 1 {
                 // Last container — release VM to daemon
@@ -341,7 +379,11 @@ impl Instance for CloudHvInstance {
                     self.id,
                     epoch_ms(),
                     t_total.elapsed().as_millis(),
-                    prev - 1
+                    if never_counted {
+                        vm_state.container_count.load(Ordering::SeqCst)
+                    } else {
+                        prev - 1
+                    }
                 );
             }
         }
@@ -522,6 +564,8 @@ impl CloudHvInstance {
             daemon_socket: config.daemon_socket.clone(),
             memory_mb: size.memory_mb,
             vcpus: size.vcpus,
+            sandbox_exit: Some(self.exit.clone()),
+            lost: Arc::new(AtomicBool::new(false)),
         });
 
         VMS.write()
@@ -584,6 +628,15 @@ impl CloudHvInstance {
         let vm_state = get_vm(&self.sandbox_id).ok_or_else(|| {
             Error::Any(anyhow::anyhow!("sandbox VM not found: {}", self.sandbox_id))
         })?;
+        // The VM of this pod is gone: a container cannot start in it. The sandbox ends (137), and the kubelet makes the pod again with
+        // a new sandbox and a new VM.
+        if vm_state.lost.load(Ordering::SeqCst) || !vm_process_alive(vm_state.ch_pid) {
+            vm_lost(&vm_state, "found at the start of a container");
+            return Err(Error::Any(anyhow::anyhow!(
+                "the VM of this pod {} is gone; the sandbox ends and the pod is made again",
+                self.sandbox_id
+            )));
+        }
 
         let rootfs_path = {
             let spec: serde_json::Value = std::fs::read_to_string(self.bundle.join("config.json"))
@@ -715,8 +768,17 @@ impl CloudHvInstance {
                     &volumes,
                     self.cfg.terminal,
                 )
-                .await
-                .ctx("daemon add_container")?;
+                .await;
+            let resp = match resp {
+                Ok(r) => r,
+                Err(e) => {
+                    if !vm_process_alive(vm_state.ch_pid) || format!("{e:#}").contains("not found")
+                    {
+                        vm_lost(&vm_state, "the daemon no longer has it");
+                    }
+                    return Err(Error::Any(anyhow::anyhow!("daemon add_container: {e:#}")));
+                }
+            };
             let acq_ms = t_acquire.elapsed().as_millis();
             (vm_state.clone(), false, acq_ms, resp)
         } else {
@@ -765,6 +827,8 @@ impl CloudHvInstance {
                 daemon_socket: vm_state.daemon_socket.clone(),
                 memory_mb: vm_state.memory_mb,
                 vcpus: vm_state.vcpus,
+                sandbox_exit: vm_state.sandbox_exit.clone(),
+                lost: vm_state.lost.clone(),
             });
 
             VMS.write()
@@ -836,12 +900,19 @@ impl CloudHvInstance {
                                 // stops it, or has already) before the pod is restarted.
                                 log::warn!("waiting for {cid} failed, releasing its VM: {e:#}");
                                 release_vm(&watched).await;
+                                vm_lost(&watched, "the daemon cannot be asked about the container");
                                 (137, String::new())
                             }
                         };
+                        // A container that ended on its own leaves the VM running (the kubelet restarts it in the same sandbox). A VM
+                        // whose process is gone ended the container: the sandbox ends too.
+                        let vm_gone = !vm_process_alive(ch_pid);
+                        if vm_gone {
+                            vm_lost(&watched, "its process is gone");
+                        }
                         // The output the container wrote before it exited is still in the guest: let the pump carry it first (a pump
                         // that cannot finish, as the pipes have no reader, does not hold the exit for long).
-                        if exit_code != 137 {
+                        if exit_code != 137 && !vm_gone {
                             let _ = tokio::time::timeout(LOG_DRAIN_TIMEOUT, pump).await;
                         }
                         let _ = exit.set((exit_code, Utc::now()));
@@ -851,6 +922,7 @@ impl CloudHvInstance {
                         );
                     }
                     _ = wait_for_pid_exit(ch_pid) => {
+                        vm_lost(&watched, "its process exited");
                         let _ = exit.set((137, Utc::now()));
                         log::info!(
                             "TIMING exit_watcher {} @{}: ch_pid_exit took={}ms",
@@ -875,6 +947,7 @@ impl CloudHvInstance {
         }
 
         active_state.container_count.fetch_add(1, Ordering::SeqCst);
+        self.counted.store(true, Ordering::SeqCst);
 
         info!(
             "TIMING start_container {} @{}: erofs={}ms acquire={}ms total={}ms from_snapshot={} additional={}",
