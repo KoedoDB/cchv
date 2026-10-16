@@ -39,18 +39,20 @@ chmod 755 "${ROOTFS_DIR}/bin/cloudhv-agent"
 
 # Install crun (lightweight OCI runtime, must be statically linked for the VM guest)
 echo "Installing crun..."
-CRUN_VERSION="1.20"
+CRUN_VERSION="1.30.1"
 ARCH=$(uname -m)
-# SHA-256 of the release binaries (taken from the downloads of 2026-10-16: the amd64 one twice, identical; crun's own signature
-# was not checked). The binary runs as root in every VM, so a changed download must stop the build. Check crun's security advisories
-# before changing the version, and update the hashes with it.
+# SHA-256 of the release binaries (the same as hacks/checksums.txt). Taken from the downloads of 2026-10-16 (the amd64 one twice,
+# identical) and checked against the release's detached .asc signatures, which verify with the maintainer's key
+# AC40 4C1C 0BF7 35C6 3FF4 D562 263D 6DF2 E163 E1EA (signing subkey AF60FCA3CDAA6DEAD157EA3A67E38F7A8BA21772). The binary runs as root
+# in every VM, so a changed download must stop the build. Check crun's security advisories before changing the version, and update the
+# hashes (here and in hacks/checksums.txt) with it.
 case "${ARCH}" in
     x86_64)
         CRUN_ARCH="amd64"
-        CRUN_SHA256="ff8407185ec474d7c60f697032b7b1fc1fb028fbd0bf13c7d5da9a7d9a479e38" ;;
+        CRUN_SHA256="e7b059390e27d0f283e1debbe89d9c5847870f3d8325f31ccd954533fdd6ea78" ;;
     aarch64)
         CRUN_ARCH="arm64"
-        CRUN_SHA256="1e06f605dd8f07c640c59113ed161143ef7786962b11e44804918070e374d5ea" ;;
+        CRUN_SHA256="6ac05ea41343cf91b12832c69f9a2a8c6dc5380032f4c0e02a46cc6aba8804f5" ;;
     *) echo "Unsupported arch: ${ARCH}"; exit 1 ;;
 esac
 wget -q "https://github.com/containers/crun/releases/download/${CRUN_VERSION}/crun-${CRUN_VERSION}-linux-${CRUN_ARCH}-disable-systemd" \
