@@ -1,41 +1,80 @@
-# containerd-cloudhypervisor
+# containerd-cloudhypervisor (KoedoDB's fork)
 
-A purpose-built [containerd](https://containerd.io/) shim for [Cloud Hypervisor](https://www.cloudhypervisor.org/)
-that runs container workloads inside lightweight microVMs with maximum density and minimal memory overhead.
+A [containerd](https://containerd.io/) shim for [Cloud Hypervisor](https://www.cloudhypervisor.org/) that runs container workloads
+inside lightweight microVMs: one VM per Pod, a small purpose-built shim instead of a full Kata stack, and a pool of warm VMs
+restored from snapshots.
 
-## Highlights
+> **This is a fork** of [devigned/containerd-cloudhypervisor](https://github.com/devigned/containerd-cloudhypervisor) by David Justice
+> (MIT). The idea and the first implementation are his; we are grateful for them.
 
-- **Sandbox daemon** — long-running systemd daemon pre-boots a pool of VMs from a base snapshot via CH v51 OnDemand restore (~25ms each, ~6 MB idle RSS). Shadow VMs create warm workload snapshots in the background — no production pod pausing
-- **150/150 pods in 11s** on 3 × D8ds_v5 nodes (96 GiB total RAM), ~24 MB per VM, 10% node memory utilization
-- **Thin shim** — the containerd shim (~1,300 lines) handles TAP networking, erofs conversion, and daemon RPCs (`AcquireSandbox`, `AddContainer`, `ReleaseSandbox`)
-- **VM isolation** — each pod runs in its own Cloud Hypervisor microVM with dedicated kernel
-- **erofs rootfs cache** — content-addressable, flock-serialized, shared across pods
-- **inotify device discovery** — hot-plugged container disks detected in <1ms via inotify (no polling)
-- **Pure libc networking** — TAP/tc setup via in-process netlink (<1ms, no subprocess)
-- **Dual hypervisor** — same binary runs on KVM (Linux) and MSHV (Azure/Hyper-V)
-- **Multi-container pods** — up to 5 containers per VM with mount + PID isolation
-- **Pod networking** — transparent CNI integration via TAP + TC redirect
-- **Kata-compatible annotations** — per-pod memory/vCPU sizing with `io.cloudhv.*` or `io.katacontainers.*`
-- **Transparent vCPU sizing** — VM vCPUs match the pod's CPU limit; no limit = host CPU count
+## Why we forked
+
+We run a small hosting service ([KoedoDB](https://koedodb.com)) and were looking for a way to run customers' code that **starts
+fast, uses little memory, performs well, and is safe**: microVMs light enough to keep one per project. This project is exactly
+that idea, done in a way we liked: a thin shim, a guest agent, no big VMM stack. So we tried it.
+
+Trying it, we ran into a few things (for instance the problems reported as issues #97 and #98: pods that did not start from a warm
+restore, and memory that stayed resident), and the original had not seen new commits for a while. We needed fixes, and some of what
+we needed (hardening of what runs in the guest, running Cloud Hypervisor itself unprivileged and confined, `exec` and terminals,
+checks on everything the daemon and shim take as input) may not be what the original wants to carry. So we keep a copy that we maintain
+for our own use, and we keep it in the open in case it is useful to someone else.
+
+This is not meant as criticism: the original is a good starting point, and finding and fixing the rough edges is what a first user
+does. If the original becomes active again, we would be glad to send our changes there (or to merge back); patches are welcome in
+both directions. We are not affiliated with the Cloud Hypervisor, containerd or Kata projects.
+
+## What is different from the original
+
+- **Fixed**: pods start from warm snapshots (#97), the VM is sized from the Pod's limits, per-container limits are enforced in the guest,
+  logs reach `kubectl logs`, children of the daemon are stopped and cleaned up when it stops, volumes (ConfigMaps, Secrets,
+  emptyDirs, `resolv.conf`) reach the VM (they did not), Cloud Hypervisor v54.
+- **Hardening of the guest**: container specs are rebuilt from an allow list (capabilities cut, no device nodes, `noNewPrivileges`),
+  a default seccomp profile for every container (including no `AF_VSOCK`), safe volume and disk handling, a hardened guest kernel
+  configuration.
+- **Cloud Hypervisor runs unprivileged and confined** (`ch_rootless`): its own user, no capabilities, its own mount, PID, network,
+  IPC and UTS namespaces and a cgroup; the TAP device is handed over as a file descriptor; container images are readable only by the
+  VM that runs them. See [docs/sandbox-daemon.md](docs/sandbox-daemon.md).
+- **`kubectl exec`, `attach`, `cp`, exec probes and `tty: true`** work (the original refuses them). `kubectl port-forward` does not
+  (see [docs/shim.md](docs/shim.md)).
+- **Input is checked**: the daemon validates every request (ids, paths, namespaces, sizes, who is connecting), the shim reads volume
+  sources beneath an opened directory, and the parsers are fuzzed (`fuzz/`).
+- **Our own shimkit**: the task service library is [KoedoDB/containerd-shimkit](https://github.com/KoedoDB/containerd-shimkit), a
+  cut-down and extended copy of the one in [containerd/runwasi](https://github.com/containerd/runwasi).
+- **Supply chain**: pinned actions and base images, checked downloads, signed installer image, `cargo audit` clean. See
+  [docs/supply-chain.md](docs/supply-chain.md).
+- **Windows** code is gone (Cloud Hypervisor runs on Linux hosts), and so are the Wasm-oriented parts of shimkit.
+
+## Status
+
+**Experimental.** We use it in our own tests; we do not run other people's code on it yet. It has been reviewed by us (and by
+AI-assisted reviews) but **not by anyone outside the project**, and the guest kernel's hardening options are in the configuration but
+have not been exercised on a built kernel. Please read the code before you rely on it, and tell us what you find: see
+[SECURITY.md](SECURITY.md) for vulnerabilities (privately), and use issues or discussions for everything else.
+
+### What we measured
+
+On one 12-core development machine (KVM, k3s with Cilium, a guest with 128 MiB; numbers are not benchmarks of your hardware):
+
+| | Cloud Hypervisor process, resident |
+|---|---|
+| A VM waiting in the pool | **34 MiB** |
+| A Pod restored from a warm snapshot (an idle Alpine) | **47–50 MiB** |
+| A Pod sized by its limits (384 MiB; the VM is booted for it), idle Alpine | **63 MiB** |
+| The same, running a Node.js HTTP server | **171 MiB** (the workload is most of it) |
+
+VM boot: about 60 ms to restore a pooled VM, 220–350 ms to boot a VM of another size. (A Pod used to take 11–14 seconds to start with
+the unprivileged Cloud Hypervisor: the daemon waited for an answer that Cloud Hypervisor never closes, until a 10 second timeout. That is fixed;
+the figures below and in [docs/performance.md](docs/performance.md) are from after the fix.) **The figures in the original README (about 6 MB idle and
+24 MB per VM, 150 pods in 11 s) came from other hardware and settings; we could not reproduce them**, and the fixed cost of a VM here is
+the table above. Kata Containers with Cloud Hypervisor, in our setup, took 177 MiB for an empty Pod. A comparison of runc, gVisor,
+Kata and this shim under the same load is in [docs/performance.md](docs/performance.md) when we have it.
 
 ## When to Use
 
-Choose this shim when you're building a **platform** where you control the stack and need
-VM isolation without the overhead of a full-featured VMM stack. Ideal for AI agent sandboxes,
-serverless/FaaS platforms, and security-sensitive workloads where density matters.
-
-For general-purpose Kubernetes with multi-hypervisor support, GPU passthrough, or live
-migration, consider [Kata Containers](https://katacontainers.io/) instead.
-
-| | containerd-cloudhypervisor | Kata Containers |
-| --- | --- | --- |
-| **Cold start (shim inner)** | ~74ms | ~500ms–1s |
-| **Warm restore** | ~168ms | N/A |
-| **Memory per pod** | ~24 MB (OnDemand CoW) | ~330 MB |
-| **150-pod scale** | 150/150 in 11s | 130/150 (OOM) |
-| **Shim binary** | 4.6 MB | ~50 MB |
-| **Guest rootfs** | 5.4 MB (agent + crun, erofs) | ~150 MB |
-| **Language** | Rust | Go |
+Choose this shim when you are building a **platform** where you control the stack and want VM isolation for a Pod with a smaller fixed
+cost than a full Kata stack: serverless-style workloads, agent sandboxes, hosting for untrusted code. It is not a drop-in replacement
+for Kata: no GPU passthrough, no live migration, no CPU or memory hot-plug, no virtiofs (volumes are copied in when the container
+starts), no `port-forward`, and a single hypervisor.
 
 ## Quick Start
 
@@ -52,7 +91,7 @@ storage:
   - path: /etc/extensions/containerd-cloudhypervisor.raw
     mode: 0644
     contents:
-      source: https://github.com/devigned/containerd-cloudhypervisor/releases/download/<release-version>/containerd-cloudhypervisor-<release-version>-x86-64.raw
+      source: https://github.com/KoedoDB/containerd-cloudhypervisor/releases/download/<release-version>/containerd-cloudhypervisor-<release-version>-x86-64.raw
 ```
 
 The sysext includes a brief demo to verify if the system is working. Run
@@ -179,13 +218,23 @@ See the **[docs/](docs/)** folder for detailed documentation:
 - **[Configuration](docs/configuration.md)** — shim and daemon config reference, pod annotations
 - **[Performance](docs/performance.md)** — benchmarks, latency breakdown, density, comparison with Kata
 - **[Development](docs/development.md)** — building, testing, contributing, code quality standards
-- **[Releasing](docs/releasing.md)** — release workflow, published artifacts, installation
+- **[Releasing](docs/releasing.md)** — how we cut a release, published artifacts, verifying and installing them
+- **[Supply chain](docs/supply-chain.md)** — what is pinned and checked, how to update it
+- **[Security policy](SECURITY.md)** — how to report a vulnerability
+- The security review and its results: [doc/LAMBDA-SECURITY.md](https://github.com/banil246/koedodb/blob/main/doc/LAMBDA-SECURITY.md) in the KoedoDB repository
 
 ## Examples
 
-- **[Bare Linux with crictl](example/crictl/)** — run containers with crictl, no Kubernetes required
-- **[Azure Kubernetes Service](example/aks/)** — deploy on AKS with DaemonSet installer
+- **[Bare Linux with crictl](example/crictl/)** — run containers with crictl, no Kubernetes required (from the original; not re-run by us)
+- **[Azure Kubernetes Service](example/aks/)** — deploy on AKS with the DaemonSet installer. **This is the original's procedure and we
+  have not run it**: our changes (unprivileged Cloud Hypervisor, ACLs, cgroup layout, the volume source allow list) are untested on AKS
+  nodes, and the code assumes `/dev/kvm` (not `/dev/mshv`).
+- **k3s** — the setup we test on: containerd's config comes from a template (`config-v3.toml.tmpl`) that k3s regenerates on start, so the
+  installer, which edits `/etc/containerd/config.toml`, does not fit k3s as it is. A written-down k3s example is still to come.
+- **Docker** — trying it with `docker run --runtime=cloudhv` (Docker 29 with the containerd image store) is being worked on; see
+  [docs/try-with-docker.md](docs/try-with-docker.md) if it is there yet.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 David Justice for the original work; the modifications in this fork are copyright
+(c) 2026 RadarWorks LLC (KoedoDB) and under the same license.

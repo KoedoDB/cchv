@@ -1,176 +1,88 @@
 # Releasing
 
-## Overview
+How we cut a release of KoedoDB's fork. (The original project's procedure is in its history; this file describes what the workflow
+in this repository does today.)
 
-Releases are fully automated via GitHub Actions. Pushing a semantic version tag
-triggers the release workflow, which builds all artifacts, publishes OCI images
-to GHCR, and creates a GitHub Release with auto-generated notes.
+## Versions
 
-## Creating a Release
+Tags look like **`v<upstream version we started from>-koedodb.<n>`**, for example `v0.15.0-koedodb.1`:
+
+- the part before the dash follows the original's numbering (the original stopped at `v0.14.0`), so that a reader can see where the code
+  comes from, and our tags cannot collide with a future tag of the original;
+- `-koedodb.<n>` counts our releases on top of it. It is a SemVer pre-release label on purpose: this is experimental software.
+
+The files do not carry the version (`Cargo.toml` says `0.1.0`); **the tag is the version**. The workflow reads it from the tag name.
+It runs on tags matching `v<major>.<minor>.<patch>` and `v<major>.<minor>.<patch>-*`.
+
+## Before you tag
+
+1. `main` is what you want to release and is pushed. The working tree is clean (the untracked `guest/rootfs/rootfs-base/bin/crun` is not committed).
+2. Tests pass: `cargo test -p cloudhv-sandbox-daemon --bins`, `cd crates/agent && cargo test`, and the shim and shimkit tests in Alpine
+   (see [development.md](development.md); the host needs `protoc` for the shim crate, so the tests run in a container).
+3. `cargo audit` in the root, in `crates/agent` and in the shimkit repository: no advisory.
+4. Dependencies and pins are current (`hacks/versions.env`, `hacks/checksums.txt`; [supply-chain.md](supply-chain.md)); in the KoedoDB
+   repository `scripts/check-advisories` reports nothing that needs action (Cloud Hypervisor, crun, the guest kernel, the crates).
+5. The shim's `containerd-shimkit` dependency is pinned by commit to a tag of [KoedoDB/containerd-shimkit](https://github.com/KoedoDB/containerd-shimkit).
+6. An end-to-end run on a cluster (k3s with Cilium is what we use): pods start (also several at once), `kubectl exec`, `attach`, probes, ConfigMap/Secret/emptyDir,
+   warm restore, deleting pods leaves no Cloud Hypervisor process or directory behind.
+
+## Cutting the release
 
 ```bash
-# Tag the release
-git tag v0.1.0
-git push origin v0.1.0
+git tag -a v0.15.0-koedodb.2 -m "what this release is, in a sentence or two"
+git push origin v0.15.0-koedodb.2
 ```
 
-The tag must match `v<major>.<minor>.<patch>` (e.g., `v0.1.0`, `v1.2.3`).
-Pre-release tags like `v0.2.0-beta.1` are also supported.
+The push starts the **Release** workflow. If nothing starts: GitHub Actions must be enabled for this repository (a fork needs
+a one-time confirmation in the *Actions* tab), and the organization must allow it.
 
-## What Gets Published
+## What the workflow does
 
-### GitHub Release
+1. **Build** (one job per architecture, x86_64 and aarch64, read-only token): the guest kernel (a pinned, checksum-verified kernel.org
+   tarball, 6.18 LTS) and the guest root file system with the agent and a pinned `crun`, the shim and the daemon, and the Flatcar system
+   extension. All downloads are checked against `hacks/checksums.txt`.
+2. **Installer image** (needs `packages: write` and `id-token: write`): a multi-architecture image, pushed to GHCR as
+   `ghcr.io/koedodb/cloudhv-installer:<tag>-amd64`, `-arm64`, and a manifest; the **digest** of the manifest is signed with cosign
+   (keyless). There is **no `:latest`**: a tag that moves must not be what a privileged installer on every node runs.
+3. **Release** (needs `contents: write`; runs no code from the checkout): collects the artifacts, writes `checksums-sha256.txt`,
+   pushes the Helm chart to `oci://ghcr.io/koedodb/charts/cloudhv-installer`, writes the notes, and creates the GitHub Release.
 
-The release page at `github.com/devigned/containerd-cloudhypervisor/releases`
-contains downloadable binaries and checksums for both amd64 and arm64:
+Cloud Hypervisor's version is the one in `hacks/versions.env` (v54.0 at the time of writing).
 
-| Asset | Description |
-|-------|-------------|
-| `containerd-shim-cloudhv-v1-linux-amd64` | Host shim binary (x86_64) |
-| `containerd-shim-cloudhv-v1-linux-arm64` | Host shim binary (aarch64) |
-| `cloudhv-sandbox-daemon-linux-amd64` | Sandbox daemon binary (x86_64) |
-| `cloudhv-sandbox-daemon-linux-arm64` | Sandbox daemon binary (aarch64) |
-| `cloudhv-agent-linux-amd64` | Guest agent (x86_64, static musl) |
-| `cloudhv-agent-linux-arm64` | Guest agent (aarch64, static musl) |
-| `vmlinux` | Guest kernel — x86_64 (PVH boot, virtio, vsock, IP_PNP) |
-| `vmlinux-arm64` | Guest kernel — aarch64 (direct boot, PL011, ARM GIC) |
-| `rootfs.erofs` | Guest rootfs — x86_64 (agent + crun, 16 MB) |
-| `rootfs-arm64.ext4` | Guest rootfs — aarch64 (agent + crun) |
-| `cloudhv-installer-chart-<version>.tgz` | Helm chart archive |
-| `checksums-sha256.txt` | SHA-256 checksums for all assets |
+## What gets published
 
-### GHCR OCI Artifacts
+| Asset | |
+|---|---|
+| `containerd-shim-cloudhv-v1-linux-{amd64,arm64}`, `cloudhv-sandbox-daemon-linux-{amd64,arm64}`, `cloudhv-agent-linux-{amd64,arm64}` | host and guest binaries |
+| `vmlinux`, `vmlinux-arm64`, `rootfs.erofs`, `rootfs-arm64.ext4` | guest kernel and root file system |
+| `containerd-cloudhypervisor-<tag>-x86-64.raw` and the arm64 one | Flatcar system extension |
+| `cloudhv-installer-chart-<version>.tgz` | Helm chart |
+| `checksums-sha256.txt` | SHA-256 of all of the above |
 
-| Image | Purpose |
-|-------|---------|
-| `ghcr.io/devigned/cloudhv-installer:<tag>` | DaemonSet installer image (multi-arch: amd64 + arm64) |
-| `ghcr.io/devigned/charts/cloudhv-installer:<version>` | Helm chart (OCI) |
-
-Both are tagged with the release version and `latest`. The installer image is a
-multi-arch manifest — `docker pull` automatically selects the correct platform.
-
-## Release Notes
-
-Release notes are auto-generated from conventional commit messages between
-the current tag and the previous tag. Commits are grouped by type:
-
-| Prefix | Section |
-|--------|---------|
-| `feat:` | Features |
-| `fix:` | Bug Fixes |
-| `perf:` | Performance |
-| `docs:` | Documentation |
-| `test:` | Tests |
-| `build:` | Build |
-| `chore:` | Maintenance |
-
-The notes also include installation instructions for binaries, Helm, and
-the container image.
-
-## Installing from a Release
-
-### Bare Linux (binaries)
-
-Download from the GitHub Release page (use `arm64` suffix for aarch64 hosts):
+## Verifying and installing a release
 
 ```bash
-VERSION="v0.1.0"
-ARCH="amd64"  # or "arm64" for aarch64
-BASE="https://github.com/devigned/containerd-cloudhypervisor/releases/download/$VERSION"
-
-# Download and install
-wget "$BASE/containerd-shim-cloudhv-v1-linux-${ARCH}"
-wget "$BASE/vmlinux$([ "$ARCH" = "arm64" ] && echo "-arm64")"
-wget "$BASE/rootfs$([ "$ARCH" = "arm64" ] && echo "-arm64").ext4"
-wget "$BASE/checksums-sha256.txt"
-
-# Verify checksums
+TAG=v0.15.0-koedodb.1; BASE=https://github.com/KoedoDB/containerd-cloudhypervisor/releases/download/$TAG
+wget "$BASE/checksums-sha256.txt" "$BASE/containerd-shim-cloudhv-v1-linux-amd64"
 sha256sum -c checksums-sha256.txt --ignore-missing
-
-# Install
-sudo install -m 755 "containerd-shim-cloudhv-v1-linux-${ARCH}" /usr/local/bin/containerd-shim-cloudhv-v1
-sudo mkdir -p /opt/cloudhv
-sudo cp vmlinux* rootfs*.ext4 /opt/cloudhv/
 ```
 
-Then create `/opt/cloudhv/config.json` — see [Configuration](configuration.md).
-
-### Kubernetes (Helm chart from GHCR)
+The installer image is signed; check it by its digest (the release notes give it):
 
 ```bash
-helm install cloudhv-installer \
-  oci://ghcr.io/devigned/charts/cloudhv-installer \
-  --version 0.1.0 \
-  --namespace kube-system
+cosign verify ghcr.io/koedodb/cloudhv-installer@sha256:<digest> \
+  --certificate-identity-regexp '^https://github.com/KoedoDB/containerd-cloudhypervisor/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-Override values:
+For the Helm chart, always pass the image digest (`--set image.digest=sha256:<digest>`); the chart refuses to render without a digest or a tag.
+Remember that the installer edits `/etc/containerd/config.toml`, which suits plain containerd hosts; k3s needs its template instead
+(see the README's examples). Configuration of the shim and the daemon: [configuration.md](configuration.md); the daemon's
+`ch_rootless` mode and what it needs: [sandbox-daemon.md](sandbox-daemon.md).
 
-```bash
-helm install cloudhv-installer \
-  oci://ghcr.io/devigned/charts/cloudhv-installer \
-  --version 0.1.0 \
-  --namespace kube-system \
-  --set nodeSelector.workload=my-pool \
-  --set image.tag=v0.1.0
-```
+## After the release
 
-### Kubernetes (installer image directly)
-
-If not using Helm, reference the installer image in your own DaemonSet:
-
-```
-ghcr.io/devigned/cloudhv-installer:v0.1.0
-```
-
-## Helm Chart
-
-The chart is at `charts/cloudhv-installer/` and installs:
-
-- **Shim binary, daemon binary, guest kernel, rootfs, and Cloud Hypervisor**
-  onto each selected node, patches containerd config, restarts containerd
-- **Daemon config** (`/opt/cloudhv/daemon.json`) and **systemd unit**
-  (`/etc/systemd/system/cloudhv-sandbox-daemon.service`) for the sandbox daemon
-- **RuntimeClass**: registers the `cloudhv` runtime handler with pod overhead
-  annotations for accurate Kubernetes scheduler accounting
-
-The installer Dockerfile builds Cloud Hypervisor from source (main branch)
-until CH v51 is officially released, ensuring OnDemand restore support.
-
-### Values
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `image.repository` | `ghcr.io/devigned/cloudhv-installer` | Installer image |
-| `image.tag` | Chart `appVersion` | Image tag |
-| `image.pullPolicy` | `IfNotPresent` | Pull policy |
-| `nodeSelector` | `workload: cloudhv` | Target nodes |
-| `tolerations` | `[{operator: Exists}]` | Tolerate all taints |
-| `resources.requests.cpu` | `100m` | Installer CPU request |
-| `resources.requests.memory` | `128Mi` | Installer memory request |
-| `runtimeClass.enabled` | `true` | Create RuntimeClass |
-| `runtimeClass.name` | `cloudhv` | RuntimeClass name |
-| `runtimeClass.overhead.memory` | `50Mi` | Pod overhead memory |
-| `runtimeClass.overhead.cpu` | `50m` | Pod overhead CPU |
-
-## Workflow Details
-
-The release workflow (`.github/workflows/release.yml`) runs these jobs:
-
-```
-build-binaries ──┐
-                 ├── build-installer-image ──┐
-build-kernel ────┤                           ├── release
-                 │                           │
-build-rootfs ────┘                           │
-  (needs build-binaries)                     │
-                                             │
-  (creates GitHub Release, pushes Helm to GHCR)
-```
-
-1. **build-binaries**: compiles shim (gnu), daemon (gnu), and agent (musl) in parallel for both x86_64 and aarch64
-2. **build-kernel**: builds or restores cached guest kernel (per architecture)
-3. **build-rootfs**: creates rootfs.erofs image with agent + crun (per architecture)
-4. **build-installer-image**: packages arch-specific artifacts into per-platform images,
-   then creates a multi-arch manifest combining amd64 and arm64
-5. **release**: creates GitHub Release with all binaries, checksums, Helm chart, and notes
+- Check the release page and the assets, and `cosign verify` on the digest.
+- Note the release, and what was tested, in the KoedoDB repository (`doc/LAMBDA.md`).
+- **Not yet exercised end to end**: the signing step and the Helm push have never run on a real tag (the notes in the workflow say so); the first release
+  that works is the proof, and this file should then lose this paragraph.
