@@ -1,0 +1,8 @@
+# Only the harnesses, the dictionaries and the small seed corpora (fuzz/seeds) are tracked.
+target/
+corpus/
+artifacts/
+coverage/
+Cargo.lock
+*.profraw
+logs/

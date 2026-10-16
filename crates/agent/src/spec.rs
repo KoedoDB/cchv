@@ -458,9 +458,10 @@ pub fn valid_destination(dest: &str) -> bool {
     if !dest.starts_with('/') || dest.contains('\0') {
         return false;
     }
-    let mut parts = dest.split('/').filter(|p| !p.is_empty());
+    // Empty parts and "." do nothing to the path ("//proc" and "/./proc" are "/proc"), so they are not looked at.
+    let mut parts = dest.split('/').filter(|p| !p.is_empty() && *p != ".");
     match parts.next() {
-        None => false, // "/"
+        None => false, // "/", "/."
         Some("proc") | Some("sys") => false,
         Some(first) => first != ".." && !parts.any(|p| p == ".."),
     }
@@ -688,6 +689,15 @@ mod tests {
         assert!(!valid_destination("/sys/fs/cgroup"));
         assert!(!valid_destination("/data/../proc"));
         assert!(!valid_destination("/.."));
+        // Found by fuzzing: a "." part does nothing, so these are /proc and /sys.
+        assert!(!valid_destination("/./proc"));
+        assert!(!valid_destination("/./proc/x"));
+        assert!(!valid_destination("/sys/./fs"));
+        assert!(!valid_destination("/././sys"));
+        assert!(!valid_destination("//./proc//x"));
+        assert!(!valid_destination("/."));
+        assert!(valid_destination("/./data"));
+        assert!(valid_destination("/data/./x"));
     }
 
     #[test]

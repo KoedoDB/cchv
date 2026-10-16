@@ -1,0 +1,1 @@
+{"seccomp": {"defaultAction": "SCMP_ACT_ERRNO", "syscalls": [{"names": ["clone", "socket"], "action": "SCMP_ACT_ALLOW"}, {"names": ["socket"], "action": "SCMP_ACT_ALLOW", "args": [{"index": 0, "value": 2, "op": "SCMP_CMP_NE"}]}]}, "process": {"args": ["x"]}, "linux": {}}

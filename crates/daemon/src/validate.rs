@@ -55,7 +55,7 @@ pub fn init(config: &DaemonConfig) {
     ALLOW_PROC_NETNS.store(config.allow_proc_netns, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn netns_path_allowed_with(path: &str, allow_proc: bool) -> bool {
+pub(crate) fn netns_path_allowed_with(path: &str, allow_proc: bool) -> bool {
     if path.is_empty() || path.contains('\0') || path.contains('\n') {
         return false;
     }

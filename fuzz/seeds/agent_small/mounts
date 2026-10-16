@@ -1,0 +1,4 @@
+proc /proc proc rw 0 0
+overlay /run/containers/c/rootfs overlay rw 0 0
+tmpfs /run/containers/c/rootfs/dev tmpfs rw 0 0
+/dev/vdb /run/containers/c/rootfs/data ext4 rw 0 0

@@ -1,0 +1,1 @@
+{"max_memory_mb": 16384, "max_vcpus": 0, "erofs_cache_max_mib": 4096, "volume_source_roots": ["/var/openebs/local"], "rpc_timeout_secs": 30}

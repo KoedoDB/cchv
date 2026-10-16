@@ -1,0 +1,110 @@
+[package]
+name = "cloudhv-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace: the fuzz crates are not part of the project's build and do not touch its lock files.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.23"
+tempfile = "3"
+fuzz-agent = { path = "lib-agent" }
+fuzz-daemon = { path = "lib-daemon" }
+containerd-shim-cloudhv = { path = "../crates/shim" }
+containerd-shimkit = { path = "../../containerd-shimkit" }
+
+[lib]
+name = "cloudhv_fuzz"
+path = "src/lib.rs"
+
+[[bin]]
+name = "agent_spec"
+path = "fuzz_targets/agent_spec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "agent_small"
+path = "fuzz_targets/agent_small.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "agent_proto"
+path = "fuzz_targets/agent_proto.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "agent_logs"
+path = "fuzz_targets/agent_logs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "agent_volumes"
+path = "fuzz_targets/agent_volumes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "daemon_validate"
+path = "fuzz_targets/daemon_validate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "daemon_request"
+path = "fuzz_targets/daemon_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "daemon_ctl"
+path = "fuzz_targets/daemon_ctl.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "daemon_tree"
+path = "fuzz_targets/daemon_tree.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shim_volumes"
+path = "fuzz_targets/shim_volumes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shim_small"
+path = "fuzz_targets/shim_small.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shimkit_task"
+path = "fuzz_targets/shimkit_task.rs"
+test = false
+doc = false
+bench = false

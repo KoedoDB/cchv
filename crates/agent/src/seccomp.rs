@@ -225,6 +225,11 @@ pub fn enforce(existing: Option<&Value>) -> Value {
     let Some(Value::Object(profile)) = existing else {
         return default_profile();
     };
+    // A seccomp section that is not a profile crun can use (no `defaultAction`: found by fuzzing, with `{}`) is not kept: crun would
+    // refuse the container or read the missing action as its own default. The guest's own profile applies.
+    if !profile.get("defaultAction").is_some_and(|a| a.is_string()) {
+        return default_profile();
+    }
     let mut profile = profile.clone();
     profile.remove("listenerPath");
     profile.remove("listenerMetadata");
@@ -235,7 +240,9 @@ pub fn enforce(existing: Option<&Value>) -> Value {
 
     for entry in profile.get("syscalls").and_then(|s| s.as_array()).cloned().unwrap_or_default() {
         let Value::Object(mut e) = entry else { continue };
-        if !default_allows && allows(e.get("action").and_then(|a| a.as_str())) {
+        // (Also when the profile allows by default: a rule that allows a refused syscall would overlap the refusal put in front of it,
+        // and libseccomp does not promise which one wins; found by fuzzing. Such a rule adds nothing in a default-allow profile.)
+        if allows(e.get("action").and_then(|a| a.as_str())) {
             let names: Vec<Value> = e
                 .get("names")
                 .and_then(|n| n.as_array())
@@ -312,6 +319,41 @@ mod tests {
             .iter()
             .filter(|r| names_of(r).iter().any(|n| n == name))
             .collect()
+    }
+
+    #[test]
+    fn a_default_allow_profile_cannot_allow_what_is_refused() {
+        let p = enforce(Some(&json!({
+            "defaultAction": "SCMP_ACT_ALLOW",
+            "syscalls": [
+                {"names": ["read", "mount", "bpf", "socket", "clone3"], "action": "SCMP_ACT_ALLOW"},
+                {"names": ["ptrace"], "action": "SCMP_ACT_ERRNO"},
+                {"names": ["mount"], "action": "SCMP_ACT_LOG"}
+            ]
+        })));
+        for r in p["syscalls"].as_array().unwrap() {
+            let allows = matches!(r["action"].as_str(), Some("SCMP_ACT_ALLOW") | Some("SCMP_ACT_LOG"));
+            for n in r["names"].as_array().unwrap() {
+                let n = n.as_str().unwrap();
+                assert!(!(allows && (DENIED.contains(&n) || n == "clone3")), "{n} is allowed by {r}");
+            }
+        }
+        // What was refused by the pod stays refused, and the harmless allow is not lost.
+        assert!(find(&p, "ptrace").iter().any(|r| r["action"] == "SCMP_ACT_ERRNO"));
+        assert!(find(&p, "read").iter().any(|r| r["action"] == "SCMP_ACT_ALLOW"));
+        // socket is allowed for the allowed families only.
+        assert!(find(&p, "socket").iter().filter(|r| r["action"] == "SCMP_ACT_ALLOW").all(|r| r["args"].is_array()));
+    }
+
+    #[test]
+    fn a_seccomp_section_with_no_default_action_is_replaced_by_the_default_profile() {
+        assert_eq!(enforce(Some(&json!({}))), default_profile());
+        assert_eq!(enforce(Some(&json!({"syscalls": [{"names": ["socket"], "action": "SCMP_ACT_ALLOW"}]}))), default_profile());
+        assert_eq!(enforce(Some(&json!({"defaultAction": 5}))), default_profile());
+        assert_eq!(enforce(Some(&json!("SCMP_ACT_ALLOW"))), default_profile());
+        // With an action it is kept, with the denials.
+        let p = enforce(Some(&json!({"defaultAction": "SCMP_ACT_ERRNO", "syscalls": []})));
+        assert_eq!(p["defaultAction"], "SCMP_ACT_ERRNO");
     }
 
     #[test]

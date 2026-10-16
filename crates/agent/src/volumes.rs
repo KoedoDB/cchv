@@ -182,6 +182,18 @@ pub fn materialize(
     destination: &str,
     in_use: bool,
 ) -> Result<PathBuf> {
+    // The name is joined to the root and opened below it: one with a slash or `..` (or an absolute one, which replaces the root) would
+    // leave it. `location` gives only plain names; this is the last line (found by fuzzing, with the name "/": the guest's root).
+    if !safe_component(name) {
+        anyhow::bail!("volume name {name:?} is not a plain name");
+    }
+    // The files' paths are checked whether or not they are written: with the volume in use nothing is written, and the path of a lone
+    // file is still joined to the volume's path and given back as what to bind (found by fuzzing: "/etc/shadow" came back as itself).
+    for f in files {
+        if safe_relative(f.path).is_none() {
+            anyhow::bail!("unsafe file path in volume {name}: {:?}", f.path);
+        }
+    }
     let dir = open_volume(root, name)?;
     let path = root.join(name);
 
@@ -236,6 +248,37 @@ mod tests {
 
     fn f<'a>(path: &'a str, content: &'a [u8], mode: u32) -> VolumeFile<'a> {
         VolumeFile { path, content, mode }
+    }
+
+    #[test]
+    fn a_file_path_that_leaves_the_volume_is_refused_even_when_the_volume_is_in_use() {
+        // Found by fuzzing: with `in_use` nothing is written, and the lone file named like the destination was returned as
+        // `volume.join(path)`, which for "/etc/shadow" is "/etc/shadow": the thing to bind.
+        let root = tmp("badpath").join("root");
+        for path in ["/etc/shadow", "../x", "a/../../x", "", "a//b", "..data/x", "a\0b"] {
+            for in_use in [false, true] {
+                let r = materialize(&root, "vol", &[f(path, b"x", 0o644)], "/x/shadow", in_use);
+                assert!(r.is_err(), "{path:?} (in use: {in_use}) gave {r:?}");
+            }
+        }
+        // A plain one still gives the file to bind, in use or not.
+        for in_use in [false, true] {
+            let p = materialize(&root, "vol", &[f("shadow", b"x", 0o644)], "/x/shadow", in_use).unwrap();
+            assert_eq!(p, root.join("vol").join("shadow"));
+        }
+    }
+
+    #[test]
+    fn materialize_refuses_a_name_that_is_not_a_plain_one() {
+        // Found by fuzzing: the name "/" made it open (and chmod) the guest's root. Nothing is made for any of these.
+        let root = tmp("badname").join("root");
+        let outside = root.parent().unwrap().join("x");
+        for name in ["/", "", ".", "..", "../x", "a/b", "/tmp", ".hidden", "a\0b"] {
+            assert!(materialize(&root, name, &[], "/d", false).is_err(), "{name:?}");
+            assert!(materialize(&root, name, &[f("a", b"x", 0o644)], "/d", false).is_err(), "{name:?} with files");
+        }
+        assert!(!outside.exists());
+        assert!(materialize(&root, "ok-name.1", &[], "/d", false).is_ok());
     }
 
     #[test]

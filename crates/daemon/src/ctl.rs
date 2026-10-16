@@ -105,7 +105,7 @@ fn uid_of_pid(pid: u32) -> Option<u32> {
     parse_status_uid(&status)
 }
 
-fn parse_status_uid(status: &str) -> Option<u32> {
+pub(crate) fn parse_status_uid(status: &str) -> Option<u32> {
     status
         .lines()
         .find_map(|l| l.strip_prefix("Uid:"))
@@ -193,7 +193,7 @@ pub fn pids_of_uid(uid: u32) -> Vec<u32> {
     out
 }
 
-fn status_has_uid(status: &str, uid: u32) -> bool {
+pub(crate) fn status_has_uid(status: &str, uid: u32) -> bool {
     let zombie = status
         .lines()
         .find_map(|l| l.strip_prefix("State:"))

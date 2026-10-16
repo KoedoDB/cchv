@@ -1,0 +1,1 @@
+{"terminal": true, "user": {"uid": 1000, "gid": 1000, "umask": 18}, "args": ["sh", "-c", "echo hi"], "env": ["A=b"], "cwd": "/tmp", "capabilities": {"bounding": ["CAP_CHOWN", "CAP_SYS_ADMIN"], "effective": ["CAP_CHOWN"]}, "rlimits": [{"type": "RLIMIT_NOFILE", "hard": 100, "soft": 100}], "consoleSize": {"height": 30, "width": 100}}

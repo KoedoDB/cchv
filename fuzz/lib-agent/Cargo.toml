@@ -1,0 +1,25 @@
+# The guest agent's modules, compiled as a library so that fuzz targets can reach them. The agent is a binary (crates/agent/src/main.rs
+# declares its modules); this crate declares the same modules from the same files, so `crate::...` paths inside them resolve, and
+# adds the fuzz entry points (src/entry.rs). The production sources are used as they are.
+[package]
+name = "fuzz-agent"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+cloudhv-common = { path = "../../crates/common" }
+tokio = { version = "1", features = ["rt", "net", "time", "io-util", "sync", "macros", "signal", "process", "fs"] }
+ttrpc = { version = "0.10", features = ["async"] }
+protobuf = "3"
+async-trait = "0.1"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+env_logger = "0.11"
+nix = { version = "0.31", features = ["signal", "mount", "sched", "process", "fs", "poll"] }
+libc = "0.2"
+chrono = { version = "0.4", features = ["serde"] }
+arbitrary = { version = "1", features = ["derive"] }
+tempfile = "3"
