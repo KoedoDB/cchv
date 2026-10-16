@@ -69,6 +69,15 @@ function demo() {
     return 1
   fi
 
+  # This demo runs containerd and crictl without a kubelet: nothing makes the pod's cgroup, and the shim (require_pod_cgroup, on by
+  # default) refuses to start a VM that it cannot put under the pod's limits. For the demo only, turn that off in the node's copy
+  # of the config. On a real node with a kubelet it stays on.
+  announce "Demo only: no kubelet, so no pod cgroup (require_pod_cgroup=false in /opt/cloudhv/config.json)"
+  local cfg_tmp
+  cfg_tmp="$(mktemp)"
+  jq '.require_pod_cgroup = false' /opt/cloudhv/config.json > "$cfg_tmp" && cat "$cfg_tmp" > /opt/cloudhv/config.json
+  rm -f "$cfg_tmp"
+
   announce "Pulling 'echo' container image"
   crictl pull hashicorp/http-echo:latest
 
