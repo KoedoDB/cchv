@@ -144,8 +144,36 @@ pub struct DaemonConfig {
     /// if that is dynamically linked, the system libraries; the kernel, the base rootfs, the images, its own directories, /dev/kvm).
     #[serde(default)]
     pub ch_extra_ro_paths: Vec<String>,
+
+    /// Where the disks of emptyDirs are made: one sparse file per emptyDir, in a directory of each VM, on the host's disk (not `/run`,
+    /// which is memory). Empty turns disk-backed emptyDirs off (a request for one is refused). The directory is root's, 0711.
+    #[serde(default = "default_emptydir_dir")]
+    pub emptydir_dir: String,
+
+    /// The largest disk (MiB) a request may ask for, and the free space (MiB) the host's disk keeps beyond a quarter of a new disk's
+    /// size: a disk is refused when the free space is below `size / 4 + emptydir_reserve_mib`.
+    #[serde(default = "default_emptydir_max_mib")]
+    pub emptydir_max_mib: u64,
+    #[serde(default = "default_emptydir_reserve_mib")]
+    pub emptydir_reserve_mib: u64,
+
+    /// `mke2fs`, which makes the file system of an emptyDir's disk (on the host, on the file; the host never mounts it).
+    #[serde(default = "default_mke2fs_path")]
+    pub mke2fs_path: String,
 }
 
+fn default_emptydir_dir() -> String {
+    "/var/lib/cloudhv/emptydir".to_string()
+}
+fn default_emptydir_max_mib() -> u64 {
+    16_384
+}
+fn default_emptydir_reserve_mib() -> u64 {
+    2048
+}
+fn default_mke2fs_path() -> String {
+    "/usr/sbin/mke2fs".to_string()
+}
 fn default_true() -> bool {
     true
 }

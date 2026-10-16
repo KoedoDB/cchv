@@ -153,7 +153,8 @@ All Kubernetes volume types are transported into the VM using block devices:
 | Filesystem PVC | Inline via RPC | bind mount | No (read-only) |
 | ConfigMap | Inline via RPC | bind mount | No (read-only) |
 | Secret | Inline via RPC | bind mount | No (read-only) |
-| emptyDir | Separate hot-plugged disk | bind mount | Yes (pod lifetime) |
+| emptyDir (default medium) | A sparse file on the host's disk, ext4, hot-plugged as virtio-blk (`docs/sandbox-daemon.md`, "emptyDir disks") | mounted once per VM, bind mount | Yes (VM lifetime; gone with the VM) |
+| emptyDir (`medium: Memory`) | Inline via RPC | tmpfs in the guest, bind mount | No (guest memory) |
 
 ### How It Works
 

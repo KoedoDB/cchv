@@ -32,7 +32,11 @@ pub fn sort_vd_names(names: &mut [String]) {
 }
 
 /// The disk whose serial is `want`, among `(name, serial)` pairs read from /sys/block, and which is not claimed yet.
-pub fn find_by_serial(disks: &[(String, String)], want: &str, claimed: &HashSet<String>) -> Option<String> {
+pub fn find_by_serial(
+    disks: &[(String, String)],
+    want: &str,
+    claimed: &HashSet<String>,
+) -> Option<String> {
     if want.is_empty() {
         return None;
     }
@@ -44,7 +48,11 @@ pub fn find_by_serial(disks: &[(String, String)], want: &str, claimed: &HashSet<
 
 /// The disks nobody has claimed, in the order the kernel numbers them.
 pub fn unclaimed(present: &[String], claimed: &HashSet<String>) -> Vec<String> {
-    let mut v: Vec<String> = present.iter().filter(|n| !claimed.contains(*n)).cloned().collect();
+    let mut v: Vec<String> = present
+        .iter()
+        .filter(|n| !claimed.contains(*n))
+        .cloned()
+        .collect();
     sort_vd_names(&mut v);
     v
 }
@@ -122,7 +130,8 @@ fn read_serials() -> Vec<(String, String)> {
     scan()
         .into_iter()
         .map(|name| {
-            let serial = std::fs::read_to_string(format!("/sys/block/{name}/serial")).unwrap_or_default();
+            let serial =
+                std::fs::read_to_string(format!("/sys/block/{name}/serial")).unwrap_or_default();
             (name, serial)
         })
         .collect()
@@ -145,7 +154,12 @@ mod tests {
 
     #[test]
     fn names_sort_as_the_kernel_hands_them_out() {
-        let mut v = vec!["vdaa".to_string(), "vdc".to_string(), "vdb".to_string(), "vdz".to_string()];
+        let mut v = vec![
+            "vdaa".to_string(),
+            "vdc".to_string(),
+            "vdb".to_string(),
+            "vdz".to_string(),
+        ];
         sort_vd_names(&mut v);
         assert_eq!(v, ["vdb", "vdc", "vdz", "vdaa"]);
     }
@@ -158,17 +172,34 @@ mod tests {
             ("vdd".to_string(), "".to_string()),
         ];
         let mut claimed = HashSet::new();
-        assert_eq!(find_by_serial(&disks, "layer-b", &claimed), Some("vdc".to_string()));
+        assert_eq!(
+            find_by_serial(&disks, "layer-b", &claimed),
+            Some("vdc".to_string())
+        );
         claimed.insert("vdc".to_string());
-        assert_eq!(find_by_serial(&disks, "layer-b", &claimed), None, "already claimed");
-        assert_eq!(find_by_serial(&disks, "layer-a", &claimed), Some("vdb".to_string()));
+        assert_eq!(
+            find_by_serial(&disks, "layer-b", &claimed),
+            None,
+            "already claimed"
+        );
+        assert_eq!(
+            find_by_serial(&disks, "layer-a", &claimed),
+            Some("vdb".to_string())
+        );
         assert_eq!(find_by_serial(&disks, "nope", &claimed), None);
-        assert_eq!(find_by_serial(&disks, "", &claimed), None, "an empty serial matches nothing");
+        assert_eq!(
+            find_by_serial(&disks, "", &claimed),
+            None,
+            "an empty serial matches nothing"
+        );
     }
 
     #[test]
     fn unclaimed_disks_come_in_kernel_order_and_two_claims_get_different_ones() {
-        let present: Vec<String> = ["vda", "vdc", "vdb", "vdd"].iter().map(|s| s.to_string()).collect();
+        let present: Vec<String> = ["vda", "vdc", "vdb", "vdd"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let mut claimed: HashSet<String> = ["vda".to_string()].into();
         let first = unclaimed(&present, &claimed);
         assert_eq!(first, ["vdb", "vdc", "vdd"]);

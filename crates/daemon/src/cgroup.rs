@@ -28,9 +28,17 @@ pub struct Limits {
 
 /// What a VM of `memory_mb` MiB and `vcpus` vCPUs gets: the guest's memory plus `overhead_mib`, `max_processes` processes and threads,
 /// and (if asked) the CPU time of its vCPUs plus one thread for the rest of Cloud Hypervisor.
-pub fn limits_for(memory_mb: u64, vcpus: u32, overhead_mib: u64, max_processes: u64, cpu_limit: bool) -> Limits {
+pub fn limits_for(
+    memory_mb: u64,
+    vcpus: u32,
+    overhead_mib: u64,
+    max_processes: u64,
+    cpu_limit: bool,
+) -> Limits {
     Limits {
-        memory_max_bytes: memory_mb.saturating_add(overhead_mib).saturating_mul(1024 * 1024),
+        memory_max_bytes: memory_mb
+            .saturating_add(overhead_mib)
+            .saturating_mul(1024 * 1024),
         pids_max: max_processes,
         cpu_max: cpu_limit.then(|| format!("{} 100000", (vcpus as u64 + 1) * 100_000)),
     }
@@ -54,11 +62,16 @@ pub fn init(config: &DaemonConfig) -> Result<()> {
     let result = prepare_root(Path::new(&config.ch_cgroup_root));
     match result {
         Ok(path) => {
-            info!("confined Cloud Hypervisors get a cgroup each under {}", path.display());
+            info!(
+                "confined Cloud Hypervisors get a cgroup each under {}",
+                path.display()
+            );
             let _ = ROOT.set(Some(Root { path }));
             Ok(())
         }
-        Err(e) if config.ch_require_cgroup => Err(e.context("ch_require_cgroup is set and the cgroup root cannot be used")),
+        Err(e) if config.ch_require_cgroup => {
+            Err(e.context("ch_require_cgroup is set and the cgroup root cannot be used"))
+        }
         Err(e) => {
             warn!("no cgroup limits for the Cloud Hypervisors: {e:#}; they run without (set ch_require_cgroup to refuse that)");
             let _ = ROOT.set(None);
@@ -71,7 +84,12 @@ pub fn init(config: &DaemonConfig) -> Result<()> {
 /// has a `.`/`..` in it.
 fn ancestors_below_mount(root: &Path) -> Vec<PathBuf> {
     use std::path::Component;
-    if root.components().any(|c| matches!(c, Component::ParentDir | Component::CurDir)) || !root.starts_with(MOUNT) || root == Path::new(MOUNT) {
+    if root
+        .components()
+        .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+        || !root.starts_with(MOUNT)
+        || root == Path::new(MOUNT)
+    {
         return Vec::new();
     }
     let mut out = Vec::new();
@@ -121,7 +139,9 @@ fn prepare_root(root: &Path) -> Result<PathBuf> {
 }
 
 fn root() -> Option<&'static Path> {
-    ROOT.get().and_then(|r| r.as_ref()).map(|r| r.path.as_path())
+    ROOT.get()
+        .and_then(|r| r.as_ref())
+        .map(|r| r.path.as_path())
 }
 
 /// The cgroup directory of the VM of this name (it need not exist).
@@ -131,17 +151,21 @@ pub fn path_of(vm_name: &str) -> Option<PathBuf> {
 
 /// Make the cgroup of a VM and set its limits. None when cgroups are not in use.
 pub fn create(vm_name: &str, limits: &Limits) -> Result<Option<PathBuf>> {
-    let Some(dir) = path_of(vm_name) else { return Ok(None) };
-    std::fs::create_dir(&dir).or_else(|e| {
-        if e.kind() == std::io::ErrorKind::AlreadyExists {
-            Ok(())
-        } else {
-            Err(e)
-        }
-    })
-    .with_context(|| format!("create {}", dir.display()))?;
+    let Some(dir) = path_of(vm_name) else {
+        return Ok(None);
+    };
+    std::fs::create_dir(&dir)
+        .or_else(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })
+        .with_context(|| format!("create {}", dir.display()))?;
     let set = |file: &str, value: &str| -> Result<()> {
-        std::fs::write(dir.join(file), value).with_context(|| format!("write {value:?} to {}", dir.join(file).display()))
+        std::fs::write(dir.join(file), value)
+            .with_context(|| format!("write {value:?} to {}", dir.join(file).display()))
     };
     set("memory.max", &limits.memory_max_bytes.to_string())?;
     // The guest's memory is not to go to the host's swap.
@@ -207,7 +231,9 @@ pub fn parse_populated(events: &str) -> Option<bool> {
 /// At start: the cgroups of VMs of an earlier daemon go, with whatever is left in them.
 pub async fn sweep() {
     let Some(root) = root() else { return };
-    let Ok(entries) = std::fs::read_dir(root) else { return };
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
         if e.path().is_dir() && !name.starts_with('.') {
@@ -227,9 +253,16 @@ mod tests {
         assert_eq!(l.pids_max, 1024);
         assert_eq!(l.cpu_max, None);
         let l = limits_for(128, 1, 256, 1024, true);
-        assert_eq!(l.cpu_max.as_deref(), Some("200000 100000"), "one vCPU plus one thread");
+        assert_eq!(
+            l.cpu_max.as_deref(),
+            Some("200000 100000"),
+            "one vCPU plus one thread"
+        );
         // absurd sizes do not wrap around
-        assert_eq!(limits_for(u64::MAX, 1, 256, 1, false).memory_max_bytes, u64::MAX);
+        assert_eq!(
+            limits_for(u64::MAX, 1, 256, 1, false).memory_max_bytes,
+            u64::MAX
+        );
     }
 
     #[test]
@@ -242,8 +275,14 @@ mod tests {
     #[test]
     fn a_root_outside_the_cgroup_file_system_is_refused() {
         assert!(ancestors_below_mount(Path::new("/tmp/cloudhv")).is_empty());
-        assert!(ancestors_below_mount(Path::new("/sys/fs/cgroup")).is_empty(), "the mount itself is not a root");
-        assert!(ancestors_below_mount(Path::new("/sys/fs/cgroup/../../tmp")).is_empty(), "no ..");
+        assert!(
+            ancestors_below_mount(Path::new("/sys/fs/cgroup")).is_empty(),
+            "the mount itself is not a root"
+        );
+        assert!(
+            ancestors_below_mount(Path::new("/sys/fs/cgroup/../../tmp")).is_empty(),
+            "no .."
+        );
         assert!(prepare_root(Path::new("/tmp/cloudhv")).is_err());
         assert_eq!(
             ancestors_below_mount(Path::new("/sys/fs/cgroup/a/b/cloudhv")),

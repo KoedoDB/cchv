@@ -67,8 +67,19 @@ pub fn default_pv_roots() -> Vec<String> {
 /// Bind mounts a container can do without: if the runtime's file is not there, the container starts without it.
 const OPTIONAL_DESTINATIONS: &[&str] = &["/dev/termination-log"];
 
+/// Where the kubelet makes the emptyDirs of a pod: `<root>/<pod uid>/volumes/kubernetes.io~empty-dir/<name>`.
+const EMPTYDIR_PLUGIN: &str = "kubernetes.io~empty-dir";
+
+/// The file systems that are memory: an emptyDir on one of these is `medium: Memory`, and stays in the guest's memory.
+const TMPFS_MAGIC: i64 = 0x0102_1994;
+const RAMFS_MAGIC: i64 = 0x8584_58f6;
+
 struct Policy {
     roots: Vec<PathBuf>,
+    /// The kubelet's directory of pods, where an emptyDir is looked for (a persistent volume's directory cannot make a volume a disk).
+    kubelet_roots: Vec<PathBuf>,
+    /// The size (MiB) of the disk of an emptyDir that is not in memory; 0: such an emptyDir stays in the guest's memory.
+    emptydir_mib: u64,
     deadline: Duration,
     /// Resolve without `openat2` (for tests; also what runs on a kernel that has none).
     force_fallback: bool,
@@ -76,7 +87,15 @@ struct Policy {
 
 /// The volumes (JSON, as the daemon's API takes them) for the bind mounts of the OCI spec. `pv_roots` are the persistent volume
 /// roots of the configuration. An error means the container must not be started.
-pub fn from_spec(config_json: &[u8], pv_roots: &[String]) -> Result<Vec<serde_json::Value>, String> {
+///
+/// An emptyDir of the kubelet that is on a disk of the host (the default medium; not `medium: Memory`, which the kubelet makes a tmpfs)
+/// is not read: it is passed as `"disk": {"id", "size_mb"}` (`emptydir_mib`, 0 to keep it in the guest's memory), and the daemon gives
+/// the VM a disk for it. The host's directory is not touched; its contents (nothing, when the pod starts) are not copied.
+pub fn from_spec(
+    config_json: &[u8],
+    pv_roots: &[String],
+    emptydir_mib: u64,
+) -> Result<Vec<serde_json::Value>, String> {
     let roots = BUILTIN_ROOTS
         .iter()
         .map(|r| PathBuf::from(*r))
@@ -86,6 +105,8 @@ pub fn from_spec(config_json: &[u8], pv_roots: &[String]) -> Result<Vec<serde_js
         config_json,
         &Policy {
             roots,
+            kubelet_roots: vec![PathBuf::from(BUILTIN_ROOTS[0])],
+            emptydir_mib,
             deadline: DEADLINE,
             force_fallback: false,
         },
@@ -125,6 +146,16 @@ fn from_spec_with(config_json: &[u8], policy: &Policy) -> Result<Vec<serde_json:
             .and_then(|o| o.as_array())
             .map(|o| o.iter().any(|x| x.as_str() == Some("ro")))
             .unwrap_or(false);
+        if policy.emptydir_mib > 0 && is_disk_emptydir(source, policy) {
+            volumes.push(serde_json::json!({
+                "destination": dest,
+                "source": format!("{VOLUME_ROOT}/{}", name_of(source)),
+                "readonly": readonly,
+                "files": [],
+                "disk": {"id": name_of(source), "size_mb": policy.emptydir_mib},
+            }));
+            continue;
+        }
         match read_volume(source, dest, &roots, policy, started) {
             Ok(files) => {
                 let files: Vec<serde_json::Value> = files
@@ -153,6 +184,51 @@ fn from_spec_with(config_json: &[u8], policy: &Policy) -> Result<Vec<serde_json:
     Ok(volumes)
 }
 
+/// Whether `source` is the kubelet's emptyDir of a pod that is on the host's disk. It must really be below the kubelet's pods
+/// directory, in the emptyDir plugin's directory (`<pod uid>/volumes/kubernetes.io~empty-dir/<name>`), a directory (not a link: it is
+/// resolved from the root, as `read_volume` does) and not on a memory file system. Anything doubtful is `false`: the volume is then
+/// read as before (and refused if it is not allowed).
+fn is_disk_emptydir(source: &str, policy: &Policy) -> bool {
+    let Ok(real) = std::fs::canonicalize(source) else {
+        return false;
+    };
+    for root in policy
+        .kubelet_roots
+        .iter()
+        .filter_map(|r| std::fs::canonicalize(r).ok())
+    {
+        let Ok(rel) = real.strip_prefix(&root) else {
+            continue;
+        };
+        let parts: Vec<&str> = rel.iter().filter_map(|c| c.to_str()).collect();
+        if parts.len() != 4 || parts[1] != "volumes" || parts[2] != EMPTYDIR_PLUGIN {
+            return false;
+        }
+        let Ok(root_c) = cstring(&root) else {
+            return false;
+        };
+        let Ok(root_fd) = open_fd(&root_c, libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC)
+        else {
+            return false;
+        };
+        let Ok(fd) = resolve_beneath(&root_fd, &rel.to_string_lossy(), policy.force_fallback)
+        else {
+            return false;
+        };
+        let Ok(st) = fstat(&fd) else { return false };
+        if st.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            return false;
+        }
+        let mut sfs: libc::statfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstatfs(fd.as_raw_fd(), &mut sfs) } != 0 {
+            return false;
+        }
+        let kind = sfs.f_type as i64;
+        return kind != TMPFS_MAGIC && kind != RAMFS_MAGIC;
+    }
+    false
+}
+
 /// The name of a volume in the guest: the same host directory (an emptyDir mounted by two containers) is the same directory.
 fn name_of(source: &str) -> String {
     let digest = Sha256::digest(source.as_bytes());
@@ -167,7 +243,8 @@ fn read_volume(
     started: Instant,
 ) -> Result<BTreeMap<String, (Vec<u8>, u32)>, String> {
     // The source, as it really is, must be below a root: a link in the path cannot take it elsewhere.
-    let real = std::fs::canonicalize(source).map_err(|e| format!("cannot resolve the source: {e}"))?;
+    let real =
+        std::fs::canonicalize(source).map_err(|e| format!("cannot resolve the source: {e}"))?;
     let root = roots
         .iter()
         .filter(|r| real.starts_with(r) && real != **r)
@@ -312,7 +389,9 @@ fn read_regular(fd: &OwnedFd, max: usize) -> std::io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     (&mut f).take(max as u64 + 1).read_to_end(&mut buf)?;
     if buf.len() > max {
-        return Err(std::io::Error::other(format!("the file is larger than {max} bytes")));
+        return Err(std::io::Error::other(format!(
+            "the file is larger than {max} bytes"
+        )));
     }
     Ok(buf)
 }
@@ -337,7 +416,8 @@ static NO_OPENAT2: AtomicBool = AtomicBool::new(false);
 /// An `O_PATH` descriptor for `rel`, below `root`: every link on the way is followed, and none may lead out of `root`.
 fn resolve_beneath(root: &OwnedFd, rel: &str, force_fallback: bool) -> std::io::Result<OwnedFd> {
     if !force_fallback && !NO_OPENAT2.load(Ordering::Relaxed) {
-        let c = std::ffi::CString::new(rel).map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        let c = std::ffi::CString::new(rel)
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
         let how = OpenHow {
             flags: (libc::O_PATH | libc::O_CLOEXEC) as u64,
             mode: 0,
@@ -392,7 +472,8 @@ fn resolve_beneath_by_hand(root: &OwnedFd, rel: &str) -> std::io::Result<OwnedFd
             last = None;
             continue;
         }
-        let cc = std::ffi::CString::new(c).map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        let cc = std::ffi::CString::new(c)
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
         let dir = stack.last().expect("the stack holds the root");
         let fd = unsafe {
             libc::openat(
@@ -475,13 +556,17 @@ mod tests {
     fn policy(root: &Path, fallback: bool) -> Policy {
         Policy {
             roots: vec![root.to_path_buf()],
+            kubelet_roots: vec![root.to_path_buf()],
+            emptydir_mib: 0,
             deadline: Duration::from_secs(5),
             force_fallback: fallback,
         }
     }
 
     fn spec(mounts: serde_json::Value) -> Vec<u8> {
-        serde_json::json!({ "mounts": mounts }).to_string().into_bytes()
+        serde_json::json!({ "mounts": mounts })
+            .to_string()
+            .into_bytes()
     }
 
     fn names(v: &serde_json::Value) -> Vec<String> {
@@ -522,11 +607,16 @@ mod tests {
             assert!(v[0]["source"].as_str().unwrap().starts_with(VOLUME_ROOT));
             // The kubelet's own links work, and its `..` entries are not there twice.
             let secret = names(&v[1]);
-            assert!(secret.contains(&"token".to_string()), "fallback={fallback}: {secret:?}");
+            assert!(
+                secret.contains(&"token".to_string()),
+                "fallback={fallback}: {secret:?}"
+            );
             assert!(!secret.iter().any(|n| n.starts_with("..")), "{secret:?}");
             let content = v[1]["files"][0]["content"].as_str().unwrap();
             assert_eq!(
-                base64::engine::general_purpose::STANDARD.decode(content).unwrap(),
+                base64::engine::general_purpose::STANDARD
+                    .decode(content)
+                    .unwrap(),
                 b"secret"
             );
         }
@@ -570,12 +660,16 @@ mod tests {
         let other = Tmp::new("c-other");
         let mounts = serde_json::json!([{"destination": "/v", "type": "bind", "source": dir}]);
         let e = from_spec_with(&spec(mounts), &policy(&other.0, false)).unwrap_err();
-        assert!(e.contains("not below a path the runtime makes volumes in"), "{e}");
+        assert!(
+            e.contains("not below a path the runtime makes volumes in"),
+            "{e}"
+        );
         // The root itself is not a volume.
         let mounts = serde_json::json!([{"destination": "/v", "type": "bind", "source": t.0}]);
         assert!(from_spec_with(&spec(mounts), &policy(&t.0, false)).is_err());
         // A hostPath such as /etc.
-        let mounts = serde_json::json!([{"destination": "/host", "type": "bind", "source": "/etc"}]);
+        let mounts =
+            serde_json::json!([{"destination": "/host", "type": "bind", "source": "/etc"}]);
         assert!(from_spec_with(&spec(mounts), &policy(&t.0, false)).is_err());
     }
 
@@ -612,7 +706,9 @@ mod tests {
         let mounts = serde_json::json!([{"destination": "/data", "type": "bind", "source": gone}]);
         assert!(from_spec_with(&spec(mounts), &policy(&t.0, false)).is_err());
         let mounts = serde_json::json!([{"destination": "/dev/termination-log", "type": "bind", "source": gone}]);
-        assert!(from_spec_with(&spec(mounts), &policy(&t.0, false)).unwrap().is_empty());
+        assert!(from_spec_with(&spec(mounts), &policy(&t.0, false))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -639,15 +735,40 @@ mod tests {
         symlink("../../out", vol.join("a/b/up")).unwrap();
         symlink("/etc/passwd", vol.join("abs")).unwrap();
         symlink("loop", vol.join("loop")).unwrap();
-        let root = open_fd(&cstring(&vol).unwrap(), libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC).unwrap();
+        let root = open_fd(
+            &cstring(&vol).unwrap(),
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+        .unwrap();
         for fallback in [false, true] {
-            assert!(resolve_beneath(&root, "a/l", fallback).is_ok(), "fallback={fallback}");
-            assert!(resolve_beneath(&root, "a/../a/b/f", fallback).is_ok(), "fallback={fallback}");
-            assert!(resolve_beneath(&root, "a/b/up", fallback).is_err(), "fallback={fallback}");
-            assert!(resolve_beneath(&root, "../out", fallback).is_err(), "fallback={fallback}");
-            assert!(resolve_beneath(&root, "abs", fallback).is_err(), "fallback={fallback}");
-            assert!(resolve_beneath(&root, "loop", fallback).is_err(), "fallback={fallback}");
-            assert!(resolve_beneath(&root, "a/b/f/x", fallback).is_err(), "fallback={fallback}");
+            assert!(
+                resolve_beneath(&root, "a/l", fallback).is_ok(),
+                "fallback={fallback}"
+            );
+            assert!(
+                resolve_beneath(&root, "a/../a/b/f", fallback).is_ok(),
+                "fallback={fallback}"
+            );
+            assert!(
+                resolve_beneath(&root, "a/b/up", fallback).is_err(),
+                "fallback={fallback}"
+            );
+            assert!(
+                resolve_beneath(&root, "../out", fallback).is_err(),
+                "fallback={fallback}"
+            );
+            assert!(
+                resolve_beneath(&root, "abs", fallback).is_err(),
+                "fallback={fallback}"
+            );
+            assert!(
+                resolve_beneath(&root, "loop", fallback).is_err(),
+                "fallback={fallback}"
+            );
+            assert!(
+                resolve_beneath(&root, "a/b/f/x", fallback).is_err(),
+                "fallback={fallback}"
+            );
         }
     }
 
@@ -690,11 +811,23 @@ mod tests {
             let mounts = serde_json::json!([{"destination": "/v", "type": "bind", "source": vol}]);
             let s = spec(mounts);
             for _ in 0..300 {
-                if let Ok(v) = from_spec_with(&s, &Policy { roots: vec![t.0.clone()], ..policy(&t.0, fallback) }) {
+                if let Ok(v) = from_spec_with(
+                    &s,
+                    &Policy {
+                        roots: vec![t.0.clone()],
+                        ..policy(&t.0, fallback)
+                    },
+                ) {
                     let text = serde_json::to_string(&v).unwrap();
                     let host = base64::engine::general_purpose::STANDARD.encode(b"HOST-SECRET");
-                    assert!(!text.contains(&host), "fallback={fallback}: the outside file was read");
-                    assert!(!text.contains("root:"), "fallback={fallback}: /etc/passwd of the host was read");
+                    assert!(
+                        !text.contains(&host),
+                        "fallback={fallback}: the outside file was read"
+                    );
+                    assert!(
+                        !text.contains("root:"),
+                        "fallback={fallback}: /etc/passwd of the host was read"
+                    );
                 }
             }
             stop.store(true, Ordering::Relaxed);
@@ -704,8 +837,142 @@ mod tests {
 
     #[test]
     fn a_volume_has_the_same_name_in_every_container_of_the_pod() {
-        assert_eq!(name_of("/var/lib/kubelet/pods/a/volumes/x"), name_of("/var/lib/kubelet/pods/a/volumes/x"));
-        assert_ne!(name_of("/var/lib/kubelet/pods/a/volumes/x"), name_of("/var/lib/kubelet/pods/a/volumes/y"));
+        assert_eq!(
+            name_of("/var/lib/kubelet/pods/a/volumes/x"),
+            name_of("/var/lib/kubelet/pods/a/volumes/x")
+        );
+        assert_ne!(
+            name_of("/var/lib/kubelet/pods/a/volumes/x"),
+            name_of("/var/lib/kubelet/pods/a/volumes/y")
+        );
         assert_eq!(name_of("x").len(), 32);
+    }
+
+    /// A directory on the disk, not in /tmp (which is a tmpfs on many hosts).
+    fn disk_tmp(tag: &str) -> Tmp {
+        let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/emptydir-tests")
+            .join(format!("{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        Tmp(std::fs::canonicalize(&p).unwrap())
+    }
+
+    fn emptydir_policy(root: &Path, mib: u64) -> Policy {
+        Policy {
+            emptydir_mib: mib,
+            ..policy(root, false)
+        }
+    }
+
+    fn make_emptydir(base: &Path) -> PathBuf {
+        let d = base
+            .join("pod-uid")
+            .join("volumes")
+            .join(EMPTYDIR_PLUGIN)
+            .join("cache");
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn an_emptydir_on_the_hosts_disk_becomes_a_disk_and_is_not_read() {
+        let t = disk_tmp("disk");
+        let dir = make_emptydir(&t.0);
+        // Something in it (a leftover): it is not copied.
+        std::fs::write(dir.join("old"), b"data").unwrap();
+        let mounts = serde_json::json!([
+            {"destination": "/cache", "type": "bind", "source": dir, "options": ["rbind"]},
+            {"destination": "/other", "type": "bind", "source": dir, "options": ["rbind", "ro"]},
+        ]);
+        let v = from_spec_with(&spec(mounts), &emptydir_policy(&t.0, 1024)).unwrap();
+        assert_eq!(v.len(), 2);
+        let id = name_of(dir.to_str().unwrap());
+        for (i, ro) in [(0, false), (1, true)] {
+            assert_eq!(v[i]["disk"]["id"], id.as_str());
+            assert_eq!(v[i]["disk"]["size_mb"], 1024);
+            assert_eq!(v[i]["source"], format!("{VOLUME_ROOT}/{id}"));
+            assert_eq!(v[i]["readonly"], ro);
+            assert!(v[i]["files"].as_array().unwrap().is_empty());
+        }
+        // The same directory is the same disk at both destinations.
+        assert_eq!(v[0]["disk"]["id"], v[1]["disk"]["id"]);
+    }
+
+    #[test]
+    fn an_emptydir_in_memory_or_with_the_feature_off_is_read_as_before() {
+        // medium: Memory is a tmpfs
+        let t = Tmp::new("emptydir-mem"); // /tmp
+        if std::fs::read_to_string("/proc/mounts")
+            .map(|m| {
+                m.lines()
+                    .any(|l| l.split(' ').nth(1) == Some("/tmp") && l.contains(" tmpfs "))
+            })
+            .unwrap_or(false)
+        {
+            let dir = make_emptydir(&t.0);
+            let mounts =
+                serde_json::json!([{"destination": "/cache", "type": "bind", "source": dir}]);
+            let v = from_spec_with(&spec(mounts), &emptydir_policy(&t.0, 1024)).unwrap();
+            assert!(
+                v[0].get("disk").is_none(),
+                "a tmpfs emptyDir stays in the guest's memory"
+            );
+        }
+        // size 0: off
+        let d = disk_tmp("off");
+        let dir = make_emptydir(&d.0);
+        let mounts = serde_json::json!([{"destination": "/cache", "type": "bind", "source": dir}]);
+        let v = from_spec_with(&spec(mounts), &emptydir_policy(&d.0, 0)).unwrap();
+        assert!(v[0].get("disk").is_none());
+    }
+
+    #[test]
+    fn only_the_kubelets_emptydir_directories_are_disks() {
+        let t = disk_tmp("notdisk");
+        let p = emptydir_policy(&t.0, 1024);
+        // a ConfigMap, a persistent volume, the pod's own files: files, as before
+        let other =
+            t.0.join("pod-uid")
+                .join("volumes")
+                .join("kubernetes.io~configmap")
+                .join("cfg");
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(!is_disk_emptydir(other.to_str().unwrap(), &p));
+        let shallow = t.0.join("pod-uid").join("volumes").join(EMPTYDIR_PLUGIN);
+        assert!(
+            !is_disk_emptydir(shallow.to_str().unwrap(), &p),
+            "the plugin directory itself"
+        );
+        let deep = make_emptydir(&t.0).join("sub");
+        std::fs::create_dir_all(&deep).unwrap();
+        assert!(
+            !is_disk_emptydir(deep.to_str().unwrap(), &p),
+            "a directory inside an emptyDir"
+        );
+        // a file with the right name
+        let file =
+            t.0.join("pod-uid")
+                .join("volumes")
+                .join(EMPTYDIR_PLUGIN)
+                .join("file");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(!is_disk_emptydir(file.to_str().unwrap(), &p));
+        // outside the kubelet's directory, even with the right shape (a persistent volume's customer-made directory)
+        let elsewhere = disk_tmp("elsewhere");
+        let fake = make_emptydir(&elsewhere.0);
+        assert!(!is_disk_emptydir(fake.to_str().unwrap(), &p));
+        // a link to a real emptyDir resolves to it (the kubelet's own directory may be a link); a link out does not
+        let real = make_emptydir(&t.0);
+        assert!(is_disk_emptydir(real.to_str().unwrap(), &p));
+        let l =
+            t.0.join("pod-uid")
+                .join("volumes")
+                .join(EMPTYDIR_PLUGIN)
+                .join("l");
+        symlink(&fake, &l).unwrap();
+        assert!(!is_disk_emptydir(l.to_str().unwrap(), &p));
+        // does not exist
+        assert!(!is_disk_emptydir("/nonexistent/x", &p));
     }
 }

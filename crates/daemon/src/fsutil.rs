@@ -42,7 +42,10 @@ const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 /// directory someone else can write to, so a kernel with `openat2` is what to run).
 pub fn open_nosymlinks(path: &Path, flags: i32) -> io::Result<OwnedFd> {
     if !path.is_absolute() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "path is not absolute"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path is not absolute",
+        ));
     }
     let c = cstr(path)?;
     let how = OpenHow {
@@ -127,12 +130,20 @@ pub fn remove_entry(dir: RawFd, name: &str, st: &libc::stat) -> io::Result<()> {
     remove_entry_bounded(dir, name, st, 0, &mut budget)
 }
 
-fn remove_entry_bounded(dir: RawFd, name: &str, st: &libc::stat, depth: usize, budget: &mut usize) -> io::Result<()> {
+fn remove_entry_bounded(
+    dir: RawFd,
+    name: &str,
+    st: &libc::stat,
+    depth: usize,
+    budget: &mut usize,
+) -> io::Result<()> {
     let c = std::ffi::CString::new(name)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name contains a NUL"))?;
     if is_dir(st) {
         if depth >= REMOVE_MAX_DEPTH {
-            return Err(io::Error::other("the directory tree is deeper than the limit"));
+            return Err(io::Error::other(
+                "the directory tree is deeper than the limit",
+            ));
         }
         // Empty it first (through a descriptor, so a link in it is removed, not followed), then the directory.
         let mut failed = None;
@@ -143,11 +154,15 @@ fn remove_entry_bounded(dir: RawFd, name: &str, st: &libc::stat, depth: usize, b
         ) {
             for child in list(sub.as_raw_fd())? {
                 if *budget == 0 {
-                    return Err(io::Error::other("the directory tree has more entries than the limit"));
+                    return Err(io::Error::other(
+                        "the directory tree has more entries than the limit",
+                    ));
                 }
                 *budget -= 1;
                 if let Ok(cst) = fstatat_nofollow(sub.as_raw_fd(), &child) {
-                    if let Err(e) = remove_entry_bounded(sub.as_raw_fd(), &child, &cst, depth + 1, budget) {
+                    if let Err(e) =
+                        remove_entry_bounded(sub.as_raw_fd(), &child, &cst, depth + 1, budget)
+                    {
                         failed = Some(e);
                     }
                 }
@@ -196,7 +211,8 @@ pub fn fgetxattr(fd: RawFd, name: &[u8], buf: &mut [u8]) -> io::Result<usize> {
 }
 
 pub fn fsetxattr(fd: RawFd, name: &[u8], value: &[u8]) -> io::Result<()> {
-    cvt(unsafe { libc::fsetxattr(fd, name.as_ptr() as _, value.as_ptr() as _, value.len(), 0) }).map(|_| ())
+    cvt(unsafe { libc::fsetxattr(fd, name.as_ptr() as _, value.as_ptr() as _, value.len(), 0) })
+        .map(|_| ())
 }
 
 pub fn fremovexattr(fd: RawFd, name: &[u8]) -> io::Result<()> {
@@ -222,8 +238,14 @@ mod tests {
         std::os::unix::fs::symlink(d.join("real"), d.join("link")).unwrap();
         std::os::unix::fs::symlink(d.join("real/f"), d.join("real/flink")).unwrap();
         assert!(open_nosymlinks(&d.join("real/f"), libc::O_RDONLY).is_ok());
-        assert!(open_nosymlinks(&d.join("link/f"), libc::O_RDONLY).is_err(), "link as a directory");
-        assert!(open_nosymlinks(&d.join("real/flink"), libc::O_RDONLY).is_err(), "link as the file");
+        assert!(
+            open_nosymlinks(&d.join("link/f"), libc::O_RDONLY).is_err(),
+            "link as a directory"
+        );
+        assert!(
+            open_nosymlinks(&d.join("real/flink"), libc::O_RDONLY).is_err(),
+            "link as the file"
+        );
         assert!(open_nosymlinks(Path::new("relative"), libc::O_RDONLY).is_err());
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -235,7 +257,10 @@ mod tests {
         let mut cur = open_nosymlinks(&d, libc::O_RDONLY | libc::O_DIRECTORY).unwrap();
         for _ in 0..(REMOVE_MAX_DEPTH + 20) {
             let c = std::ffi::CString::new("d").unwrap();
-            assert_eq!(unsafe { libc::mkdirat(cur.as_raw_fd(), c.as_ptr(), 0o755) }, 0);
+            assert_eq!(
+                unsafe { libc::mkdirat(cur.as_raw_fd(), c.as_ptr(), 0o755) },
+                0
+            );
             cur = openat(cur.as_raw_fd(), "d", libc::O_RDONLY | libc::O_DIRECTORY).unwrap();
         }
         let top = open_nosymlinks(&d, libc::O_RDONLY | libc::O_DIRECTORY).unwrap();
@@ -265,7 +290,10 @@ mod tests {
         let st = fstatat_nofollow(dir.as_raw_fd(), "sub").unwrap();
         remove_entry(dir.as_raw_fd(), "sub", &st).unwrap();
         assert!(!d.join("sub").exists());
-        assert!(victim.join("keep").exists(), "what the link pointed at is still there");
+        assert!(
+            victim.join("keep").exists(),
+            "what the link pointed at is still there"
+        );
         let _ = std::fs::remove_dir_all(&d);
         let _ = std::fs::remove_dir_all(&victim);
     }

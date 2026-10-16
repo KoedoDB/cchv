@@ -50,7 +50,8 @@ pub fn create(state_dir: &Path) -> Result<PathBuf> {
 
 pub fn write(state_dir: &Path, name: &str, content: &str) -> Result<()> {
     let dir = create(state_dir)?;
-    std::fs::write(dir.join(name), content).with_context(|| format!("write {name} of {}", state_dir.display()))
+    std::fs::write(dir.join(name), content)
+        .with_context(|| format!("write {name} of {}", state_dir.display()))
 }
 
 pub fn read(state_dir: &Path, name: &str) -> Option<String> {
@@ -96,7 +97,9 @@ pub fn cmdline_is_ch_of(cmdline: &[u8], api_sock: &Path) -> bool {
     let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
     let sock = api_sock.as_os_str().as_encoded_bytes();
     !args.first().map(|a| a.is_empty()).unwrap_or(true)
-        && args.windows(2).any(|w| w[0] == b"--api-socket" && w[1] == sock)
+        && args
+            .windows(2)
+            .any(|w| w[0] == b"--api-socket" && w[1] == sock)
 }
 
 /// The real user of a process, from `/proc/<pid>/status` (the owner of `/proc/<pid>` is root for a process that is not dumpable).
@@ -157,7 +160,15 @@ pub fn signal_ch(pid: u32, state_dir: &Path, sig: i32) -> bool {
     let sent = if !verified {
         false
     } else if have_pidfd {
-        unsafe { libc::syscall(SYS_PIDFD_SEND_SIGNAL, pidfd as libc::c_int, sig, 0usize, 0u32) == 0 }
+        unsafe {
+            libc::syscall(
+                SYS_PIDFD_SEND_SIGNAL,
+                pidfd as libc::c_int,
+                sig,
+                0usize,
+                0u32,
+            ) == 0
+        }
     } else {
         unsafe { libc::kill(pid as libc::pid_t, sig) == 0 }
     };
@@ -205,7 +216,11 @@ pub(crate) fn status_has_uid(status: &str, uid: u32) -> bool {
     status
         .lines()
         .find_map(|l| l.strip_prefix("Uid:"))
-        .map(|l| l.split_whitespace().filter_map(|u| u.parse::<u32>().ok()).any(|u| u == uid))
+        .map(|l| {
+            l.split_whitespace()
+                .filter_map(|u| u.parse::<u32>().ok())
+                .any(|u| u == uid)
+        })
         .unwrap_or(false)
 }
 
@@ -242,7 +257,15 @@ pub fn kill_if_uid(pid: u32, uid: u32) {
     }
     if let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) {
         if status_has_uid(&status, uid) {
-            unsafe { libc::syscall(SYS_PIDFD_SEND_SIGNAL, pidfd as libc::c_int, libc::SIGKILL, 0usize, 0u32) };
+            unsafe {
+                libc::syscall(
+                    SYS_PIDFD_SEND_SIGNAL,
+                    pidfd as libc::c_int,
+                    libc::SIGKILL,
+                    0usize,
+                    0u32,
+                )
+            };
         }
     }
     unsafe { libc::close(pidfd as libc::c_int) };
@@ -270,7 +293,10 @@ mod tests {
         let other_vm = b"/usr/local/bin/cloud-hypervisor\0--api-socket\0/run/cloudhv/daemon/pool-1-5/api.sock\0";
         assert!(!cmdline_is_ch_of(other_vm, sock));
         let renamed = b"/opt/ch\0--api-socket\0/run/cloudhv/daemon/pool-1-4/api.sock\0";
-        assert!(cmdline_is_ch_of(renamed, sock), "the program's name does not matter");
+        assert!(
+            cmdline_is_ch_of(renamed, sock),
+            "the program's name does not matter"
+        );
         let sshd = b"/usr/sbin/sshd\0-D\0";
         assert!(!cmdline_is_ch_of(sshd, sock));
         let no_flag = b"/usr/local/bin/cloud-hypervisor\0/run/cloudhv/daemon/pool-1-4/api.sock\0";

@@ -246,12 +246,20 @@ impl DaemonClient {
 
     /// Start the exec process; returns its pid in the guest.
     pub async fn exec_start(&self, vm_id: &str, container_id: &str, exec_id: &str) -> Result<u32> {
-        let resp = self.rpc(&Self::exec_ids("ExecStart", vm_id, container_id, exec_id)).await?;
+        let resp = self
+            .rpc(&Self::exec_ids("ExecStart", vm_id, container_id, exec_id))
+            .await?;
         Self::check_error(&resp, "ExecStart")?;
         Ok(resp["pid"].as_u64().unwrap_or(0) as u32)
     }
 
-    pub async fn exec_kill(&self, vm_id: &str, container_id: &str, exec_id: &str, signal: u32) -> Result<()> {
+    pub async fn exec_kill(
+        &self,
+        vm_id: &str,
+        container_id: &str,
+        exec_id: &str,
+        signal: u32,
+    ) -> Result<()> {
         let mut req = Self::exec_ids("ExecKill", vm_id, container_id, exec_id);
         req["signal"] = signal.into();
         let resp = self.rpc(&req).await?;
@@ -279,26 +287,55 @@ impl DaemonClient {
     }
 
     pub async fn exec_delete(&self, vm_id: &str, container_id: &str, exec_id: &str) -> Result<()> {
-        let resp = self.rpc(&Self::exec_ids("ExecDelete", vm_id, container_id, exec_id)).await?;
+        let resp = self
+            .rpc(&Self::exec_ids("ExecDelete", vm_id, container_id, exec_id))
+            .await?;
         Self::check_error(&resp, "ExecDelete")
     }
 
     /// Write to the exec process's standard input; returns how many bytes were taken.
-    pub async fn exec_write(&self, vm_id: &str, container_id: &str, exec_id: &str, data: &[u8]) -> Result<usize> {
+    pub async fn exec_write(
+        &self,
+        vm_id: &str,
+        container_id: &str,
+        exec_id: &str,
+        data: &[u8],
+    ) -> Result<usize> {
         use base64::Engine;
         let mut req = Self::exec_ids("ExecWrite", vm_id, container_id, exec_id);
-        req["data"] = base64::engine::general_purpose::STANDARD.encode(data).into();
+        req["data"] = base64::engine::general_purpose::STANDARD
+            .encode(data)
+            .into();
         let resp = self.rpc(&req).await?;
         Self::check_error(&resp, "ExecWrite")?;
         Ok(resp["written"].as_u64().unwrap_or(data.len() as u64) as usize)
     }
 
-    pub async fn exec_close_stdin(&self, vm_id: &str, container_id: &str, exec_id: &str) -> Result<()> {
-        let resp = self.rpc(&Self::exec_ids("ExecCloseStdin", vm_id, container_id, exec_id)).await?;
+    pub async fn exec_close_stdin(
+        &self,
+        vm_id: &str,
+        container_id: &str,
+        exec_id: &str,
+    ) -> Result<()> {
+        let resp = self
+            .rpc(&Self::exec_ids(
+                "ExecCloseStdin",
+                vm_id,
+                container_id,
+                exec_id,
+            ))
+            .await?;
         Self::check_error(&resp, "ExecCloseStdin")
     }
 
-    pub async fn exec_resize(&self, vm_id: &str, container_id: &str, exec_id: &str, width: u32, height: u32) -> Result<()> {
+    pub async fn exec_resize(
+        &self,
+        vm_id: &str,
+        container_id: &str,
+        exec_id: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
         let mut req = Self::exec_ids("ExecResize", vm_id, container_id, exec_id);
         req["width"] = width.into();
         req["height"] = height.into();
@@ -326,7 +363,8 @@ impl DaemonClient {
         Self::check_error(&resp, "ExecRead")?;
         let b64 = base64::engine::general_purpose::STANDARD;
         let decode = |key: &str| -> Result<Vec<u8>> {
-            b64.decode(resp[key].as_str().unwrap_or("")).with_context(|| format!("decode {key}"))
+            b64.decode(resp[key].as_str().unwrap_or(""))
+                .with_context(|| format!("decode {key}"))
         };
         Ok(ExecChunk {
             stdout: decode("stdout")?,
@@ -377,7 +415,10 @@ impl DaemonClient {
             msg.push('\n');
 
             let (reader, mut writer) = stream.into_split();
-            writer.write_all(msg.as_bytes()).await.context("write to the daemon")?;
+            writer
+                .write_all(msg.as_bytes())
+                .await
+                .context("write to the daemon")?;
 
             let mut buf_reader = BufReader::new(reader.take(MAX_RESPONSE));
             let mut line = String::new();
@@ -444,7 +485,13 @@ mod tests {
     use super::*;
 
     /// A daemon that answers one request with `answer` and returns the request it got.
-    async fn once(answer: Value) -> (DaemonClient, tokio::task::JoinHandle<Value>, tempfile::TempDir) {
+    async fn once(
+        answer: Value,
+    ) -> (
+        DaemonClient,
+        tokio::task::JoinHandle<Value>,
+        tempfile::TempDir,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("d.sock");
         let listener = UnixListener::bind(&sock).unwrap();
@@ -453,7 +500,9 @@ mod tests {
             let (rd, mut wr) = stream.into_split();
             let mut line = String::new();
             BufReader::new(rd).read_line(&mut line).await.unwrap();
-            wr.write_all(format!("{answer}\n").as_bytes()).await.unwrap();
+            wr.write_all(format!("{answer}\n").as_bytes())
+                .await
+                .unwrap();
             serde_json::from_str(line.trim()).unwrap()
         });
         (DaemonClient::new(sock.to_str().unwrap()), h, dir)
@@ -486,7 +535,17 @@ mod tests {
     async fn add_container_says_whether_the_container_has_a_terminal() {
         for terminal in [true, false] {
             let (c, h, _d) = once(json!({"container_pid": 9})).await;
-            let pid = c.add_container("v1", "/run/cloudhv/erofs-cache/a.erofs", "c2", b"{}", &[], terminal).await.unwrap();
+            let pid = c
+                .add_container(
+                    "v1",
+                    "/run/cloudhv/erofs-cache/a.erofs",
+                    "c2",
+                    b"{}",
+                    &[],
+                    terminal,
+                )
+                .await
+                .unwrap();
             assert_eq!(pid, 9);
             let req = h.await.unwrap();
             assert_eq!(req["method"], "AddContainer");

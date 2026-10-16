@@ -265,7 +265,10 @@ impl Pool {
         let state_path = base_dir.join("state.json");
         // The marker is written by the daemon after the VM that made the snapshot was destroyed and the snapshot handed over: a snapshot
         // without it was not finished by a daemon that vouches for it (it may be what a crash left).
-        config_path.exists() && memory_path.exists() && state_path.exists() && base_dir.join(BASE_SNAPSHOT_DONE).exists()
+        config_path.exists()
+            && memory_path.exists()
+            && state_path.exists()
+            && base_dir.join(BASE_SNAPSHOT_DONE).exists()
     }
 
     /// Create a base snapshot by cold-booting a VM, waiting for the agent,
@@ -368,7 +371,14 @@ impl Pool {
 
         // 1. Prepare snapshot: patch CID, vsock socket, serial console
         let vsock_socket = state_dir.join("vsock.sock");
-        let snapshot_dir = match vm_lifecycle::prepare_snapshot(&self.config, &base_dir, &state_dir, cid, &vsock_socket, None) {
+        let snapshot_dir = match vm_lifecycle::prepare_snapshot(
+            &self.config,
+            &base_dir,
+            &state_dir,
+            cid,
+            &vsock_socket,
+            None,
+        ) {
             Ok(d) => d,
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&state_dir);
@@ -378,7 +388,14 @@ impl Pool {
         let t_prepare = t0.elapsed().as_millis();
 
         // 2. Spawn CH process
-        let ch_pid = match vm_lifecycle::spawn_ch(&self.config, &state_dir, self.config.default_memory_mb, self.config.default_vcpus).await {
+        let ch_pid = match vm_lifecycle::spawn_ch(
+            &self.config,
+            &state_dir,
+            self.config.default_memory_mb,
+            self.config.default_vcpus,
+        )
+        .await
+        {
             Ok(p) => p,
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&state_dir);
@@ -431,7 +448,8 @@ impl Pool {
     /// state directory (a shadow VM, or one of an earlier daemon that was killed). Called when the daemon is told to stop, so that its
     /// VMs do not outlive it: a VM that does is held in memory (one resident guest, 38 to 133 MiB) and known to nobody.
     pub async fn shutdown_all(&self) {
-        self.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.stopping
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let mut vms: Vec<PoolVm> = self.ready.lock().await.drain(..).collect();
         vms.extend(self.active.lock().await.drain().map(|(_, vm)| vm));
         self.active_count
@@ -455,7 +473,10 @@ impl Pool {
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o711))?;
         std::fs::create_dir_all(self.config.snapshot_cache_dir())?;
         // The cache is passed through by the VM that writes a snapshot into it, and listed by no one but root.
-        std::fs::set_permissions(self.config.snapshot_cache_dir(), std::fs::Permissions::from_mode(0o711))?;
+        std::fs::set_permissions(
+            self.config.snapshot_cache_dir(),
+            std::fs::Permissions::from_mode(0o711),
+        )?;
         let ctl = root.join(crate::ctl::CTL_DIR);
         std::fs::create_dir_all(&ctl)?;
         std::fs::set_permissions(&ctl, std::fs::Permissions::from_mode(0o700))?;
@@ -501,7 +522,11 @@ impl Pool {
         if let Ok(entries) = std::fs::read_dir(&root) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with('.') || name == "base-snapshot" || name == "snapshot-cache" || seen.contains(&name) {
+                if name.starts_with('.')
+                    || name == "base-snapshot"
+                    || name == "snapshot-cache"
+                    || seen.contains(&name)
+                {
                     continue;
                 }
                 let dir = entry.path();

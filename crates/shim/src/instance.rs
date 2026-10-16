@@ -16,8 +16,8 @@ use containerd_shimkit::sandbox::Error;
 use log::info;
 
 use crate::config::{load_config, load_shim_limits};
-use crate::dockermode::{self, NetnsHolder};
 use crate::daemon_client::{AcquireRequest, DaemonClient};
+use crate::dockermode::{self, NetnsHolder};
 use crate::erofs_cache::{CacheConfig, Lease};
 use crate::exec::ExecProc;
 use crate::vmsize::{check_size, limits_from_spec, vm_size, PodLimits};
@@ -56,7 +56,8 @@ static SANDBOX_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// The leases on the erofs images the sandbox runs from, kept for as long as the sandbox is (see `erofs_cache`).
-static LEASES: LazyLock<Mutex<HashMap<String, Vec<Lease>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static LEASES: LazyLock<Mutex<HashMap<String, Vec<Lease>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn sandbox_lock(sandbox_id: &str) -> Arc<tokio::sync::Mutex<()>> {
     SANDBOX_LOCKS
@@ -69,9 +70,17 @@ fn sandbox_lock(sandbox_id: &str) -> Arc<tokio::sync::Mutex<()>> {
 
 /// The sandbox is over: forget its state, its lock and its leases on images.
 fn forget_sandbox(sandbox_id: &str) {
-    VMS.write().unwrap_or_else(|e| e.into_inner()).remove(sandbox_id);
-    SANDBOX_LOCKS.lock().unwrap_or_else(|e| e.into_inner()).remove(sandbox_id);
-    LEASES.lock().unwrap_or_else(|e| e.into_inner()).remove(sandbox_id);
+    VMS.write()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(sandbox_id);
+    SANDBOX_LOCKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(sandbox_id);
+    LEASES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(sandbox_id);
 }
 
 /// Give the VM back to the daemon and clean up the TAP: best effort, for a sandbox that cannot go on.
@@ -163,7 +172,10 @@ impl Instance for CloudHvInstance {
                 .await
                 .map_err(|e| Error::Any(anyhow::anyhow!("namespace holder task: {e}")))?
                 .map_err(|e| Error::Any(anyhow::anyhow!("{e}")))?;
-            info!("container {id}: network namespace made by holder pid {}", h.pid());
+            info!(
+                "container {id}: network namespace made by holder pid {}",
+                h.pid()
+            );
             Some(Arc::new(h))
         } else {
             None
@@ -280,7 +292,12 @@ impl Instance for CloudHvInstance {
 
     async fn delete(&self) -> Result<(), Error> {
         info!("CloudHvInstance::delete id={}", self.id);
-        if let Some(p) = self.init_input.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        if let Some(p) = self
+            .init_input
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
             p.stop();
         }
         let t_total = std::time::Instant::now();
@@ -359,13 +376,23 @@ impl Instance for CloudHvInstance {
             .filter(|v| !v.daemon_vm_id.is_empty())
             .ok_or_else(|| Error::FailedPrecondition("the container has no VM".into()))?;
         DaemonClient::new(&vm.daemon_socket)
-            .exec_resize(&vm.daemon_vm_id, &self.id, crate::exec::INIT_EXEC_ID, width, height)
+            .exec_resize(
+                &vm.daemon_vm_id,
+                &self.id,
+                crate::exec::INIT_EXEC_ID,
+                width,
+                height,
+            )
             .await
             .map_err(Error::Any)
     }
 
     async fn close_stdin(&self) -> Result<(), Error> {
-        let input = self.init_input.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let input = self
+            .init_input
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         match input {
             Some(p) => p.close_stdin().await,
             None => Ok(()),
@@ -411,7 +438,10 @@ impl Instance for CloudHvInstance {
     async fn exec_delete(&self, exec_id: &str) -> Result<(), Error> {
         let proc = self.exec_proc(exec_id)?;
         let res = proc.delete().await;
-        self.execs.lock().unwrap_or_else(|e| e.into_inner()).remove(exec_id);
+        self.execs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(exec_id);
         res
     }
 
@@ -566,8 +596,12 @@ impl CloudHvInstance {
         // The key of the erofs image (and of the daemon's warm snapshot) says what is mounted at the rootfs: the layers of the
         // mount, plus the image's digest if containerd gives it. When what is mounted cannot be told, the container does not start.
         let digest = image_digest_from_spec(&self.bundle).await;
-        let image_key = crate::cachekey::rootfs_key(&rootfs_path, digest.as_deref())
-            .map_err(|e| Error::Any(anyhow::anyhow!("cannot identify the rootfs of {container_id}: {e}")))?;
+        let image_key =
+            crate::cachekey::rootfs_key(&rootfs_path, digest.as_deref()).map_err(|e| {
+                Error::Any(anyhow::anyhow!(
+                    "cannot identify the rootfs of {container_id}: {e}"
+                ))
+            })?;
 
         // Convert rootfs to erofs (cached by the key). The shim does this because it has access to the bundle rootfs that
         // containerd prepared. Retry on transient failures (e.g. fork pressure under heavy load); a build is a blocking job
@@ -619,7 +653,9 @@ impl CloudHvInstance {
                     }
                     Err(e) => {
                         info!("prepare_erofs attempt {attempt} failed: {e}");
-                        let fatal = e.contains("larger than the whole") || e.contains("cache is full") || e.contains("free space");
+                        let fatal = e.contains("larger than the whole")
+                            || e.contains("cache is full")
+                            || e.contains("free space");
                         last_err = Some(e);
                         if fatal {
                             break;
@@ -628,7 +664,12 @@ impl CloudHvInstance {
                     }
                 }
             }
-            result.ok_or_else(|| Error::Any(anyhow::anyhow!("erofs image: {}", last_err.unwrap_or_default())))?
+            result.ok_or_else(|| {
+                Error::Any(anyhow::anyhow!(
+                    "erofs image: {}",
+                    last_err.unwrap_or_default()
+                ))
+            })?
         };
         let erofs_ms = t_erofs.elapsed().as_millis();
 
@@ -639,9 +680,12 @@ impl CloudHvInstance {
         // never a link out of them. If one cannot be read, or is not allowed, the container is not started.
         let volumes = {
             let (cfg_json, roots) = (config_json.clone(), limits.volume_source_roots.clone());
+            let emptydir_mib = limits.emptydir_default_mib.min(limits.emptydir_max_mib);
             tokio::time::timeout(
                 Duration::from_secs(30),
-                tokio::task::spawn_blocking(move || crate::volumes::from_spec(&cfg_json, &roots)),
+                tokio::task::spawn_blocking(move || {
+                    crate::volumes::from_spec(&cfg_json, &roots, emptydir_mib)
+                }),
             )
             .await
             .map_err(|_| Error::Any(anyhow::anyhow!("reading the volumes took too long")))?
@@ -1068,7 +1112,8 @@ pub fn valid_cgroups_path(p: &str) -> bool {
             && s.len() <= 255
             && s != "."
             && s != ".."
-            && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
     };
     if p.contains(':') {
         let parts: Vec<&str> = p.split(':').collect();
@@ -1081,14 +1126,23 @@ pub fn valid_cgroups_path(p: &str) -> bool {
 /// Put the whole VM into the pod's cgroup: the process the daemon names (`ch_pid`, the launcher of an unprivileged Cloud Hypervisor) and
 /// everything else in the VM's cgroup in the daemon's hierarchy (Cloud Hypervisor itself is the launcher's child and would otherwise stay
 /// outside, with none of the pod's limits).
-fn place_vm_in_pod_cgroup(ch_pid: u32, vm_cgroup: Option<&str>, cgroups_path: &str) -> Result<(), String> {
+fn place_vm_in_pod_cgroup(
+    ch_pid: u32,
+    vm_cgroup: Option<&str>,
+    cgroups_path: &str,
+) -> Result<(), String> {
     place_in_pod_cgroup(ch_pid, cgroups_path)?;
-    let Some(vm_cg) = vm_cgroup else { return Ok(()) };
+    let Some(vm_cg) = vm_cgroup else {
+        return Ok(());
+    };
     if !vm_cg.starts_with("/sys/fs/cgroup/") || vm_cg.contains("..") || vm_cg.contains('\n') {
-        return Err(format!("the VM's cgroup {vm_cg:?} is not under /sys/fs/cgroup"));
+        return Err(format!(
+            "the VM's cgroup {vm_cg:?} is not under /sys/fs/cgroup"
+        ));
     }
     // Where did the launcher land? (/proc/<pid>/cgroup says: `0::/kubepods/burstable/pod<uid>/<id>`)
-    let line = std::fs::read_to_string(format!("/proc/{ch_pid}/cgroup")).map_err(|e| format!("read the cgroup of {ch_pid}: {e}"))?;
+    let line = std::fs::read_to_string(format!("/proc/{ch_pid}/cgroup"))
+        .map_err(|e| format!("read the cgroup of {ch_pid}: {e}"))?;
     let dest = dest_cgroup_of(&line).ok_or_else(|| format!("no cgroup in {line:?}"))?;
     let dest_procs = format!("/sys/fs/cgroup{dest}/cgroup.procs");
     for _ in 0..5 {
@@ -1135,7 +1189,9 @@ fn place_in_pod_cgroup(pid: u32, cgroups_path: &str) -> Result<(), String> {
     // The value comes from the sandbox's OCI spec and is used here, as root, to make a directory and write to a file under the
     // cgroup file system: only the two forms the runtime writes are accepted, and nothing in them may lead out of the tree.
     if !valid_cgroups_path(cgroups_path) {
-        return Err(format!("the cgroup path {cgroups_path:?} is not one the runtime writes"));
+        return Err(format!(
+            "the cgroup path {cgroups_path:?} is not one the runtime writes"
+        ));
     }
 
     // Direct v2 path (e.g. /k8s.io/<id>)
@@ -1226,7 +1282,10 @@ mod cgroup_path_tests {
     #[test]
     fn the_cgroup_of_a_process_is_read_from_its_cgroup_file() {
         use super::dest_cgroup_of as d;
-        assert_eq!(d("0::/kubepods/burstable/pod1/abc\n").as_deref(), Some("/kubepods/burstable/pod1/abc"));
+        assert_eq!(
+            d("0::/kubepods/burstable/pod1/abc\n").as_deref(),
+            Some("/kubepods/burstable/pod1/abc")
+        );
         assert_eq!(d("12:cpu:/x\n0::/a/b\n").as_deref(), Some("/a/b"));
         assert_eq!(d("0::/\n"), None);
         assert_eq!(d("0::/a/../b\n"), None);
@@ -1236,10 +1295,22 @@ mod cgroup_path_tests {
     #[test]
     fn cgroups_paths_are_checked() {
         assert!(ok("/k8s.io/0123abcd"));
-        assert!(ok("kubepods-burstable-podabc_1.slice:cri-containerd:0123abcd"));
+        assert!(ok(
+            "kubepods-burstable-podabc_1.slice:cri-containerd:0123abcd"
+        ));
         for bad in [
-            "", "/", "/k8s.io/../..", "..", "/a//b", "/a/./b", "a b", "x.slice:cri:../x", "x.slice:cri",
-            "x.slice:a:b:c", "notaslice:a:b", "/a/b\n",
+            "",
+            "/",
+            "/k8s.io/../..",
+            "..",
+            "/a//b",
+            "/a/./b",
+            "a b",
+            "x.slice:cri:../x",
+            "x.slice:cri",
+            "x.slice:a:b:c",
+            "notaslice:a:b",
+            "/a/b\n",
         ] {
             assert!(!ok(bad), "{bad:?} must be refused");
         }

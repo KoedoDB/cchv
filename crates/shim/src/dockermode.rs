@@ -26,7 +26,8 @@ pub const HOLDER_ENV: &str = "CLOUDHV_NETNS_HOLDER";
 
 /// Whether the spec comes from containerd's CRI plugin (it marks every sandbox and container with this annotation).
 pub fn is_cri(spec: &serde_json::Value) -> bool {
-    spec.pointer("/annotations/io.kubernetes.cri.container-type").is_some()
+    spec.pointer("/annotations/io.kubernetes.cri.container-type")
+        .is_some()
 }
 
 /// Whether the spec asks the runtime to create a new network namespace: a `network` entry without a path.
@@ -36,7 +37,10 @@ pub fn wants_new_netns(spec: &serde_json::Value) -> bool {
         .map(|ns| {
             ns.iter().any(|n| {
                 n.get("type").and_then(|t| t.as_str()) == Some("network")
-                    && n.get("path").and_then(|p| p.as_str()).unwrap_or("").is_empty()
+                    && n.get("path")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("")
+                        .is_empty()
             })
         })
         .unwrap_or(false)
@@ -69,12 +73,20 @@ pub fn limits_from_resources(spec: &serde_json::Value) -> PodLimits {
 /// shim mounts them at `<bundle>/rootfs` (`root.path` is `rootfs`, relative). Docker mounts the file system itself and writes the absolute
 /// path of its mount in `root.path` (`/var/lib/docker/rootfs/overlayfs/<id>`), leaving `<bundle>/rootfs` empty. Under Docker an absolute
 /// `root.path` is the root; for anything else it is `<bundle>/rootfs`, as it always was.
-pub fn rootfs_path(bundle: &std::path::Path, spec: &serde_json::Value, docker: bool) -> std::path::PathBuf {
+pub fn rootfs_path(
+    bundle: &std::path::Path,
+    spec: &serde_json::Value,
+    docker: bool,
+) -> std::path::PathBuf {
     if docker {
         if let Some(p) = spec.pointer("/root/path").and_then(|v| v.as_str()) {
             let p = std::path::Path::new(p);
             // (no `..`: the path is only ever read, but a dotted one says that something is wrong)
-            if p.is_absolute() && !p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            if p.is_absolute()
+                && !p
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
                 return p.to_path_buf();
             }
         }
@@ -122,11 +134,24 @@ impl NetnsHolder {
         let got = child.stdout.take().map(|mut out| out.read(&mut ready));
         match got {
             Some(Ok(1)) if ready[0] == b'k' => {}
-            other => return fail(&mut child, format!("the network namespace holder did not start ({other:?})")),
+            other => {
+                return fail(
+                    &mut child,
+                    format!("the network namespace holder did not start ({other:?})"),
+                )
+            }
         }
-        match (ns_inode(&format!("/proc/{pid}/ns/net")), ns_inode("/proc/self/ns/net")) {
+        match (
+            ns_inode(&format!("/proc/{pid}/ns/net")),
+            ns_inode("/proc/self/ns/net"),
+        ) {
             (Some(theirs), Some(ours)) if theirs != ours => {}
-            _ => return fail(&mut child, "the holder is not in a network namespace of its own".into()),
+            _ => {
+                return fail(
+                    &mut child,
+                    "the holder is not in a network namespace of its own".into(),
+                )
+            }
         }
         Ok(NetnsHolder {
             pid,
@@ -208,8 +233,12 @@ mod tests {
 
     #[test]
     fn a_cri_spec_is_told_by_its_annotation() {
-        assert!(is_cri(&json!({"annotations": {"io.kubernetes.cri.container-type": "sandbox"}})));
-        assert!(is_cri(&json!({"annotations": {"io.kubernetes.cri.container-type": "container"}})));
+        assert!(is_cri(
+            &json!({"annotations": {"io.kubernetes.cri.container-type": "sandbox"}})
+        ));
+        assert!(is_cri(
+            &json!({"annotations": {"io.kubernetes.cri.container-type": "container"}})
+        ));
         assert!(!is_cri(&json!({"annotations": {"other": "x"}})));
         assert!(!is_cri(&json!({})));
     }
@@ -218,11 +247,17 @@ mod tests {
     fn a_network_entry_without_a_path_asks_for_a_new_namespace() {
         let docker = json!({"linux": {"namespaces": [{"type": "pid"}, {"type": "network"}, {"type": "ipc"}]}});
         assert!(wants_new_netns(&docker));
-        assert!(wants_new_netns(&json!({"linux": {"namespaces": [{"type": "network", "path": ""}]}})));
+        assert!(wants_new_netns(
+            &json!({"linux": {"namespaces": [{"type": "network", "path": ""}]}})
+        ));
         // Kubernetes (the CNI's namespace), and a container that joins another one: a path
-        assert!(!wants_new_netns(&json!({"linux": {"namespaces": [{"type": "network", "path": "/var/run/netns/cni-1"}]}})));
+        assert!(!wants_new_netns(
+            &json!({"linux": {"namespaces": [{"type": "network", "path": "/var/run/netns/cni-1"}]}})
+        ));
         // host networking: no network entry
-        assert!(!wants_new_netns(&json!({"linux": {"namespaces": [{"type": "pid"}]}})));
+        assert!(!wants_new_netns(
+            &json!({"linux": {"namespaces": [{"type": "pid"}]}})
+        ));
         assert!(!wants_new_netns(&json!({})));
     }
 
@@ -235,11 +270,23 @@ mod tests {
         assert_eq!(l.cpu_period, Some(100000));
         // none, zero and the -1 Docker writes are no limit
         assert_eq!(limits_from_resources(&json!({"linux": {"resources": {"memory": {"limit": -1}, "cpu": {"quota": -1, "period": 100000}}}})).memory_bytes, None);
-        assert_eq!(limits_from_resources(&json!({"linux": {"resources": {"memory": {"limit": 0}}}})).memory_bytes, None);
-        assert_eq!(limits_from_resources(&json!({"linux": {"resources": {"cpu": {"quota": -1}}}})).cpu_quota, None);
+        assert_eq!(
+            limits_from_resources(&json!({"linux": {"resources": {"memory": {"limit": 0}}}}))
+                .memory_bytes,
+            None
+        );
+        assert_eq!(
+            limits_from_resources(&json!({"linux": {"resources": {"cpu": {"quota": -1}}}}))
+                .cpu_quota,
+            None
+        );
         assert_eq!(limits_from_resources(&json!({})), PodLimits::default());
         // a hostile or odd type is no limit, not a panic
-        assert_eq!(limits_from_resources(&json!({"linux": {"resources": {"memory": {"limit": "lots"}}}})).memory_bytes, None);
+        assert_eq!(
+            limits_from_resources(&json!({"linux": {"resources": {"memory": {"limit": "lots"}}}}))
+                .memory_bytes,
+            None
+        );
     }
 
     #[test]
@@ -247,12 +294,27 @@ mod tests {
         use std::path::Path;
         let bundle = Path::new("/run/containerd/b1");
         let docker = json!({"root": {"path": "/var/lib/docker/rootfs/overlayfs/abc"}});
-        assert_eq!(rootfs_path(bundle, &docker, true), Path::new("/var/lib/docker/rootfs/overlayfs/abc"));
+        assert_eq!(
+            rootfs_path(bundle, &docker, true),
+            Path::new("/var/lib/docker/rootfs/overlayfs/abc")
+        );
         // Kubernetes: the bundle's rootfs, whatever the spec says
-        assert_eq!(rootfs_path(bundle, &docker, false), Path::new("/run/containerd/b1/rootfs"));
-        assert_eq!(rootfs_path(bundle, &json!({"root": {"path": "rootfs"}}), true), Path::new("/run/containerd/b1/rootfs"));
-        assert_eq!(rootfs_path(bundle, &json!({}), true), Path::new("/run/containerd/b1/rootfs"));
-        assert_eq!(rootfs_path(bundle, &json!({"root": {"path": "/a/../etc"}}), true), Path::new("/run/containerd/b1/rootfs"));
+        assert_eq!(
+            rootfs_path(bundle, &docker, false),
+            Path::new("/run/containerd/b1/rootfs")
+        );
+        assert_eq!(
+            rootfs_path(bundle, &json!({"root": {"path": "rootfs"}}), true),
+            Path::new("/run/containerd/b1/rootfs")
+        );
+        assert_eq!(
+            rootfs_path(bundle, &json!({}), true),
+            Path::new("/run/containerd/b1/rootfs")
+        );
+        assert_eq!(
+            rootfs_path(bundle, &json!({"root": {"path": "/a/../etc"}}), true),
+            Path::new("/run/containerd/b1/rootfs")
+        );
     }
 
     #[test]

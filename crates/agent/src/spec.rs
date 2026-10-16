@@ -77,7 +77,13 @@ fn sanitize_capabilities(caps: Option<&Value>) -> Value {
     let mut out = Map::new();
     match caps.and_then(|c| c.as_object()) {
         Some(c) => {
-            for set in ["bounding", "effective", "inheritable", "permitted", "ambient"] {
+            for set in [
+                "bounding",
+                "effective",
+                "inheritable",
+                "permitted",
+                "ambient",
+            ] {
                 out.insert(set.to_string(), Value::Array(filter_caps(c.get(set))));
             }
         }
@@ -160,7 +166,11 @@ fn cap_intersection(asked: &[Value], container: Option<&Value>) -> Vec<Value> {
 /// - `rlimits` are the container's, each lowered (never raised) to what the exec asks;
 /// - `noNewPrivileges` is on, `terminal` is `terminal` (the request's flag, not the JSON's);
 /// - `apparmorProfile`, `selinuxLabel`, `oomScoreAdj` and everything else are dropped.
-pub fn sanitize_exec_process(process: &Value, container: Option<&Value>, terminal: bool) -> Result<Value> {
+pub fn sanitize_exec_process(
+    process: &Value,
+    container: Option<&Value>,
+    terminal: bool,
+) -> Result<Value> {
     let p = process
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("the process is not an object"))?;
@@ -255,10 +265,18 @@ pub fn sanitize_exec_process(process: &Value, container: Option<&Value>, termina
     };
 
     // Capabilities: cut to the allowed set, and to the container's own.
-    let container_caps = container.and_then(|c| c.get("capabilities")).and_then(|c| c.as_object());
+    let container_caps = container
+        .and_then(|c| c.get("capabilities"))
+        .and_then(|c| c.as_object());
     let asked_caps = p.get("capabilities").and_then(|c| c.as_object());
     let mut caps = Map::new();
-    for set in ["bounding", "effective", "inheritable", "permitted", "ambient"] {
+    for set in [
+        "bounding",
+        "effective",
+        "inheritable",
+        "permitted",
+        "ambient",
+    ] {
         // What the container has in this set (a container without any capabilities section has the allowed set, except for
         // inheritable and ambient, as `sanitize_capabilities` gives it).
         let have: Vec<Value> = match container_caps {
@@ -267,7 +285,9 @@ pub fn sanitize_exec_process(process: &Value, container: Option<&Value>, termina
             None => ALLOWED_CAPS.iter().map(|c| json!(c)).collect(),
         };
         let list = match asked_caps {
-            Some(asked) => cap_intersection(&filter_caps(asked.get(set)), Some(&Value::Array(have))),
+            Some(asked) => {
+                cap_intersection(&filter_caps(asked.get(set)), Some(&Value::Array(have)))
+            }
             None => have,
         };
         caps.insert(set.to_string(), Value::Array(list));
@@ -307,7 +327,12 @@ pub fn sanitize_exec_process(process: &Value, container: Option<&Value>, termina
     out.insert("noNewPrivileges".to_string(), json!(true));
     if terminal {
         if let Some(sz) = p.get("consoleSize").and_then(|c| c.as_object()) {
-            let dim = |k: &str| sz.get(k).and_then(|v| v.as_u64()).map(|v| v.min(1000)).unwrap_or(0);
+            let dim = |k: &str| {
+                sz.get(k)
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v.min(1000))
+                    .unwrap_or(0)
+            };
             out.insert(
                 "consoleSize".to_string(),
                 json!({"height": dim("height"), "width": dim("width")}),
@@ -377,7 +402,10 @@ fn sanitize_linux(linux: &Map<String, Value>, cgroup_id: &str) -> Value {
 
     // Every container has a seccomp profile: the spec's, with the guest's denials on top, or the default one (see seccomp.rs). The
     // listener fields of a profile are removed there: crun would connect, as root in the guest, to a socket the spec names.
-    out.insert("seccomp".to_string(), crate::seccomp::enforce(linux.get("seccomp")));
+    out.insert(
+        "seccomp".to_string(),
+        crate::seccomp::enforce(linux.get("seccomp")),
+    );
     Value::Object(out)
 }
 
@@ -538,8 +566,18 @@ mod tests {
 
     #[test]
     fn only_the_allowed_sections_and_fields_are_passed_on() {
-        let out = sanitize_spec(&containerd_spec(), "abc", vec![json!({"destination": "/data"})]).unwrap();
-        let top: Vec<&str> = out.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        let out = sanitize_spec(
+            &containerd_spec(),
+            "abc",
+            vec![json!({"destination": "/data"})],
+        )
+        .unwrap();
+        let top: Vec<&str> = out
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
         let mut top = top;
         top.sort();
         assert_eq!(top, ["linux", "mounts", "ociVersion", "process", "root"]);
@@ -554,9 +592,20 @@ mod tests {
         keys.sort();
         assert_eq!(
             keys,
-            ["cgroupsPath", "maskedPaths", "namespaces", "readonlyPaths", "resources", "rootfsPropagation", "seccomp"]
+            [
+                "cgroupsPath",
+                "maskedPaths",
+                "namespaces",
+                "readonlyPaths",
+                "resources",
+                "rootfsPropagation",
+                "seccomp"
+            ]
         );
-        assert_eq!(linux["namespaces"], json!([{"type": "mount"}, {"type": "pid"}]));
+        assert_eq!(
+            linux["namespaces"],
+            json!([{"type": "mount"}, {"type": "pid"}])
+        );
         assert_eq!(linux["cgroupsPath"], "/abc");
         assert_eq!(linux["rootfsPropagation"], "rprivate");
     }
@@ -580,7 +629,16 @@ mod tests {
         assert_eq!(caps["inheritable"], json!([]));
         assert_eq!(caps["ambient"], json!(["CAP_NET_BIND_SERVICE"]));
         let text = caps.to_string();
-        for banned in ["MKNOD", "NET_RAW", "SYS_ADMIN", "SYS_RAWIO", "SYS_MODULE", "NET_ADMIN", "SYS_PTRACE", "SYS_TIME"] {
+        for banned in [
+            "MKNOD",
+            "NET_RAW",
+            "SYS_ADMIN",
+            "SYS_RAWIO",
+            "SYS_MODULE",
+            "NET_ADMIN",
+            "SYS_PTRACE",
+            "SYS_TIME",
+        ] {
             assert!(!text.contains(banned), "{banned} must not survive");
         }
     }
@@ -589,25 +647,46 @@ mod tests {
     fn a_spec_without_capabilities_gets_the_allowed_set_not_the_roots_full_one() {
         let out = sanitize_spec(&json!({"linux": {}, "process": {}}), "a", vec![]).unwrap();
         let caps = &out["process"]["capabilities"];
-        assert_eq!(caps["bounding"].as_array().unwrap().len(), ALLOWED_CAPS.len());
+        assert_eq!(
+            caps["bounding"].as_array().unwrap().len(),
+            ALLOWED_CAPS.len()
+        );
         assert_eq!(caps["ambient"], json!([]));
     }
 
     #[test]
     fn a_privileged_looking_spec_gets_nothing_extra() {
         // containerd's privileged pod: every capability, no masked paths, all devices.
-        let all = ["CAP_SYS_ADMIN", "CAP_NET_ADMIN", "CAP_SYS_MODULE", "CAP_MKNOD", "CAP_CHOWN"];
+        let all = [
+            "CAP_SYS_ADMIN",
+            "CAP_NET_ADMIN",
+            "CAP_SYS_MODULE",
+            "CAP_MKNOD",
+            "CAP_CHOWN",
+        ];
         let spec = json!({
             "process": {"capabilities": {"bounding": all, "effective": all, "permitted": all, "inheritable": all, "ambient": all},
                 "noNewPrivileges": false},
             "linux": {"maskedPaths": [], "readonlyPaths": [], "resources": {"devices": [{"allow": true, "access": "rwm"}]}}
         });
         let out = sanitize_spec(&spec, "p", vec![]).unwrap();
-        assert_eq!(out["process"]["capabilities"]["effective"], json!(["CAP_CHOWN"]));
+        assert_eq!(
+            out["process"]["capabilities"]["effective"],
+            json!(["CAP_CHOWN"])
+        );
         assert_eq!(out["process"]["noNewPrivileges"], true);
-        assert!(out["linux"]["maskedPaths"].as_array().unwrap().contains(&json!("/proc/kcore")));
-        assert!(out["linux"]["readonlyPaths"].as_array().unwrap().contains(&json!("/proc/sys")));
-        assert_eq!(out["linux"]["resources"]["devices"][0], json!({"allow": false, "access": "rwm"}));
+        assert!(out["linux"]["maskedPaths"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("/proc/kcore")));
+        assert!(out["linux"]["readonlyPaths"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("/proc/sys")));
+        assert_eq!(
+            out["linux"]["resources"]["devices"][0],
+            json!({"allow": false, "access": "rwm"})
+        );
     }
 
     #[test]
@@ -627,7 +706,10 @@ mod tests {
         // a container without limits still gets a cgroup (the device rules are in it)
         let bare = sanitize_spec(&json!({"linux": {}, "process": {}}), "z", vec![]).unwrap();
         assert_eq!(bare["linux"]["cgroupsPath"], "/z");
-        assert_eq!(bare["linux"]["resources"], json!({"devices": default_devices()}));
+        assert_eq!(
+            bare["linux"]["resources"],
+            json!({"devices": default_devices()})
+        );
         // no block device node and no spec device list gets through
         assert!(out["linux"].get("devices").is_none());
         assert!(!out["linux"]["resources"].to_string().contains("\"b\""));
@@ -639,10 +721,19 @@ mod tests {
         let masked = out["linux"]["maskedPaths"].as_array().unwrap();
         assert!(masked.contains(&json!("/proc/kcore")));
         assert!(masked.contains(&json!("/extra")));
-        assert_eq!(masked.iter().filter(|p| **p == json!("/proc/kcore")).count(), 1);
+        assert_eq!(
+            masked
+                .iter()
+                .filter(|p| **p == json!("/proc/kcore"))
+                .count(),
+            1
+        );
         let more = json!({"linux": {"maskedPaths": ["relative", "/a/../b", 3]}, "process": {}});
         let out = sanitize_spec(&more, "a", vec![]).unwrap();
-        assert_eq!(out["linux"]["maskedPaths"].as_array().unwrap().len(), MASKED_PATHS.len());
+        assert_eq!(
+            out["linux"]["maskedPaths"].as_array().unwrap().len(),
+            MASKED_PATHS.len()
+        );
     }
 
     #[test]
@@ -673,7 +764,10 @@ mod tests {
         assert!(!valid_hostname("-a"));
         assert!(!valid_hostname("a."));
         assert!(!valid_hostname(&"a".repeat(64)));
-        assert_eq!(hostname_of(&json!({"hostname": "web-1"})), Some("web-1".to_string()));
+        assert_eq!(
+            hostname_of(&json!({"hostname": "web-1"})),
+            Some("web-1".to_string())
+        );
         assert_eq!(hostname_of(&json!({"hostname": "web 1"})), None);
         assert_eq!(hostname_of(&json!({})), None);
     }
@@ -682,7 +776,9 @@ mod tests {
     fn destinations_must_be_absolute_and_stay_out_of_proc_and_sys() {
         assert!(valid_destination("/data"));
         assert!(valid_destination("/dev/termination-log"));
-        assert!(valid_destination("/var/run/secrets/kubernetes.io/serviceaccount"));
+        assert!(valid_destination(
+            "/var/run/secrets/kubernetes.io/serviceaccount"
+        ));
         assert!(!valid_destination("data"));
         assert!(!valid_destination("/"));
         assert!(!valid_destination("/proc/sys"));
@@ -704,7 +800,11 @@ mod tests {
     fn volume_options_are_nosuid_nodev_and_only_asked_extras() {
         let o = volume_options(false, &[], &["rbind"]);
         assert_eq!(o, ["rbind", "nosuid", "nodev"]);
-        let o = volume_options(true, &["noexec".into(), "suid".into(), "rw".into(), "noexec".into()], &["rbind"]);
+        let o = volume_options(
+            true,
+            &["noexec".into(), "suid".into(), "rw".into(), "noexec".into()],
+            &["rbind"],
+        );
         assert_eq!(o, ["rbind", "nosuid", "nodev", "ro", "noexec"]);
     }
 
@@ -757,7 +857,11 @@ mod tests {
         assert_eq!(p["cwd"], json!("/tmp"));
         assert_eq!(p["terminal"], json!(false));
         assert_eq!(p["noNewPrivileges"], json!(true), "forced on");
-        assert!(p.get("apparmorProfile").is_none() && p.get("selinuxLabel").is_none() && p.get("oomScoreAdj").is_none());
+        assert!(
+            p.get("apparmorProfile").is_none()
+                && p.get("selinuxLabel").is_none()
+                && p.get("oomScoreAdj").is_none()
+        );
         // The user is the container's when the exec names none.
         assert_eq!(p["user"], json!({"uid": 1000, "gid": 1000}));
         // Capabilities: in the allowed list AND in the container's set. SYS_ADMIN and NET_RAW never; SETFCAP and KILL are allowed in
@@ -765,25 +869,45 @@ mod tests {
         assert_eq!(p["capabilities"]["bounding"], json!(["CAP_CHOWN"]));
         assert_eq!(p["capabilities"]["effective"], json!(["CAP_CHOWN"]));
         assert_eq!(p["capabilities"]["permitted"], json!(["CAP_CHOWN"]));
-        assert_eq!(p["capabilities"]["ambient"], json!([]), "the container has no ambient set");
+        assert_eq!(
+            p["capabilities"]["ambient"],
+            json!([]),
+            "the container has no ambient set"
+        );
         // Limits: the container's, lowered. NOFILE 4096 is above the container's 1024, so it stays 1024; NPROC is lowered; CORE is not
         // one the container has.
         let lim = p["rlimits"].as_array().unwrap();
         assert_eq!(lim.len(), 2);
-        assert_eq!(lim[0], json!({"type": "RLIMIT_NOFILE", "hard": 1024, "soft": 512}));
-        assert_eq!(lim[1], json!({"type": "RLIMIT_NPROC", "hard": 10, "soft": 5}));
+        assert_eq!(
+            lim[0],
+            json!({"type": "RLIMIT_NOFILE", "hard": 1024, "soft": 512})
+        );
+        assert_eq!(
+            lim[1],
+            json!({"type": "RLIMIT_NPROC", "hard": 10, "soft": 5})
+        );
     }
 
     #[test]
     fn an_exec_without_capabilities_or_limits_of_its_own_has_the_containers() {
-        let p = sanitize_exec_process(&json!({"args": ["ls"]}), Some(&container_process()), false).unwrap();
-        assert_eq!(p["capabilities"]["bounding"], json!(["CAP_CHOWN", "CAP_KILL", "CAP_SETUID"]));
-        assert_eq!(p["capabilities"]["permitted"], json!(["CAP_CHOWN", "CAP_KILL"]));
+        let p = sanitize_exec_process(&json!({"args": ["ls"]}), Some(&container_process()), false)
+            .unwrap();
+        assert_eq!(
+            p["capabilities"]["bounding"],
+            json!(["CAP_CHOWN", "CAP_KILL", "CAP_SETUID"])
+        );
+        assert_eq!(
+            p["capabilities"]["permitted"],
+            json!(["CAP_CHOWN", "CAP_KILL"])
+        );
         assert_eq!(p["rlimits"].as_array().unwrap().len(), 2);
         assert_eq!(p["cwd"], json!("/"), "no cwd means /");
         // A container that has no capabilities section gets the allowed list, like a container does.
         let q = sanitize_exec_process(&json!({"args": ["ls"]}), None, false).unwrap();
-        assert_eq!(q["capabilities"]["bounding"].as_array().unwrap().len(), ALLOWED_CAPS.len());
+        assert_eq!(
+            q["capabilities"]["bounding"].as_array().unwrap().len(),
+            ALLOWED_CAPS.len()
+        );
         assert_eq!(q["capabilities"]["ambient"], json!([]));
         assert_eq!(q["user"], json!({"uid": 0, "gid": 0}));
     }
@@ -793,8 +917,15 @@ mod tests {
         let asked = json!({"args": ["sh"], "user": {"uid": 5, "gid": 6, "additionalGids": [7, 8], "umask": 18},
                            "consoleSize": {"height": 50000, "width": 80}, "terminal": false});
         let p = sanitize_exec_process(&asked, Some(&container_process()), true).unwrap();
-        assert_eq!(p["terminal"], json!(true), "the request's flag decides, not the JSON's");
-        assert_eq!(p["user"], json!({"uid": 5, "gid": 6, "additionalGids": [7, 8], "umask": 18}));
+        assert_eq!(
+            p["terminal"],
+            json!(true),
+            "the request's flag decides, not the JSON's"
+        );
+        assert_eq!(
+            p["user"],
+            json!({"uid": 5, "gid": 6, "additionalGids": [7, 8], "umask": 18})
+        );
         assert_eq!(p["consoleSize"], json!({"height": 1000, "width": 80}));
         let no_term = sanitize_exec_process(&asked, Some(&container_process()), false).unwrap();
         assert!(no_term.get("consoleSize").is_none());
@@ -816,13 +947,19 @@ mod tests {
         assert!(bad(json!({"args": ["x"], "cwd": 5})));
         assert!(bad(json!({"args": ["x"], "user": {"uid": -1, "gid": 0}})));
         assert!(bad(json!({"args": ["x"], "user": {"uid": 0}})));
-        assert!(bad(json!({"args": ["x"], "user": {"uid": 0, "gid": 0, "additionalGids": (0..65).collect::<Vec<u32>>()}})));
-        assert!(bad(json!({"args": (0..4097).map(|_| "a").collect::<Vec<_>>()})), "too many args");
+        assert!(bad(
+            json!({"args": ["x"], "user": {"uid": 0, "gid": 0, "additionalGids": (0..65).collect::<Vec<u32>>()}})
+        ));
+        assert!(
+            bad(json!({"args": (0..4097).map(|_| "a").collect::<Vec<_>>()})),
+            "too many args"
+        );
         let big = "x".repeat(MAX_EXEC_BYTES + 1);
         assert!(bad(json!({"args": [big]})), "too large");
         // An empty cwd is the root.
         assert_eq!(
-            sanitize_exec_process(&json!({"args": ["x"], "cwd": ""}), c.as_ref(), false).unwrap()["cwd"],
+            sanitize_exec_process(&json!({"args": ["x"], "cwd": ""}), c.as_ref(), false).unwrap()
+                ["cwd"],
             json!("/")
         );
     }

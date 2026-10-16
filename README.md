@@ -67,7 +67,7 @@ the unprivileged Cloud Hypervisor: the daemon waited for an answer that Cloud Hy
 the figures below and in [docs/performance.md](docs/performance.md) are from after the fix.) **The figures in the original README (about 6 MB idle and
 24 MB per VM, 150 pods in 11 s) came from other hardware and settings; we could not reproduce them**, and the fixed cost of a VM here is
 the table above. Kata Containers with Cloud Hypervisor, in our setup, took 177 MiB for an empty Pod. A comparison of runc, gVisor,
-Kata and this shim under the same load is in [docs/performance.md](docs/performance.md) when we have it.
+Kata and this shim under the same load is in [docs/performance.md](docs/performance.md) when we have it. The restore mode (`Copy` by default, `OnDemand` opt-in) is in [docs/memory-restore.md](docs/memory-restore.md).
 
 ## When to Use
 

@@ -88,12 +88,18 @@ mod tests {
         assert!(crate::validate::is_id(&a));
         // a known SHA-256: "abc" -> ba7816bf8f01cfea414140de5dae2223...
         std::fs::write(d.join("abc.erofs"), b"abc").unwrap();
-        assert_eq!(content_key_blocking(&d.join("abc.erofs")).unwrap(), "ba7816bf8f01cfea414140de5dae2223");
+        assert_eq!(
+            content_key_blocking(&d.join("abc.erofs")).unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223"
+        );
         // a file changed in place (another size) is read again
         std::fs::write(d.join("a.erofs"), b"changed bytes now").unwrap();
         assert_ne!(content_key_blocking(&d.join("a.erofs")).unwrap(), a);
         std::os::unix::fs::symlink(d.join("c.erofs"), d.join("link.erofs")).unwrap();
-        assert!(content_key_blocking(&d.join("link.erofs")).is_err(), "a link is not followed");
+        assert!(
+            content_key_blocking(&d.join("link.erofs")).is_err(),
+            "a link is not followed"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 }

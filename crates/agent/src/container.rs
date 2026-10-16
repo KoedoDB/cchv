@@ -54,6 +54,90 @@ const DISK_WAIT: Duration = Duration::from_secs(20);
 /// File systems a block volume may have.
 const BLOCK_FS_TYPES: &[&str] = &["ext4", "xfs"];
 
+/// The file system of a disk-backed emptyDir. Nothing else is mounted at the shared volume root: the host makes it (`mke2fs`).
+const SHARED_BLOCK_FS: &str = "ext4";
+
+/// The shared block volumes already mounted in this VM (by name). The lock is held while one is made, so that two containers of a pod
+/// that start together mount the disk once.
+fn mounted_block_volumes() -> &'static tokio::sync::Mutex<HashSet<String>> {
+    static M: std::sync::OnceLock<tokio::sync::Mutex<HashSet<String>>> = std::sync::OnceLock::new();
+    M.get_or_init(|| tokio::sync::Mutex::new(HashSet::new()))
+}
+
+/// What a disk-backed volume needs of the request, or why it is refused: a serial (the disk is found by it, never by position) and
+/// the one file system the host makes.
+fn check_shared_block(serial: &str, fs_type: &str) -> Result<()> {
+    if serial.is_empty() {
+        anyhow::bail!("a disk-backed volume needs the serial of its disk");
+    }
+    if fs_type != SHARED_BLOCK_FS {
+        anyhow::bail!("a disk-backed volume has file system {SHARED_BLOCK_FS}, not {fs_type:?}");
+    }
+    Ok(())
+}
+
+/// The directory `/run/cloudhv-vols/<name>` with the disk of serial `serial` mounted on it (made the first time; later calls only return
+/// the directory). The mount is `nosuid,nodev`; the root of the file system is made world-writable like a kubelet emptyDir.
+#[cfg(target_os = "linux")]
+async fn shared_block_volume(
+    disks: &Disks,
+    name: &str,
+    serial: &str,
+    fs_type: &str,
+    deadline: Instant,
+) -> Result<PathBuf> {
+    use nix::mount::{mount, MsFlags};
+    use std::os::unix::fs::PermissionsExt;
+
+    check_shared_block(serial, fs_type)?;
+    let dir = Path::new(volumes::VOLUME_ROOT).join(name);
+    let mut mounted = mounted_block_volumes().lock().await;
+    if mounted.contains(name) {
+        return Ok(dir);
+    }
+    let dev_name = disks.claim_by_serial(serial, deadline).await?;
+    let dev = format!("/dev/{dev_name}");
+    if !Path::new(&dev).exists() {
+        wait_for_dev_inotify(&dev, deadline).await?;
+    }
+    std::fs::create_dir_all(volumes::VOLUME_ROOT)
+        .with_context(|| format!("create {}", volumes::VOLUME_ROOT))?;
+    // A directory that is already there is not ours to mount over (a file volume of the same name): the name is the host's hash.
+    std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let mount_deadline = Instant::now() + Duration::from_millis(2000);
+    loop {
+        match mount(
+            Some(dev.as_str()),
+            &dir,
+            Some(SHARED_BLOCK_FS),
+            MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOATIME,
+            None::<&str>,
+        ) {
+            Ok(()) => break,
+            Err(_e) if Instant::now() < mount_deadline => {
+                tokio::time::sleep(Duration::from_millis(10)).await
+            }
+            Err(e) => anyhow::bail!("mount {dev} at {}: {e}", dir.display()),
+        }
+    }
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777))
+        .with_context(|| format!("chmod {}", dir.display()))?;
+    mounted.insert(name.to_string());
+    Ok(dir)
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn shared_block_volume(
+    _: &Disks,
+    _: &str,
+    serial: &str,
+    fs_type: &str,
+    _: Instant,
+) -> Result<PathBuf> {
+    check_shared_block(serial, fs_type)?;
+    anyhow::bail!("disk-backed volumes need Linux")
+}
+
 /// Tracks the state of a container managed by the agent.
 #[derive(Debug)]
 struct Container {
@@ -391,7 +475,10 @@ impl ContainerManager {
         let console_sock = bundle.join("console.sock");
         let listener = if terminal {
             let _ = std::fs::remove_file(&console_sock);
-            Some(std::os::unix::net::UnixListener::bind(&console_sock).context("bind the console socket")?)
+            Some(
+                std::os::unix::net::UnixListener::bind(&console_sock)
+                    .context("bind the console socket")?,
+            )
         } else {
             None
         };
@@ -411,7 +498,12 @@ impl ContainerManager {
             cmd.pre_exec(|| {
                 const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
                 // Not fatal if the kernel lacks close_range: the descriptors are close-on-exec anyway.
-                libc::syscall(libc::SYS_close_range, 3 as libc::c_uint, !0 as libc::c_uint, CLOSE_RANGE_CLOEXEC);
+                libc::syscall(
+                    libc::SYS_close_range,
+                    3 as libc::c_uint,
+                    !0 as libc::c_uint,
+                    CLOSE_RANGE_CLOEXEC,
+                );
                 Ok(())
             });
         }
@@ -791,8 +883,19 @@ impl ContainerManager {
 
 /// What `prepare` needs to know about a volume once it is made ready.
 enum Resolved {
-    Bind { dest: String, source: String, readonly: bool, options: Vec<String> },
-    Block { dest: String, dev: String, fs_type: String, readonly: bool, options: Vec<String> },
+    Bind {
+        dest: String,
+        source: String,
+        readonly: bool,
+        options: Vec<String>,
+    },
+    Block {
+        dest: String,
+        dev: String,
+        fs_type: String,
+        readonly: bool,
+        options: Vec<String>,
+    },
 }
 
 /// Make a container's root file system and volumes ready: mount each erofs layer, compose them with a tmpfs-backed upper layer by overlayfs,
@@ -970,6 +1073,25 @@ async fn prepare_inner(
             anyhow::bail!("volume destination {:?} is not allowed", vol.destination);
         }
         if vol.is_block {
+            // A disk-backed emptyDir: a block volume whose source is a directory of the shared volume root. The disk is mounted there
+            // once for the VM, and every container (and every destination) of the pod gets that directory bound in.
+            if let Some(name) = volumes::shared_name(&vol.source) {
+                let dir =
+                    shared_block_volume(&plan.disks, name, &vol.serial, &vol.fs_type, deadline)
+                        .await?;
+                info!(
+                    "block volume {name} -> {} (shared, {})",
+                    vol.destination,
+                    dir.display()
+                );
+                resolved.push(Resolved::Bind {
+                    dest: vol.destination.clone(),
+                    source: dir.to_string_lossy().to_string(),
+                    readonly: vol.readonly,
+                    options: vol.options.clone(),
+                });
+                continue;
+            }
             if !BLOCK_FS_TYPES.contains(&vol.fs_type.as_str()) {
                 anyhow::bail!("block volume file system {:?} is not allowed", vol.fs_type);
             }
@@ -982,7 +1104,10 @@ async fn prepare_inner(
             if !Path::new(&dev).exists() {
                 wait_for_dev_inotify(&dev, deadline).await?;
             }
-            info!("block volume {} -> {} (dev={}, fs={})", vol.source, vol.destination, dev, vol.fs_type);
+            info!(
+                "block volume {} -> {} (dev={}, fs={})",
+                vol.source, vol.destination, dev, vol.fs_type
+            );
             resolved.push(Resolved::Block {
                 dest: vol.destination.clone(),
                 dev,
@@ -1004,7 +1129,13 @@ async fn prepare_inner(
                 mode: f.mode,
             })
             .collect();
-        let source = volumes::materialize(&root, &name, &files, &vol.destination, plan.busy.contains(&key))?;
+        let source = volumes::materialize(
+            &root,
+            &name,
+            &files,
+            &vol.destination,
+            plan.busy.contains(&key),
+        )?;
 
         // The pod's hostname comes as the /etc/hostname the runtime bind-mounts; the VM is the pod, so it is the VM's hostname.
         if vol.destination == "/etc/hostname" && vol.inline_files.len() == 1 {
@@ -1039,13 +1170,24 @@ async fn prepare_inner(
     let mut mounts = spec::base_mounts();
     for r in &resolved {
         mounts.push(match r {
-            Resolved::Bind { dest, source, readonly, options } => serde_json::json!({
+            Resolved::Bind {
+                dest,
+                source,
+                readonly,
+                options,
+            } => serde_json::json!({
                 "destination": dest,
                 "type": "bind",
                 "source": source,
                 "options": spec::volume_options(*readonly, options, &["rbind"]),
             }),
-            Resolved::Block { dest, dev, fs_type, readonly, options } => serde_json::json!({
+            Resolved::Block {
+                dest,
+                dev,
+                fs_type,
+                readonly,
+                options,
+            } => serde_json::json!({
                 "destination": dest,
                 "type": fs_type,
                 "source": dev,
@@ -1110,7 +1252,9 @@ fn teardown(bundle: &Path) -> bool {
         use nix::mount::{umount2, MntFlags};
         let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
         for m in mounts_under(&mounts, &bundle.to_string_lossy()) {
-            if umount2(m.as_str(), MntFlags::empty()).is_err() && umount2(m.as_str(), MntFlags::MNT_DETACH).is_err() {
+            if umount2(m.as_str(), MntFlags::empty()).is_err()
+                && umount2(m.as_str(), MntFlags::MNT_DETACH).is_err()
+            {
                 warn!("could not unmount {m}");
                 ok = false;
             }
@@ -1424,7 +1568,6 @@ mod resource_tests {
     }
 }
 
-
 #[cfg(test)]
 mod manager_tests {
     use super::*;
@@ -1433,7 +1576,11 @@ mod manager_tests {
     fn manager_with(id: &str) -> ContainerManager {
         let mut m = ContainerManager::new();
         m.begin_create(id, &[]).unwrap();
-        m.finish_create(Prepared { id: id.to_string(), volumes: vec![], terminal: false });
+        m.finish_create(Prepared {
+            id: id.to_string(),
+            volumes: vec![],
+            terminal: false,
+        });
         m
     }
 
@@ -1455,7 +1602,11 @@ mod manager_tests {
         assert!(m.begin_create("c1", &[]).is_err(), "reserved");
         m.abort_create("c1");
         m.begin_create("c1", &[]).unwrap();
-        m.finish_create(Prepared { id: "c1".into(), volumes: vec![], terminal: false });
+        m.finish_create(Prepared {
+            id: "c1".into(),
+            volumes: vec![],
+            terminal: false,
+        });
         assert!(m.begin_create("c1", &[]).is_err(), "exists");
         assert!(m.begin_create("../c2", &[]).is_err(), "unsafe id");
     }
@@ -1473,9 +1624,19 @@ mod manager_tests {
         let mut m = manager_with("old");
         m.containers.get_mut("old").unwrap().pid = Some(42);
         m.begin_create("other", &[]).unwrap();
-        m.finish_create(Prepared { id: "other".into(), volumes: vec![], terminal: false });
-        assert!(m.adopt("old", "other").is_err(), "must not overwrite another container");
-        assert!(m.containers.contains_key("old"), "a refused adopt loses nothing");
+        m.finish_create(Prepared {
+            id: "other".into(),
+            volumes: vec![],
+            terminal: false,
+        });
+        assert!(
+            m.adopt("old", "other").is_err(),
+            "must not overwrite another container"
+        );
+        assert!(
+            m.containers.contains_key("old"),
+            "a refused adopt loses nothing"
+        );
         assert!(m.adopt("old", "old").is_err());
         assert!(m.adopt("old", "../x").is_err());
         assert_eq!(m.adopt("old", "new").unwrap(), 42);
@@ -1503,7 +1664,11 @@ mod manager_tests {
         assert!(plan.busy.is_empty());
         m.finish_create(Prepared {
             id: "c1".into(),
-            volumes: vec![VolumeUse { root: PathBuf::from(VOLUME_ROOT), name: "abc123".into(), has_files: true }],
+            volumes: vec![VolumeUse {
+                root: PathBuf::from(VOLUME_ROOT),
+                name: "abc123".into(),
+                has_files: true,
+            }],
             terminal: false,
         });
         let plan = m.begin_create("c2", std::slice::from_ref(&vol)).unwrap();
@@ -1526,5 +1691,16 @@ mod manager_tests {
             ]
         );
         assert!(mounts_under(text, "/run/containers/c2").is_empty());
+    }
+
+    #[test]
+    fn a_disk_backed_volume_needs_a_serial_and_the_hosts_file_system() {
+        assert!(check_shared_block("ed0123456789abcdef", "ext4").is_ok());
+        assert!(
+            check_shared_block("", "ext4").is_err(),
+            "no serial: the disk would be found by position"
+        );
+        assert!(check_shared_block("ed0123456789abcdef", "xfs").is_err());
+        assert!(check_shared_block("ed0123456789abcdef", "").is_err());
     }
 }

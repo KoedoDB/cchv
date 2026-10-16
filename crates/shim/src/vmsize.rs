@@ -37,7 +37,9 @@ pub fn vm_size(
     let memory_mb = match limits.memory_bytes {
         Some(bytes) if bytes > 0 => {
             let pod_mb = bytes.div_ceil(1024 * 1024);
-            pod_mb.saturating_add(GUEST_OVERHEAD_MB).max(default_memory_mb)
+            pod_mb
+                .saturating_add(GUEST_OVERHEAD_MB)
+                .max(default_memory_mb)
         }
         _ => default_memory_mb,
     };
@@ -173,9 +175,19 @@ mod tests {
         };
         assert!(check_size(vm_size(huge, 128, 1, 8), 16384).is_err());
         // exactly the maximum is allowed
-        let edge = VmSize { memory_mb: 16384, vcpus: 1 };
+        let edge = VmSize {
+            memory_mb: 16384,
+            vcpus: 1,
+        };
         assert!(check_size(edge, 16384).is_ok());
-        assert!(check_size(VmSize { memory_mb: 16385, vcpus: 1 }, 16384).is_err());
+        assert!(check_size(
+            VmSize {
+                memory_mb: 16385,
+                vcpus: 1
+            },
+            16384
+        )
+        .is_err());
     }
 
     #[test]

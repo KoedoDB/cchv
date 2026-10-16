@@ -79,6 +79,8 @@ need_command() { # command, apt packages, rpm packages
 need_command tc iproute2 iproute-tc
 host modprobe erofs 2>/dev/null || true
 need_command mkfs.erofs erofs-utils erofs-utils
+# mke2fs makes the file system of an emptyDir's disk (on the file, never mounted on the host)
+need_command mke2fs e2fsprogs e2fsprogs
 
 # 3. Stop the daemon (if running) before clearing its state
 host systemctl stop cloudhv-sandbox-daemon 2>/dev/null || true

@@ -133,7 +133,10 @@ pub async fn handle(
         "ExecCreate" => {
             // The id of the container's own terminal (see the agent's exec.rs): not an exec process.
             if e == "init" {
-                return err("bad request", "the exec id \"init\" is reserved for the container's own terminal");
+                return err(
+                    "bad request",
+                    "the exec id \"init\" is reserved for the container's own terminal",
+                );
             }
             let process = match decode_field(request, "process_json", MAX_PROCESS_JSON) {
                 Ok(p) => p,
@@ -144,7 +147,10 @@ pub async fn handle(
             req.container_id = c;
             req.exec_id = e;
             req.process_json = process;
-            req.terminal = request.get("terminal").and_then(|v| v.as_bool()).unwrap_or(false);
+            req.terminal = request
+                .get("terminal")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             match agent.exec_create(ctx(TIMEOUT_CALL), &req).await {
                 Ok(_) => json!({}),
                 Err(x) => err("exec_create", x),
@@ -270,12 +276,26 @@ mod tests {
     #[test]
     fn the_exec_methods_are_the_nine_of_the_contract() {
         for m in [
-            "ExecCreate", "ExecStart", "ExecKill", "ExecWait", "ExecDelete", "ExecWrite", "ExecCloseStdin", "ExecRead",
+            "ExecCreate",
+            "ExecStart",
+            "ExecKill",
+            "ExecWait",
+            "ExecDelete",
+            "ExecWrite",
+            "ExecCloseStdin",
+            "ExecRead",
             "ExecResize",
         ] {
             assert!(is_exec_method(m), "{m}");
         }
-        for m in ["Exec", "ExecProcess", "execcreate", "ReadLogs", "", "ExecCreate "] {
+        for m in [
+            "Exec",
+            "ExecProcess",
+            "execcreate",
+            "ReadLogs",
+            "",
+            "ExecCreate ",
+        ] {
             assert!(!is_exec_method(m), "{m:?}");
         }
     }
@@ -284,16 +304,25 @@ mod tests {
     fn base64_fields_are_bounded_before_and_after_decoding() {
         let b64 = base64::engine::general_purpose::STANDARD;
         let ok = json!({"data": b64.encode(vec![7u8; MAX_WRITE])});
-        assert_eq!(decode_field(&ok, "data", MAX_WRITE).unwrap().len(), MAX_WRITE);
+        assert_eq!(
+            decode_field(&ok, "data", MAX_WRITE).unwrap().len(),
+            MAX_WRITE
+        );
         let over = json!({"data": b64.encode(vec![7u8; MAX_WRITE + 1])});
         assert!(decode_field(&over, "data", MAX_WRITE).is_err());
         // A string far too long is refused without being decoded.
         let huge = json!({"data": "A".repeat(MAX_WRITE * 2)});
-        assert!(decode_field(&huge, "data", MAX_WRITE).unwrap_err().contains("larger"));
-        assert!(decode_field(&json!({"data": "***"}), "data", 10).unwrap_err().contains("base64"));
+        assert!(decode_field(&huge, "data", MAX_WRITE)
+            .unwrap_err()
+            .contains("larger"));
+        assert!(decode_field(&json!({"data": "***"}), "data", 10)
+            .unwrap_err()
+            .contains("base64"));
         // Missing and empty are an empty value.
         assert!(decode_field(&json!({}), "data", 10).unwrap().is_empty());
-        assert!(decode_field(&json!({"data": ""}), "data", 10).unwrap().is_empty());
+        assert!(decode_field(&json!({"data": ""}), "data", 10)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -310,7 +339,10 @@ mod tests {
     #[test]
     fn a_time_becomes_unix_nanoseconds_and_a_bad_one_is_now() {
         assert_eq!(unix_nanos("1970-01-01T00:00:01Z"), 1_000_000_000);
-        assert_eq!(unix_nanos("2026-10-16T00:00:00.5+00:00"), 1_792_108_800_500_000_000);
+        assert_eq!(
+            unix_nanos("2026-10-16T00:00:00.5+00:00"),
+            1_792_108_800_500_000_000
+        );
         let before = chrono::Utc::now().timestamp_nanos_opt().unwrap();
         assert!(unix_nanos("not a time") >= before);
     }
@@ -323,10 +355,18 @@ mod tests {
             "stdout": b64.encode(b"out"), "stderr": b64.encode(b"err"), "stdout_offset": 3, "stderr_offset": 3,
             "eof": false, "dropped": 0, "stdout_dropped": 0, "stderr_dropped": 0,
         });
-        for k in ["stdout", "stderr", "stdout_offset", "stderr_offset", "eof", "dropped"] {
+        for k in [
+            "stdout",
+            "stderr",
+            "stdout_offset",
+            "stderr_offset",
+            "eof",
+            "dropped",
+        ] {
             assert!(read.get(k).is_some(), "{k}");
         }
-        let wait = json!({"exit_status": 7, "exited_at_unix_nanos": unix_nanos("2026-10-16T00:00:00Z")});
+        let wait =
+            json!({"exit_status": 7, "exited_at_unix_nanos": unix_nanos("2026-10-16T00:00:00Z")});
         assert_eq!(wait["exit_status"], 7);
         assert!(wait["exited_at_unix_nanos"].as_i64().unwrap() > 0);
     }

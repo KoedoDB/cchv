@@ -48,10 +48,7 @@ async fn create_flow(
     req: &CreateContainerRequest,
 ) -> anyhow::Result<()> {
     let volumes = proto_volumes_to_info(&req.volumes);
-    let plan = mgr
-        .lock()
-        .await
-        .begin_create(&req.container_id, &volumes)?;
+    let plan = mgr.lock().await.begin_create(&req.container_id, &volumes)?;
     match crate::container::prepare(
         plan,
         &req.container_id,
@@ -263,7 +260,13 @@ impl AgentService for AgentServiceHandler {
             .exec_target(&req.container_id)
             .map_err(|e| exec_err("exec_create", e))?;
         self.exec_manager
-            .create(&req.container_id, &req.exec_id, &req.process_json, req.terminal, target.as_ref())
+            .create(
+                &req.container_id,
+                &req.exec_id,
+                &req.process_json,
+                req.terminal,
+                target.as_ref(),
+            )
             .await
             .map_err(|e| exec_err("exec_create", e))?;
         Ok(ExecCreateResponse::new())
@@ -274,7 +277,10 @@ impl AgentService for AgentServiceHandler {
         _ctx: &TtrpcContext,
         req: ExecStartRequest,
     ) -> ttrpc::Result<ExecStartResponse> {
-        info!("RPC: exec_start container={} exec_id={}", req.container_id, req.exec_id);
+        info!(
+            "RPC: exec_start container={} exec_id={}",
+            req.container_id, req.exec_id
+        );
         let pid = self
             .exec_manager
             .start(&req.container_id, &req.exec_id)
@@ -306,7 +312,10 @@ impl AgentService for AgentServiceHandler {
         _ctx: &TtrpcContext,
         req: ExecWaitRequest,
     ) -> ttrpc::Result<ExecWaitResponse> {
-        info!("RPC: exec_wait container={} exec_id={}", req.container_id, req.exec_id);
+        info!(
+            "RPC: exec_wait container={} exec_id={}",
+            req.container_id, req.exec_id
+        );
         let status = self
             .exec_manager
             .wait(&req.container_id, &req.exec_id)
@@ -323,7 +332,10 @@ impl AgentService for AgentServiceHandler {
         _ctx: &TtrpcContext,
         req: ExecDeleteRequest,
     ) -> ttrpc::Result<ExecDeleteResponse> {
-        info!("RPC: exec_delete container={} exec_id={}", req.container_id, req.exec_id);
+        info!(
+            "RPC: exec_delete container={} exec_id={}",
+            req.container_id, req.exec_id
+        );
         self.exec_manager
             .delete(&req.container_id, &req.exec_id)
             .await
@@ -369,7 +381,10 @@ impl AgentService for AgentServiceHandler {
         _ctx: &TtrpcContext,
         req: ExecCloseStdinRequest,
     ) -> ttrpc::Result<ExecCloseStdinResponse> {
-        info!("RPC: exec_close_stdin container={} exec_id={}", req.container_id, req.exec_id);
+        info!(
+            "RPC: exec_close_stdin container={} exec_id={}",
+            req.container_id, req.exec_id
+        );
         if req.exec_id == crate::exec::INIT_EXEC_ID {
             // A terminal has no end of input (the client sends ^D if it wants one): accepted, nothing to do. A container with no
             // terminal has no input to close either.
@@ -420,7 +435,10 @@ impl AgentService for AgentServiceHandler {
         );
         if req.exec_id == crate::exec::INIT_EXEC_ID {
             if !crate::exec::valid_terminal_size(req.width, req.height) {
-                return Err(exec_err("exec_resize", anyhow::anyhow!("invalid terminal size")));
+                return Err(exec_err(
+                    "exec_resize",
+                    anyhow::anyhow!("invalid terminal size"),
+                ));
             }
             let master = self
                 .container_manager
@@ -429,7 +447,9 @@ impl AgentService for AgentServiceHandler {
                 .terminal_master(&req.container_id)
                 .map_err(|e| exec_err("exec_resize", e))?;
             crate::exec::set_window_size(master.raw_fd(), req.width as u16, req.height as u16)
-                .map_err(|e| exec_err("exec_resize", anyhow::Error::new(e).context("TIOCSWINSZ")))?;
+                .map_err(|e| {
+                    exec_err("exec_resize", anyhow::Error::new(e).context("TIOCSWINSZ"))
+                })?;
             return Ok(ExecResizeResponse::new());
         }
         self.exec_manager

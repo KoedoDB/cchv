@@ -55,7 +55,12 @@ pub struct ExecProc {
 }
 
 impl ExecProc {
-    pub fn new(cfg: ExecConfig, client: DaemonClient, vm_id: String, container_id: String) -> Arc<Self> {
+    pub fn new(
+        cfg: ExecConfig,
+        client: DaemonClient,
+        vm_id: String,
+        container_id: String,
+    ) -> Arc<Self> {
         Arc::new(Self {
             cfg,
             client,
@@ -116,7 +121,13 @@ impl ExecProc {
 
     pub async fn create(&self) -> Result<(), Error> {
         self.client
-            .exec_create(&self.vm_id, &self.container_id, self.id(), &self.cfg.spec, self.cfg.terminal)
+            .exec_create(
+                &self.vm_id,
+                &self.container_id,
+                self.id(),
+                &self.cfg.spec,
+                self.cfg.terminal,
+            )
             .await
             .map_err(Self::err)
     }
@@ -129,7 +140,11 @@ impl ExecProc {
             .await
             .map_err(Self::err)?;
         self.started.store(true, Ordering::SeqCst);
-        info!("exec {} of {} started in the guest (pid {pid})", self.id(), self.container_id);
+        info!(
+            "exec {} of {} started in the guest (pid {pid})",
+            self.id(),
+            self.container_id
+        );
 
         let me = self.clone();
         tokio::spawn(async move { me.pump_output().await });
@@ -150,8 +165,15 @@ impl ExecProc {
             .exec_wait(&self.vm_id, &self.container_id, self.id())
             .await
             .map_err(Self::err)?;
-        if tokio::time::timeout(DRAIN_TIMEOUT, self.out_done.wait()).await.is_err() {
-            warn!("exec {}: its output was not all delivered {} s after it exited", self.id(), DRAIN_TIMEOUT.as_secs());
+        if tokio::time::timeout(DRAIN_TIMEOUT, self.out_done.wait())
+            .await
+            .is_err()
+        {
+            warn!(
+                "exec {}: its output was not all delivered {} s after it exited",
+                self.id(),
+                DRAIN_TIMEOUT.as_secs()
+            );
         }
         Ok(exit)
     }
@@ -180,7 +202,10 @@ impl ExecProc {
                 .map_err(Self::err);
         }
         let _ = self.close_stdin.send(true);
-        if tokio::time::timeout(STDIN_CLOSE_TIMEOUT, self.in_done.wait()).await.is_err() {
+        if tokio::time::timeout(STDIN_CLOSE_TIMEOUT, self.in_done.wait())
+            .await
+            .is_err()
+        {
             warn!("exec {}: the input pump did not finish closing", self.id());
         }
         Ok(())
@@ -189,7 +214,11 @@ impl ExecProc {
     /// The exec is over: stop the pumps and let the daemon drop it. A daemon that does not know it (the VM is gone) is not an error.
     pub async fn delete(&self) -> Result<(), Error> {
         let _ = self.cancel.send(true);
-        if let Err(e) = self.client.exec_delete(&self.vm_id, &self.container_id, self.id()).await {
+        if let Err(e) = self
+            .client
+            .exec_delete(&self.vm_id, &self.container_id, self.id())
+            .await
+        {
             warn!("deleting exec {} in the daemon: {e:#}", self.id());
         }
         Ok(())
@@ -200,7 +229,13 @@ impl ExecProc {
     /// Copy the process's output to the stdout and stderr pipes until it has ended and everything has been written.
     async fn pump_output(self: Arc<Self>) {
         let open = |cfg: ExecConfig, stderr: bool| async move {
-            let job = tokio::task::spawn_blocking(move || if stderr { cfg.open_stderr() } else { cfg.open_stdout() });
+            let job = tokio::task::spawn_blocking(move || {
+                if stderr {
+                    cfg.open_stderr()
+                } else {
+                    cfg.open_stdout()
+                }
+            });
             tokio::time::timeout(OPEN_TIMEOUT, job)
                 .await
                 .ok()
@@ -210,7 +245,11 @@ impl ExecProc {
         };
         let mut out = open(self.cfg.clone(), false).await;
         // With a terminal everything is on stdout and there is no stderr pipe.
-        let mut err = if self.cfg.terminal { None } else { open(self.cfg.clone(), true).await } ;
+        let mut err = if self.cfg.terminal {
+            None
+        } else {
+            open(self.cfg.clone(), true).await
+        };
 
         let mut cancel = self.cancel.subscribe();
         let (mut so, mut se) = (0u64, 0u64);
@@ -227,7 +266,11 @@ impl ExecProc {
                 Ok(chunk) => {
                     failures = 0;
                     if chunk.dropped > 0 {
-                        warn!("exec {}: the guest dropped {} bytes of output nobody read in time", self.id(), chunk.dropped);
+                        warn!(
+                            "exec {}: the guest dropped {} bytes of output nobody read in time",
+                            self.id(),
+                            chunk.dropped
+                        );
                     }
                     let got = !chunk.stdout.is_empty() || !chunk.stderr.is_empty();
                     write_to(&mut out, &chunk.stdout).await;
@@ -282,7 +325,11 @@ impl ExecProc {
         let file = match tokio::time::timeout(OPEN_TIMEOUT, open).await {
             Ok(Ok(Ok(f))) => f,
             other => {
-                warn!("exec {}: cannot open its stdin pipe: {:?}", self.id(), other.map(|r| r.map(|r| r.map(|_| ()))));
+                warn!(
+                    "exec {}: cannot open its stdin pipe: {:?}",
+                    self.id(),
+                    other.map(|r| r.map(|r| r.map(|_| ())))
+                );
                 return;
             }
         };
@@ -326,7 +373,12 @@ impl ExecProc {
                     closing = true;
                 }
                 Some(Ok(n)) => {
-                    if self.client.exec_write(&self.vm_id, &self.container_id, self.id(), &buf[..n]).await.is_err() {
+                    if self
+                        .client
+                        .exec_write(&self.vm_id, &self.container_id, self.id(), &buf[..n])
+                        .await
+                        .is_err()
+                    {
                         failures += 1;
                         if failures >= MAX_FAILURES {
                             return;
@@ -341,7 +393,11 @@ impl ExecProc {
                 }
                 None => {
                     // Nothing left: close.
-                    if let Err(e) = self.client.exec_close_stdin(&self.vm_id, &self.container_id, self.id()).await {
+                    if let Err(e) = self
+                        .client
+                        .exec_close_stdin(&self.vm_id, &self.container_id, self.id())
+                        .await
+                    {
                         warn!("exec {}: closing its input: {e:#}", self.id());
                     }
                     return;
@@ -416,10 +472,17 @@ mod tests {
             let reads: Arc<Mutex<VecDeque<Value>>> = Arc::default();
             let exit_gate = Arc::new(Notify::new());
             let endless = Arc::new(AtomicBool::new(false));
-            let (c, r, g, e) = (calls.clone(), reads.clone(), exit_gate.clone(), endless.clone());
+            let (c, r, g, e) = (
+                calls.clone(),
+                reads.clone(),
+                exit_gate.clone(),
+                endless.clone(),
+            );
             tokio::spawn(async move {
                 loop {
-                    let Ok((stream, _)) = listener.accept().await else { return };
+                    let Ok((stream, _)) = listener.accept().await else {
+                        return;
+                    };
                     let (c, r, g, e) = (c.clone(), r.clone(), g.clone(), e.clone());
                     tokio::spawn(async move {
                         let (rd, mut wr) = stream.into_split();
@@ -461,7 +524,14 @@ mod tests {
                     });
                 }
             });
-            FakeDaemon { socket, calls, reads, exit_gate, endless, _dir: dir }
+            FakeDaemon {
+                socket,
+                calls,
+                reads,
+                exit_gate,
+                endless,
+                _dir: dir,
+            }
         }
 
         fn client(&self) -> DaemonClient {
@@ -469,11 +539,22 @@ mod tests {
         }
 
         fn methods(&self) -> Vec<String> {
-            self.calls.lock().unwrap().iter().map(|c| c["method"].as_str().unwrap().to_string()).collect()
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|c| c["method"].as_str().unwrap().to_string())
+                .collect()
         }
 
         fn calls_of(&self, method: &str) -> Vec<Value> {
-            self.calls.lock().unwrap().iter().filter(|c| c["method"] == method).cloned().collect()
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| c["method"] == method)
+                .cloned()
+                .collect()
         }
 
         async fn wait_for(&self, method: &str, n: usize) {
@@ -500,7 +581,12 @@ mod tests {
 
     /// The test's own end of a pipe (read-write, so that opening never waits).
     fn open_rw(p: &Path) -> std::fs::File {
-        std::fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_NONBLOCK).open(p).unwrap()
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(p)
+            .unwrap()
     }
 
     fn read_until(f: &mut std::fs::File, want: usize) -> Vec<u8> {
@@ -540,12 +626,20 @@ mod tests {
             chunk("", "oops\n", 6, 5, false),
             chunk("bye\n", "", 10, 5, true),
         ]);
-        let p = ExecProc::new(cfg("e1", Path::new(""), &so, &se, false), d.client(), "vm1".into(), "c1".into());
+        let p = ExecProc::new(
+            cfg("e1", Path::new(""), &so, &se, false),
+            d.client(),
+            "vm1".into(),
+            "c1".into(),
+        );
         p.create().await.unwrap();
         assert_eq!(p.start().await.unwrap(), 77);
         d.exit_gate.notify_one();
         // `notify_one` before the call is waiting is kept for the next waiter
-        let (status, at) = tokio::time::timeout(Duration::from_secs(10), p.wait()).await.unwrap().unwrap();
+        let (status, at) = tokio::time::timeout(Duration::from_secs(10), p.wait())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(status, 3);
         assert_eq!(at.timestamp(), 1_700_000_000);
         // everything was in the pipes by the time wait returned
@@ -553,7 +647,13 @@ mod tests {
         assert_eq!(read_until(&mut rse, 5), b"oops\n");
         // the reads acknowledged what had been taken
         let reads = d.calls_of("ExecRead");
-        assert_eq!((reads[0]["stdout_offset"].as_u64(), reads[0]["stderr_offset"].as_u64()), (Some(0), Some(0)));
+        assert_eq!(
+            (
+                reads[0]["stdout_offset"].as_u64(),
+                reads[0]["stderr_offset"].as_u64()
+            ),
+            (Some(0), Some(0))
+        );
         assert_eq!(reads[1]["stdout_offset"].as_u64(), Some(6));
         assert_eq!(reads[2]["stderr_offset"].as_u64(), Some(5));
         assert_eq!(reads[0]["max"].as_u64(), Some(CHUNK as u64));
@@ -582,13 +682,28 @@ mod tests {
         assert_eq!(create["container_id"], "ctr7");
         assert_eq!(create["exec_id"], "abc123");
         assert_eq!(create["terminal"], true);
-        assert_eq!(B64.decode(create["process_json"].as_str().unwrap()).unwrap(), br#"{"args":["ls"]}"#);
+        assert_eq!(
+            B64.decode(create["process_json"].as_str().unwrap())
+                .unwrap(),
+            br#"{"args":["ls"]}"#
+        );
         let resize = &d.calls_of("ExecResize")[0];
-        assert_eq!((resize["width"].as_u64(), resize["height"].as_u64()), (Some(120), Some(40)));
+        assert_eq!(
+            (resize["width"].as_u64(), resize["height"].as_u64()),
+            (Some(120), Some(40))
+        );
         assert_eq!(d.calls_of("ExecKill")[0]["signal"].as_u64(), Some(15));
         for m in ["ExecStart", "ExecCloseStdin", "ExecWait", "ExecDelete"] {
             let c = &d.calls_of(m)[0];
-            assert_eq!((c["vm_id"].as_str(), c["container_id"].as_str(), c["exec_id"].as_str()), (Some("vm9"), Some("ctr7"), Some("abc123")), "{m}");
+            assert_eq!(
+                (
+                    c["vm_id"].as_str(),
+                    c["container_id"].as_str(),
+                    c["exec_id"].as_str()
+                ),
+                (Some("vm9"), Some("ctr7"), Some("abc123")),
+                "{m}"
+            );
         }
     }
 
@@ -598,7 +713,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let si = fifo(tmp.path(), "in");
         d.endless.store(true, Ordering::SeqCst);
-        let p = ExecProc::new(cfg("e2", &si, Path::new(""), Path::new(""), false), d.client(), "vm".into(), "c".into());
+        let p = ExecProc::new(
+            cfg("e2", &si, Path::new(""), Path::new(""), false),
+            d.client(),
+            "vm".into(),
+            "c".into(),
+        );
         p.create().await.unwrap();
         p.start().await.unwrap();
 
@@ -626,14 +746,29 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn an_exec_with_no_pipes_still_drains_and_exits() {
         let d = FakeDaemon::start().await;
-        d.reads.lock().unwrap().extend([chunk("discarded", "", 9, 0, false), chunk("", "", 9, 0, true)]);
-        let p = ExecProc::new(cfg("e3", Path::new(""), Path::new(""), Path::new(""), false), d.client(), "vm".into(), "c".into());
+        d.reads.lock().unwrap().extend([
+            chunk("discarded", "", 9, 0, false),
+            chunk("", "", 9, 0, true),
+        ]);
+        let p = ExecProc::new(
+            cfg("e3", Path::new(""), Path::new(""), Path::new(""), false),
+            d.client(),
+            "vm".into(),
+            "c".into(),
+        );
         p.create().await.unwrap();
         p.start().await.unwrap();
         d.exit_gate.notify_one();
-        let (status, _) = tokio::time::timeout(Duration::from_secs(10), p.wait()).await.unwrap().unwrap();
+        let (status, _) = tokio::time::timeout(Duration::from_secs(10), p.wait())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(status, 3);
-        assert_eq!(d.calls_of("ExecRead").len(), 2, "the output was read (and dropped), not left in the guest");
+        assert_eq!(
+            d.calls_of("ExecRead").len(),
+            2,
+            "the output was read (and dropped), not left in the guest"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -642,22 +777,39 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (si, so) = (fifo(tmp.path(), "in"), fifo(tmp.path(), "out"));
         d.endless.store(true, Ordering::SeqCst);
-        let p = ExecProc::new(cfg("e4", &si, &so, Path::new(""), false), d.client(), "vm".into(), "c".into());
+        let p = ExecProc::new(
+            cfg("e4", &si, &so, Path::new(""), false),
+            d.client(),
+            "vm".into(),
+            "c".into(),
+        );
         p.create().await.unwrap();
         p.start().await.unwrap();
         d.wait_for("ExecRead", 3).await;
         p.delete().await.unwrap();
-        tokio::time::timeout(Duration::from_secs(3), p.out_done.wait()).await.expect("output pump ended");
-        tokio::time::timeout(Duration::from_secs(3), p.in_done.wait()).await.expect("input pump ended");
+        tokio::time::timeout(Duration::from_secs(3), p.out_done.wait())
+            .await
+            .expect("output pump ended");
+        tokio::time::timeout(Duration::from_secs(3), p.in_done.wait())
+            .await
+            .expect("input pump ended");
         let n = d.calls_of("ExecRead").len();
         tokio::time::sleep(Duration::from_millis(400)).await;
-        assert!(d.calls_of("ExecRead").len() <= n + 1, "no more polling after delete");
+        assert!(
+            d.calls_of("ExecRead").len() <= n + 1,
+            "no more polling after delete"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_daemon_that_is_gone_is_an_error_not_a_hang() {
         let client = DaemonClient::new("/nonexistent/daemon.sock");
-        let p = ExecProc::new(cfg("e5", Path::new(""), Path::new(""), Path::new(""), false), client, "vm".into(), "c".into());
+        let p = ExecProc::new(
+            cfg("e5", Path::new(""), Path::new(""), Path::new(""), false),
+            client,
+            "vm".into(),
+            "c".into(),
+        );
         assert!(p.create().await.is_err());
         assert!(p.start().await.is_err());
         assert!(p.wait().await.is_err());
@@ -666,7 +818,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn the_stdin_of_a_container_with_a_terminal_goes_to_the_init_terminal_and_nothing_else_is_asked() {
+    async fn the_stdin_of_a_container_with_a_terminal_goes_to_the_init_terminal_and_nothing_else_is_asked(
+    ) {
         let d = FakeDaemon::start().await;
         let tmp = tempfile::tempdir().unwrap();
         let si = fifo(tmp.path(), "in");
@@ -680,18 +833,34 @@ mod tests {
         p.close_stdin().await.unwrap();
 
         let writes = d.calls_of("ExecWrite");
-        let data: Vec<u8> = writes.iter().flat_map(|c| B64.decode(c["data"].as_str().unwrap()).unwrap()).collect();
+        let data: Vec<u8> = writes
+            .iter()
+            .flat_map(|c| B64.decode(c["data"].as_str().unwrap()).unwrap())
+            .collect();
         assert_eq!(data, b"ls\nexit\n");
         for c in &writes {
             assert_eq!(c["exec_id"], "init", "the container's own terminal");
-            assert_eq!((c["vm_id"].as_str(), c["container_id"].as_str()), (Some("vm9"), Some("ctr9")));
+            assert_eq!(
+                (c["vm_id"].as_str(), c["container_id"].as_str()),
+                (Some("vm9"), Some("ctr9"))
+            );
         }
         assert_eq!(d.calls_of("ExecCloseStdin").len(), 1);
         assert_eq!(d.calls_of("ExecCloseStdin")[0]["exec_id"], "init");
         // Only the input: no create, start, read or wait for a process that is not an exec.
         let methods = d.methods();
-        for m in ["ExecCreate", "ExecStart", "ExecRead", "ExecWait", "ExecDelete", "ExecKill"] {
-            assert!(!methods.iter().any(|x| x == m), "{m} must not be called: {methods:?}");
+        for m in [
+            "ExecCreate",
+            "ExecStart",
+            "ExecRead",
+            "ExecWait",
+            "ExecDelete",
+            "ExecKill",
+        ] {
+            assert!(
+                !methods.iter().any(|x| x == m),
+                "{m} must not be called: {methods:?}"
+            );
         }
         p.stop();
     }
@@ -701,7 +870,9 @@ mod tests {
         let d = FakeDaemon::start().await;
         let p = ExecProc::for_init("c", std::path::PathBuf::new(), d.client(), "vm".into());
         p.start_input_only();
-        tokio::time::timeout(Duration::from_secs(2), p.in_done.wait()).await.expect("nothing to wait for");
+        tokio::time::timeout(Duration::from_secs(2), p.in_done.wait())
+            .await
+            .expect("nothing to wait for");
         p.stop();
         assert!(d.methods().is_empty());
     }

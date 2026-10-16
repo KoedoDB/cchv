@@ -110,7 +110,9 @@ fn check_range(base: u32, count: u32) -> Result<()> {
         anyhow::bail!("ch_uid_count must not be 0");
     }
     if base < 1000 {
-        anyhow::bail!("ch_uid_base {base} is in the range of system and ordinary users (below 1000)");
+        anyhow::bail!(
+            "ch_uid_base {base} is in the range of system and ordinary users (below 1000)"
+        );
     }
     if base.checked_add(count).is_none() {
         anyhow::bail!("ch_uid_base {base} + ch_uid_count {count} does not fit a user ID");
@@ -158,7 +160,10 @@ pub fn init(config: &DaemonConfig) -> Result<()> {
     if gid == 0 {
         anyhow::bail!("/dev/kvm belongs to group root; set ch_gid to the group that may open it");
     }
-    for (what, path) in [("kernel_path", &config.kernel_path), ("rootfs_path", &config.rootfs_path)] {
+    for (what, path) in [
+        ("kernel_path", &config.kernel_path),
+        ("rootfs_path", &config.rootfs_path),
+    ] {
         let mode = std::fs::metadata(path)
             .with_context(|| format!("{what} {path}"))?
             .mode();
@@ -211,10 +216,9 @@ pub fn alloc_for(state_dir: &Path) -> Result<Option<(u32, u32)>> {
     let Some(m) = state() else { return Ok(None) };
     let (uid, gid) = {
         let mut s = m.lock().unwrap();
-        let uid = s
-            .uids
-            .alloc()
-            .ok_or_else(|| anyhow::anyhow!("no free user for a VM: all {} are in use", s.uids.count))?;
+        let uid = s.uids.alloc().ok_or_else(|| {
+            anyhow::anyhow!("no free user for a VM: all {} are in use", s.uids.count)
+        })?;
         s.by_vm.insert(vm_name(state_dir), uid);
         (uid, if s.confine { uid } else { s.gid })
     };
@@ -265,7 +269,9 @@ pub fn uid_of(state_dir: &Path) -> Option<u32> {
 /// Hand a file or directory to the VM whose state directory is `state_dir` (no-op when rootless is off). A directory becomes 0700.
 /// Done on a descriptor opened without following links.
 pub fn give(path: &Path, state_dir: &Path) -> Result<()> {
-    let Some(uid) = uid_of(state_dir) else { return Ok(()) };
+    let Some(uid) = uid_of(state_dir) else {
+        return Ok(());
+    };
     let fd = fsutil::open_nosymlinks(path, libc::O_RDONLY | libc::O_NONBLOCK)
         .with_context(|| format!("open {}", path.display()))?;
     let st = fsutil::fstat(fd.as_raw_fd())?;
@@ -301,8 +307,16 @@ pub fn make_outbox(state_dir: &Path) -> Result<PathBuf> {
 }
 
 fn remove_outbox_dir(out: &Path) {
-    let (Some(parent), Some(name)) = (out.parent(), out.file_name().and_then(|n| n.to_str())) else { return };
-    let Ok(dir) = fsutil::open_nosymlinks(parent, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NONBLOCK) else { return };
+    let (Some(parent), Some(name)) = (out.parent(), out.file_name().and_then(|n| n.to_str()))
+    else {
+        return;
+    };
+    let Ok(dir) = fsutil::open_nosymlinks(
+        parent,
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NONBLOCK,
+    ) else {
+        return;
+    };
     if let Ok(st) = fsutil::fstatat_nofollow(dir.as_raw_fd(), name) {
         if let Err(e) = fsutil::remove_entry(dir.as_raw_fd(), name, &st) {
             warn!("could not remove {}: {e}", out.display());
@@ -328,7 +342,11 @@ pub fn discard_outbox(state_dir: &Path) {
 /// The VM is destroyed: its outbox goes with it, unless it holds a snapshot that is about to be collected.
 pub fn drop_outbox(state_dir: &Path) {
     let Some(m) = state() else { return };
-    if m.lock().unwrap().kept_outboxes.contains(&vm_name(state_dir)) {
+    if m.lock()
+        .unwrap()
+        .kept_outboxes
+        .contains(&vm_name(state_dir))
+    {
         return;
     }
     remove_outbox_dir(&crate::confine::out_dir_of(state_dir));
@@ -351,7 +369,8 @@ pub fn collect_outbox(state_dir: &Path, dest: &Path) -> Result<()> {
             return Err(e).with_context(|| format!("{} is not an empty directory", dest.display()));
         }
     }
-    let r = std::fs::rename(&out, dest).with_context(|| format!("move {} to {}", out.display(), dest.display()));
+    let r = std::fs::rename(&out, dest)
+        .with_context(|| format!("move {} to {}", out.display(), dest.display()));
     if r.is_err() {
         remove_outbox_dir(&out);
     }
@@ -395,13 +414,25 @@ fn hand_over_dir(dir: &Path, owner: (u32, u32), dir_mode: u32, file_mode: u32) -
         .with_context(|| format!("hand over {}", dir.display()))
 }
 
-fn hand_over_fd(fd: i32, depth: usize, owner: (u32, u32), dir_mode: u32, file_mode: u32) -> Result<()> {
+fn hand_over_fd(
+    fd: i32,
+    depth: usize,
+    owner: (u32, u32),
+    dir_mode: u32,
+    file_mode: u32,
+) -> Result<()> {
     fsutil::fchown(fd, owner.0, owner.1)?;
     fsutil::fchmod(fd, dir_mode)?;
     for name in fsutil::list(fd)? {
-        let Ok(st) = fsutil::fstatat_nofollow(fd, &name) else { continue };
+        let Ok(st) = fsutil::fstatat_nofollow(fd, &name) else {
+            continue;
+        };
         let kept = if fsutil::is_reg(&st) && st.st_nlink == 1 {
-            match fsutil::openat(fd, &name, libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK) {
+            match fsutil::openat(
+                fd,
+                &name,
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+            ) {
                 Ok(f) => match fsutil::fstat(f.as_raw_fd()) {
                     // The same file that was looked at (it could have been replaced in between).
                     Ok(st2)
@@ -425,7 +456,11 @@ fn hand_over_fd(fd: i32, depth: usize, owner: (u32, u32), dir_mode: u32, file_mo
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
             ) {
                 Ok(sub) => match fsutil::fstat(sub.as_raw_fd()) {
-                    Ok(st2) if fsutil::is_dir(&st2) && st2.st_ino == st.st_ino && st2.st_dev == st.st_dev => {
+                    Ok(st2)
+                        if fsutil::is_dir(&st2)
+                            && st2.st_ino == st.st_ino
+                            && st2.st_dev == st.st_dev =>
+                    {
                         hand_over_fd(sub.as_raw_fd(), depth + 1, owner, dir_mode, file_mode)?;
                         true
                     }
@@ -475,7 +510,9 @@ fn roots() -> (PathBuf, PathBuf) {
 /// The file is opened without following links, and must be a regular file in a place `path_allowed` names. The grant is written to
 /// the VM's registry first, so that `release` can take it back even if the entry is only half made.
 pub fn allow_read(path: &Path, state_dir: &Path) -> Result<()> {
-    let Some(uid) = uid_of(state_dir) else { return Ok(()) };
+    let Some(uid) = uid_of(state_dir) else {
+        return Ok(());
+    };
     let (erofs_root, snapshot_root) = roots();
     if !path_allowed(path, &erofs_root, &snapshot_root) {
         anyhow::bail!("{} is not a file a VM may be given", path.display());
@@ -543,7 +580,9 @@ pub async fn sweep_processes(config: &DaemonConfig) {
     if !config.ch_rootless {
         return;
     }
-    let Some(hi) = config.ch_uid_base.checked_add(config.ch_uid_count) else { return };
+    let Some(hi) = config.ch_uid_base.checked_add(config.ch_uid_count) else {
+        return;
+    };
     let lo = config.ch_uid_base;
     let mut killed = 0;
     for _ in 0..100 {
@@ -576,14 +615,21 @@ pub fn sweep_acls(config: &DaemonConfig) {
     if config.ch_uid_count == 0 {
         return;
     }
-    let Some(hi) = config.ch_uid_base.checked_add(config.ch_uid_count) else { return };
+    let Some(hi) = config.ch_uid_base.checked_add(config.ch_uid_count) else {
+        return;
+    };
     let lo = config.ch_uid_base;
     let mut swept = 0;
-    let roots = [PathBuf::from(&config.erofs_cache_dir), config.snapshot_cache_dir()];
+    let roots = [
+        PathBuf::from(&config.erofs_cache_dir),
+        config.snapshot_cache_dir(),
+    ];
     for root in roots {
         let mut stack = vec![(root, 0usize)];
         while let Some((dir, depth)) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
             for e in entries.flatten() {
                 let p = e.path();
                 let Ok(ft) = e.file_type() else { continue };
@@ -600,7 +646,9 @@ pub fn sweep_acls(config: &DaemonConfig) {
         }
     }
     if swept > 0 {
-        log::info!("took the ACL entries of the VMs' users off {swept} files left by an earlier daemon");
+        log::info!(
+            "took the ACL entries of the VMs' users off {swept} files left by an earlier daemon"
+        );
     }
 }
 
@@ -674,7 +722,11 @@ mod acl {
         match e.iter_mut().find(|x| x.0 == MASK) {
             Some(m) => m.1 |= READ,
             None => {
-                let g = e.iter().find(|x| x.0 == GROUP_OBJ).map(|x| x.1).unwrap_or(0);
+                let g = e
+                    .iter()
+                    .find(|x| x.0 == GROUP_OBJ)
+                    .map(|x| x.1)
+                    .unwrap_or(0);
                 e.push((MASK, g | READ, NO_ID));
             }
         }
@@ -717,7 +769,9 @@ mod acl {
     /// Take the named users in [lo, hi) off the file. Returns whether it had any.
     pub fn remove_range_fd(fd: RawFd, lo: u32, hi: u32) -> Result<bool> {
         let _lock = LOCK.lock().unwrap();
-        let Some(entries) = get(fd).context("read the ACL")? else { return Ok(false) };
+        let Some(entries) = get(fd).context("read the ACL")? else {
+            return Ok(false);
+        };
         if !entries.iter().any(|x| x.0 == USER && x.2 >= lo && x.2 < hi) {
             return Ok(false);
         }
@@ -727,7 +781,11 @@ mod acl {
             return Ok(true);
         }
         // The last named entry is gone: make the mask what the owning group has (the mode's group bits are the mask), and drop the ACL.
-        let g = rest.iter().find(|x| x.0 == GROUP_OBJ).map(|x| x.1).unwrap_or(0);
+        let g = rest
+            .iter()
+            .find(|x| x.0 == GROUP_OBJ)
+            .map(|x| x.1)
+            .unwrap_or(0);
         rest.retain(|x| x.0 != MASK);
         rest.push((MASK, g, NO_ID));
         fsutil::fsetxattr(fd, NAME, &encode(&rest)).context("set the ACL")?;
@@ -784,7 +842,10 @@ mod acl {
                 "owner rw, mask r"
             );
             assert!(remove_range_fd(fd, 200_000, 260_000).unwrap());
-            assert!(!remove_range_fd(fd, 200_000, 260_000).unwrap(), "nothing the second time");
+            assert!(
+                !remove_range_fd(fd, 200_000, 260_000).unwrap(),
+                "nothing the second time"
+            );
             assert!(get(fd).unwrap().is_none());
             let m = std::fs::metadata(&f).unwrap().permissions().mode() & 0o777;
             assert_eq!(m, 0o600, "mode after taking the reader back");
@@ -825,9 +886,14 @@ mod tests {
         assert!(check_range(200_000, 60_000).is_ok());
         assert!(check_range(200_000, 0).is_err());
         assert!(check_range(500, 10).is_err());
-        assert!(check_range(u32::MAX - 5, 100).is_err(), "base + count overflows");
+        assert!(
+            check_range(u32::MAX - 5, 100).is_err(),
+            "base + count overflows"
+        );
         let passwd = "root:x:0:0::/root:/bin/sh\nnobody:x:65534:65534::/:/bin/false\nvmuser:x:200100:200100::/:/bin/false\n";
-        assert!(passwd_overlaps(passwd, 200_000, 260_000).unwrap().contains("vmuser"));
+        assert!(passwd_overlaps(passwd, 200_000, 260_000)
+            .unwrap()
+            .contains("vmuser"));
         assert!(passwd_overlaps(passwd, 300_000, 360_000).is_none());
     }
 
@@ -835,20 +901,36 @@ mod tests {
     fn only_the_images_and_the_cached_snapshots_may_be_opened_for_a_vm() {
         let root = Path::new("/run/cloudhv/erofs-cache");
         let snaps = Path::new("/run/cloudhv/daemon/snapshot-cache");
-        assert!(path_allowed(Path::new("/run/cloudhv/erofs-cache/abc.erofs"), root, snaps));
+        assert!(path_allowed(
+            Path::new("/run/cloudhv/erofs-cache/abc.erofs"),
+            root,
+            snaps
+        ));
         assert!(path_allowed(
             Path::new("/run/cloudhv/daemon/snapshot-cache/0123abcd/memory-ranges"),
             root,
             snaps
         ));
         assert!(!path_allowed(Path::new("/etc/shadow"), root, snaps));
-        assert!(!path_allowed(Path::new("/run/cloudhv/erofs-cache/../../../etc/shadow"), root, snaps));
+        assert!(!path_allowed(
+            Path::new("/run/cloudhv/erofs-cache/../../../etc/shadow"),
+            root,
+            snaps
+        ));
         assert!(
-            !path_allowed(Path::new("/run/cloudhv/daemon/pool-1-3/snapshot/memory-ranges"), root, snaps),
+            !path_allowed(
+                Path::new("/run/cloudhv/daemon/pool-1-3/snapshot/memory-ranges"),
+                root,
+                snaps
+            ),
             "a path in a VM's own directory, which the VM can change, is not one"
         );
         assert!(
-            !path_allowed(Path::new("/run/cloudhv/erofs-cache/a\nb.erofs"), root, snaps),
+            !path_allowed(
+                Path::new("/run/cloudhv/erofs-cache/a\nb.erofs"),
+                root,
+                snaps
+            ),
             "a newline breaks the records"
         );
         assert!(!path_allowed(Path::new("relative/path"), root, snaps));
@@ -862,12 +944,17 @@ mod tests {
     fn the_hand_over_removes_links_fifos_hard_links_and_depth_and_keeps_plain_files() {
         let d = std::env::temp_dir().join(format!("cloudhv-handover-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        let outside = std::env::temp_dir().join(format!("cloudhv-handover-outside-{}", std::process::id()));
+        let outside =
+            std::env::temp_dir().join(format!("cloudhv-handover-outside-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&outside);
         std::fs::create_dir_all(d.join("a/b/c/d/e")).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("precious"), b"keep").unwrap();
-        std::fs::set_permissions(outside.join("precious"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(
+            outside.join("precious"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
         std::fs::write(d.join("memory-ranges"), b"mem").unwrap();
         std::fs::write(d.join("state.json"), b"{}").unwrap();
         std::fs::write(d.join("a/ok.json"), b"{}").unwrap();
@@ -884,9 +971,15 @@ mod tests {
         hand_over_dir(&d, me, 0o700, 0o600).unwrap();
 
         for gone in ["dirlink", "filelink", "loop", "hardlinked", "fifo"] {
-            assert!(std::fs::symlink_metadata(d.join(gone)).is_err(), "{gone} is removed");
+            assert!(
+                std::fs::symlink_metadata(d.join(gone)).is_err(),
+                "{gone} is removed"
+            );
         }
-        assert!(!d.join("a/b/c/d/e").exists(), "deeper than the limit is removed");
+        assert!(
+            !d.join("a/b/c/d/e").exists(),
+            "deeper than the limit is removed"
+        );
         assert_eq!(
             std::fs::read(outside.join("precious")).unwrap(),
             b"keep",
@@ -898,7 +991,11 @@ mod tests {
         assert_eq!(mode("a/ok.json"), 0o600);
         assert_eq!(mode("a"), 0o700);
         assert_eq!(
-            std::fs::metadata(outside.join("precious")).unwrap().permissions().mode() & 0o777,
+            std::fs::metadata(outside.join("precious"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
             0o644,
             "the mode of the file a link or hard link pointed at is not changed"
         );

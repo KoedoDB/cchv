@@ -11,6 +11,8 @@ runtime config (`/opt/cloudhv/config.json`); every field below is optional.
 | `erofs_cache_max_mib` | 4096 | Size of the cache of erofs images in `/run/cloudhv/erofs-cache`. Images nobody uses are evicted, oldest first; one a running sandbox uses never is. If the cache is full of images in use, or the rootfs alone is bigger than the cache, the container does not start. |
 | `mkfs_erofs_path` | `/usr/local/bin/mkfs.erofs`, then `/usr/sbin/mkfs.erofs` | Absolute path of `mkfs.erofs`. |
 | `mkfs_erofs_timeout_secs` | 300 | `mkfs.erofs` (and what it started) is killed after this long. |
+| `emptydir_default_mib` | 1024 | The size of the disk of an emptyDir that is not `medium: Memory` (see below). The kubelet does not tell the runtime a volume's `sizeLimit`, so every such emptyDir gets this. 0: they stay in the guest's memory, like `medium: Memory`. |
+| `emptydir_max_mib` | 16384 | The shim sends at most this (the smaller of the two). The daemon's own `emptydir_max_mib` is the limit that refuses. |
 | `volume_source_roots` | `/var/openebs/local`, `/var/lib/rancher/k3s/storage` | Where persistent volumes are made. See below. |
 | `rpc_timeout_secs` | 30 | A request to the daemon. (`WaitContainer` has none.) |
 | `acquire_timeout_secs` | 120 | `AcquireSandbox` and `AddContainer`, which may boot a VM of its own size. |
@@ -30,6 +32,14 @@ the host and copied into the VM when the container starts (`src/volumes.rs`).
   Only regular files are read; FIFOs, sockets and devices are skipped.
 - A volume over 512 files or 2 MiB, or one that cannot be read, **fails the container's start** instead of being skipped (starting
   without it would make the app write to the VM's own disk and lose the data). Only `/dev/termination-log` is optional.
+- **An emptyDir on the host's disk is a disk, not a copy.** The default medium (the kubelet's `kubernetes.io~empty-dir/<name>` in a
+  pod's directory, not on a tmpfs: it is looked at with `fstatfs`, and `medium: Memory` is one) is not read at all. The volume goes to
+  the daemon as `"disk": {"id": <the volume's name, 32 hex>, "size_mb": emptydir_default_mib}` (with `"files": []`), and the daemon
+  makes a sparse file on the host's disk, an ext4 file system in it, and hot-plugs it as a virtio-blk disk; the guest agent mounts it
+  once per VM, so the containers of the pod (and every destination of one volume) share it. It is gone with the VM. Only a directory
+  of exactly that shape below `/var/lib/kubelet/pods` counts: a customer-made directory of a persistent volume cannot become a disk.
+  `medium: Memory` emptyDirs, and everything else, are copied into the guest's memory as before. What is already in the host's
+  directory is not copied (an emptyDir is empty when the pod starts).
 - The contents are a copy taken at start. A ConfigMap updated later, and a service account token the kubelet rotates, are **not**
   updated in the VM; files the container writes are not written back.
 

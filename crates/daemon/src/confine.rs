@@ -76,16 +76,23 @@ fn clean_abs(path: &str) -> bool {
         && path != "/"
         && !path.contains('\0')
         && !path.contains('\n')
-        && p.components().all(|c| matches!(c, Component::RootDir | Component::Normal(_)))
+        && p.components()
+            .all(|c| matches!(c, Component::RootDir | Component::Normal(_)))
 }
 
 /// The launcher does what the spec says as root, so it checks first that the spec is something it can do safely.
 pub fn validate_spec(spec: &LauncherSpec) -> Result<(), String> {
     if !clean_abs(&spec.binary) {
-        return Err(format!("binary {:?} is not a plain absolute path", spec.binary));
+        return Err(format!(
+            "binary {:?} is not a plain absolute path",
+            spec.binary
+        ));
     }
     if !clean_abs(&spec.new_root) {
-        return Err(format!("new_root {:?} is not a plain absolute path", spec.new_root));
+        return Err(format!(
+            "new_root {:?} is not a plain absolute path",
+            spec.new_root
+        ));
     }
     if spec.uid == 0 || spec.gid == 0 || spec.groups.contains(&0) {
         return Err("the user and groups of a confined VM must not be root".into());
@@ -103,7 +110,10 @@ pub fn validate_spec(spec: &LauncherSpec) -> Result<(), String> {
         }
         // The new root has its own /proc, and the whole of /tmp is not shared (a place under /tmp may be: then there is no tmpfs of its own).
         if b.path == "/proc" || b.path.starts_with("/proc/") || b.path == "/tmp" {
-            return Err(format!("bind {:?} would hide /proc or share the whole /tmp", b.path));
+            return Err(format!(
+                "bind {:?} would hide /proc or share the whole /tmp",
+                b.path
+            ));
         }
         if !seen.insert(b.path.clone()) {
             return Err(format!("bind {:?} twice", b.path));
@@ -111,10 +121,18 @@ pub fn validate_spec(spec: &LauncherSpec) -> Result<(), String> {
     }
     if let Some(cg) = &spec.cgroup {
         if !clean_abs(cg) || !cg.starts_with("/sys/fs/cgroup/") {
-            return Err(format!("cgroup {cg:?} is not a directory of the cgroup file system"));
+            return Err(format!(
+                "cgroup {cg:?} is not a directory of the cgroup file system"
+            ));
         }
     }
-    if spec.hostname.is_empty() || spec.hostname.len() > 63 || !spec.hostname.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+    if spec.hostname.is_empty()
+        || spec.hostname.len() > 63
+        || !spec
+            .hostname
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
         return Err("hostname is not a host name".into());
     }
     Ok(())
@@ -128,7 +146,13 @@ pub enum Step {
     /// The new root: a tmpfs on `target`.
     Root { target: String, size_mib: u64 },
     /// `src` (a file, a directory or a device node) bound at `dst`.
-    Bind { src: String, dst: String, rw: bool, dev: bool, exec: bool },
+    Bind {
+        src: String,
+        dst: String,
+        rw: bool,
+        dev: bool,
+        exec: bool,
+    },
     /// A fresh /proc (of the new PID namespace).
     Proc { dst: String },
     /// A small, private /tmp.
@@ -185,7 +209,9 @@ pub fn bind_flags(rw: bool, dev: bool, exec: bool) -> libc::c_ulong {
 /// Whether an executable is dynamically linked (has a program interpreter, `PT_INTERP`), from its ELF header. Such a binary needs the
 /// system libraries in the confined root. Anything that is not a 64-bit little-endian ELF file is taken as static.
 pub fn is_dynamic_elf(path: &Path) -> bool {
-    let Ok(mut f) = std::fs::File::open(path) else { return false };
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
     let mut hdr = [0u8; 64];
     if f.read_exact(&mut hdr).is_err() || &hdr[..4] != b"\x7fELF" || hdr[4] != 2 || hdr[5] != 1 {
         return false;
@@ -199,7 +225,8 @@ pub fn is_dynamic_elf(path: &Path) -> bool {
     use std::io::{Seek, SeekFrom};
     for i in 0..phnum {
         let mut t = [0u8; 4];
-        if f.seek(SeekFrom::Start(phoff + i * phentsize)).is_err() || f.read_exact(&mut t).is_err() {
+        if f.seek(SeekFrom::Start(phoff + i * phentsize)).is_err() || f.read_exact(&mut t).is_err()
+        {
             return false;
         }
         if u32::from_le_bytes(t) == 3 {
@@ -228,28 +255,68 @@ pub fn build_spec(
     cgroup: Option<&Path>,
     max_processes: u64,
     vm_name: &str,
+    disk_dir: Option<&Path>,
 ) -> LauncherSpec {
-    let ro = |p: &str| Bind { path: p.to_string(), rw: false, dev: false, exec: false };
+    let ro = |p: &str| Bind {
+        path: p.to_string(),
+        rw: false,
+        dev: false,
+        exec: false,
+    };
     let mut binds = vec![
-        Bind { path: binary.to_string(), rw: false, dev: false, exec: true },
+        Bind {
+            path: binary.to_string(),
+            rw: false,
+            dev: false,
+            exec: true,
+        },
         ro(kernel),
         ro(rootfs),
         ro(erofs_cache),
-        Bind { path: state_dir.display().to_string(), rw: true, dev: false, exec: false },
-        Bind { path: out_dir.display().to_string(), rw: true, dev: false, exec: false },
+        Bind {
+            path: state_dir.display().to_string(),
+            rw: true,
+            dev: false,
+            exec: false,
+        },
+        Bind {
+            path: out_dir.display().to_string(),
+            rw: true,
+            dev: false,
+            exec: false,
+        },
     ];
     for dev in ["/dev/kvm", "/dev/null", "/dev/zero", "/dev/urandom"] {
-        binds.push(Bind { path: dev.to_string(), rw: true, dev: true, exec: false });
+        binds.push(Bind {
+            path: dev.to_string(),
+            rw: true,
+            dev: true,
+            exec: false,
+        });
     }
     if is_dynamic_elf(Path::new(binary)) {
         for lib in libs {
             if Path::new(lib).exists() {
-                binds.push(Bind { path: lib.to_string(), rw: false, dev: false, exec: true });
+                binds.push(Bind {
+                    path: lib.to_string(),
+                    rw: false,
+                    dev: false,
+                    exec: true,
+                });
             }
         }
     }
     for p in extra_ro {
         binds.push(ro(p));
+    }
+    // The directory of the VM's emptyDir disks: writable (the disk files are written), and not `exec`.
+    if let Some(d) = disk_dir {
+        binds.push(Bind {
+            path: d.display().to_string(),
+            rw: true,
+            dev: false,
+            exec: false,
+        });
     }
     // A path asked for twice (the kernel may be inside a directory that is also given) is one bind.
     let mut seen = std::collections::HashSet::new();
@@ -264,7 +331,15 @@ pub fn build_spec(
         binds,
         cgroup: cgroup.map(|c| c.display().to_string()),
         max_processes,
-        hostname: format!("ch-{}", vm_name.chars().filter(|c| c.is_ascii_alphanumeric()).take(40).collect::<String>().to_lowercase()),
+        hostname: format!(
+            "ch-{}",
+            vm_name
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .take(40)
+                .collect::<String>()
+                .to_lowercase()
+        ),
         tmp_mib: 16,
     }
 }
@@ -290,7 +365,13 @@ fn check(rc: libc::c_int, what: impl FnOnce() -> String) -> Result<(), String> {
     }
 }
 
-fn mount(src: Option<&str>, dst: &str, fstype: Option<&str>, flags: libc::c_ulong, data: Option<&str>) -> Result<(), String> {
+fn mount(
+    src: Option<&str>,
+    dst: &str,
+    fstype: Option<&str>,
+    flags: libc::c_ulong,
+    data: Option<&str>,
+) -> Result<(), String> {
     let s = src.map(cstr).transpose()?;
     let d = cstr(dst)?;
     let t = fstype.map(cstr).transpose()?;
@@ -301,7 +382,8 @@ fn mount(src: Option<&str>, dst: &str, fstype: Option<&str>, flags: libc::c_ulon
             d.as_ptr(),
             t.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
             flags,
-            da.as_ref().map_or(std::ptr::null(), |c| c.as_ptr() as *const libc::c_void),
+            da.as_ref()
+                .map_or(std::ptr::null(), |c| c.as_ptr() as *const libc::c_void),
         )
     };
     check(rc, || format!("mount {src:?} on {dst}"))
@@ -314,7 +396,8 @@ fn make_target(src: &str, dst: &str) -> Result<(), String> {
         std::fs::create_dir_all(dst).map_err(|e| format!("create {dst}: {e}"))
     } else {
         if let Some(parent) = Path::new(dst).parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create {}: {e}", parent.display()))?;
         }
         std::fs::OpenOptions::new()
             .create(true)
@@ -338,14 +421,26 @@ fn apply(steps: &[Step]) -> Result<(), String> {
                     Some(&format!("mode=0755,size={size_mib}m")),
                 )?;
             }
-            Step::Bind { src, dst, rw, dev, exec } => {
+            Step::Bind {
+                src,
+                dst,
+                rw,
+                dev,
+                exec,
+            } => {
                 make_target(src, dst)?;
                 mount(Some(src), dst, None, libc::MS_BIND, None)?;
                 mount(None, dst, None, bind_flags(*rw, *dev, *exec), None)?;
             }
             Step::Proc { dst } => {
                 std::fs::create_dir_all(dst).map_err(|e| format!("create {dst}: {e}"))?;
-                mount(Some("proc"), dst, Some("proc"), libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC, None)?;
+                mount(
+                    Some("proc"),
+                    dst,
+                    Some("proc"),
+                    libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+                    None,
+                )?;
             }
             Step::Tmp { dst, size_mib } => {
                 std::fs::create_dir_all(dst).map_err(|e| format!("create {dst}: {e}"))?;
@@ -365,25 +460,46 @@ fn apply(steps: &[Step]) -> Result<(), String> {
 /// Go into the new root and let the old one go: `pivot_root(".", ".")` with the old root then unmounted from under itself.
 fn pivot(new_root: &str) -> Result<(), String> {
     let r = cstr(new_root)?;
-    check(unsafe { libc::chdir(r.as_ptr()) }, || format!("chdir {new_root}"))?;
+    check(unsafe { libc::chdir(r.as_ptr()) }, || {
+        format!("chdir {new_root}")
+    })?;
     let dot = cstr(".")?;
     check(
         unsafe { libc::syscall(libc::SYS_pivot_root, dot.as_ptr(), dot.as_ptr()) as libc::c_int },
         || "pivot_root".to_string(),
     )?;
-    check(unsafe { libc::umount2(dot.as_ptr(), libc::MNT_DETACH) }, || "umount the old root".to_string())?;
+    check(
+        unsafe { libc::umount2(dot.as_ptr(), libc::MNT_DETACH) },
+        || "umount the old root".to_string(),
+    )?;
     let slash = cstr("/")?;
-    check(unsafe { libc::chdir(slash.as_ptr()) }, || "chdir /".to_string())?;
+    check(unsafe { libc::chdir(slash.as_ptr()) }, || {
+        "chdir /".to_string()
+    })?;
     // The root itself is read-only (the VM's own directories and /tmp are separate mounts).
-    mount(None, "/", None, libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV, None)
+    mount(
+        None,
+        "/",
+        None,
+        libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV,
+        None,
+    )
 }
 
 /// No capability can be had again: the bounding set is emptied and the ambient set cleared.
 fn drop_all_capabilities() {
     unsafe {
-        libc::prctl(libc::PR_CAP_AMBIENT, libc::PR_CAP_AMBIENT_CLEAR_ALL as libc::c_ulong, 0, 0, 0);
+        libc::prctl(
+            libc::PR_CAP_AMBIENT,
+            libc::PR_CAP_AMBIENT_CLEAR_ALL as libc::c_ulong,
+            0,
+            0,
+            0,
+        );
         for cap in 0..=63 {
-            if libc::prctl(libc::PR_CAPBSET_DROP, cap as libc::c_ulong, 0, 0, 0) != 0 && last_error().raw_os_error() == Some(libc::EINVAL) {
+            if libc::prctl(libc::PR_CAPBSET_DROP, cap as libc::c_ulong, 0, 0, 0) != 0
+                && last_error().raw_os_error() == Some(libc::EINVAL)
+            {
                 break; // past the last capability this kernel has
             }
         }
@@ -393,15 +509,25 @@ fn drop_all_capabilities() {
 /// Become the VM's user: groups, group, user, in that order, so that each step is still allowed. Then `no_new_privs`.
 fn drop_to(uid: u32, gid: u32, groups: &[u32]) -> Result<(), String> {
     let g: Vec<libc::gid_t> = groups.to_vec();
-    check(unsafe { libc::setgroups(g.len(), g.as_ptr()) }, || "setgroups".to_string())?;
+    check(unsafe { libc::setgroups(g.len(), g.as_ptr()) }, || {
+        "setgroups".to_string()
+    })?;
     check(unsafe { libc::setgid(gid) }, || "setgid".to_string())?;
     check(unsafe { libc::setuid(uid) }, || "setuid".to_string())?;
-    check(unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) }, || "no_new_privs".to_string())
+    check(
+        unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) },
+        || "no_new_privs".to_string(),
+    )
 }
 
 fn set_rlimit(resource: u32, value: u64) -> Result<(), String> {
-    let l = libc::rlimit { rlim_cur: value as libc::rlim_t, rlim_max: value as libc::rlim_t };
-    check(unsafe { libc::setrlimit(resource as _, &l) }, || format!("setrlimit {resource}"))
+    let l = libc::rlimit {
+        rlim_cur: value as libc::rlim_t,
+        rlim_max: value as libc::rlim_t,
+    };
+    check(unsafe { libc::setrlimit(resource as _, &l) }, || {
+        format!("setrlimit {resource}")
+    })
 }
 
 fn fail(msg: &str) -> ! {
@@ -414,14 +540,24 @@ fn child(spec: &LauncherSpec, log_fd: libc::c_int, err_fd: libc::c_int) -> ! {
     let steps = plan(spec);
     let result = (|| -> Result<(), String> {
         check(
-            unsafe { libc::unshare(libc::CLONE_NEWNS | libc::CLONE_NEWNET | libc::CLONE_NEWIPC | libc::CLONE_NEWUTS) },
+            unsafe {
+                libc::unshare(
+                    libc::CLONE_NEWNS
+                        | libc::CLONE_NEWNET
+                        | libc::CLONE_NEWIPC
+                        | libc::CLONE_NEWUTS,
+                )
+            },
             || "unshare".to_string(),
         )?;
         // What happens to the mounts here must not reach the host's: the whole tree is private to this namespace.
         mount(None, "/", None, libc::MS_REC | libc::MS_PRIVATE, None)?;
         unsafe { libc::umask(0o022) };
         let h = cstr(&spec.hostname)?;
-        check(unsafe { libc::sethostname(h.as_ptr(), spec.hostname.len()) }, || "sethostname".to_string())?;
+        check(
+            unsafe { libc::sethostname(h.as_ptr(), spec.hostname.len()) },
+            || "sethostname".to_string(),
+        )?;
         apply(&steps)?;
         pivot(&spec.new_root)?;
         drop_all_capabilities();
@@ -429,7 +565,18 @@ fn child(spec: &LauncherSpec, log_fd: libc::c_int, err_fd: libc::c_int) -> ! {
         set_rlimit(libc::RLIMIT_NPROC as u32, spec.max_processes)?;
         drop_to(spec.uid, spec.gid, &spec.groups)?;
         // Set only now: a change of user clears the parent-death signal. If the supervisor goes (it is killed), so does Cloud Hypervisor.
-        check(unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong, 0, 0, 0) }, || "pdeathsig".to_string())?;
+        check(
+            unsafe {
+                libc::prctl(
+                    libc::PR_SET_PDEATHSIG,
+                    libc::SIGKILL as libc::c_ulong,
+                    0,
+                    0,
+                    0,
+                )
+            },
+            || "pdeathsig".to_string(),
+        )?;
         // Files made from here on are the VM's own.
         unsafe { libc::umask(0o077) };
         Ok(())
@@ -483,7 +630,13 @@ const LOG_LIMIT: usize = 64 * 1024;
 /// block on a full pipe); and when Cloud Hypervisor ends, so does the supervisor, with its status. Signals are taken with a signalfd,
 /// so there is no signal handler.
 fn supervise(child: libc::pid_t, err_rd: libc::c_int, log_fd: libc::c_int) -> ! {
-    let forwarded = [libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGQUIT, libc::SIGCHLD];
+    let forwarded = [
+        libc::SIGTERM,
+        libc::SIGINT,
+        libc::SIGHUP,
+        libc::SIGQUIT,
+        libc::SIGCHLD,
+    ];
     let sfd = unsafe {
         let mut set: libc::sigset_t = std::mem::zeroed();
         libc::sigemptyset(&mut set);
@@ -525,8 +678,16 @@ fn supervise(child: libc::pid_t, err_rd: libc::c_int, log_fd: libc::c_int) -> ! 
     };
     loop {
         let mut fds = [
-            libc::pollfd { fd: sfd, events: libc::POLLIN, revents: 0 },
-            libc::pollfd { fd: if pipe_open { err_rd } else { -1 }, events: libc::POLLIN, revents: 0 },
+            libc::pollfd {
+                fd: sfd,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: if pipe_open { err_rd } else { -1 },
+                events: libc::POLLIN,
+                revents: 0,
+            },
         ];
         // A timeout, because the end of Cloud Hypervisor is also looked for without waiting for the signal about it.
         unsafe { libc::poll(fds.as_mut_ptr(), 2, 500) };
@@ -571,7 +732,11 @@ fn supervise(child: libc::pid_t, err_rd: libc::c_int, log_fd: libc::c_int) -> ! 
 pub fn launcher_main() -> ! {
     // The instructions, from standard input (the daemon's pipe), at most 1 MiB.
     let mut input = Vec::new();
-    if let Err(e) = std::io::stdin().lock().take(1 << 20).read_to_end(&mut input) {
+    if let Err(e) = std::io::stdin()
+        .lock()
+        .take(1 << 20)
+        .read_to_end(&mut input)
+    {
         fail(&format!("read the instructions: {e}"));
     }
     let spec: LauncherSpec = match serde_json::from_slice(&input) {
@@ -600,7 +765,9 @@ pub fn launcher_main() -> ! {
             fail(&format!("join the cgroup {cg}: {e}"));
         }
     }
-    if let Err(e) = check(unsafe { libc::unshare(libc::CLONE_NEWPID) }, || "unshare the PID namespace".to_string()) {
+    if let Err(e) = check(unsafe { libc::unshare(libc::CLONE_NEWPID) }, || {
+        "unshare the PID namespace".to_string()
+    }) {
         fail(&e);
     }
     let mut pipe_fds = [0 as libc::c_int; 2];
@@ -645,7 +812,10 @@ mod tests {
     fn spec() -> LauncherSpec {
         build_spec(
             "/usr/local/bin/cloud-hypervisor",
-            vec!["--api-socket".into(), "/run/cloudhv/d/pool-1-4/api.sock".into()],
+            vec![
+                "--api-socket".into(),
+                "/run/cloudhv/d/pool-1-4/api.sock".into(),
+            ],
             (200_001, 200_001),
             993,
             Path::new("/run/cloudhv/d/.ctl/pool-1-4/root"),
@@ -659,6 +829,7 @@ mod tests {
             Some(Path::new("/sys/fs/cgroup/cloudhv/pool-1-4")),
             1024,
             "pool-1-4",
+            Some(Path::new("/var/lib/cloudhv/emptydir/pool-1-4")),
         )
     }
 
@@ -678,9 +849,12 @@ mod tests {
             "/dev/null",
             "/dev/urandom",
             "/opt/cloudhv/extra",
+            "/var/lib/cloudhv/emptydir/pool-1-4",
         ] {
             assert!(paths.contains(&needed), "{needed} is bound");
         }
+        // Only the VM's own directory of disks, not the directory of the others'.
+        assert!(!paths.contains(&"/var/lib/cloudhv/emptydir"));
         // Nothing else of the host: not the state root (other VMs' directories), the registry, the daemon's socket, the snapshots.
         assert!(!paths.contains(&"/run/cloudhv/d"));
         assert!(!paths.iter().any(|p| p.contains(".ctl")));
@@ -693,20 +867,57 @@ mod tests {
     fn only_a_vms_own_directories_are_writable_and_only_device_nodes_carry_devices() {
         let s = spec();
         for b in &s.binds {
-            let own = b.path == "/run/cloudhv/d/pool-1-4" || b.path == "/run/cloudhv/d/.out/pool-1-4";
+            let own = b.path == "/run/cloudhv/d/pool-1-4"
+                || b.path == "/run/cloudhv/d/.out/pool-1-4"
+                || b.path == "/var/lib/cloudhv/emptydir/pool-1-4";
             let dev = b.path.starts_with("/dev/");
             assert_eq!(b.rw, own || dev, "{} writable", b.path);
             assert_eq!(b.dev, dev, "{} carries devices", b.path);
-            assert_eq!(b.exec, b.path == "/usr/local/bin/cloud-hypervisor", "{} runs programs", b.path);
+            assert_eq!(
+                b.exec,
+                b.path == "/usr/local/bin/cloud-hypervisor",
+                "{} runs programs",
+                b.path
+            );
         }
+    }
+
+    #[test]
+    fn a_vm_without_emptydir_disks_has_no_directory_for_them() {
+        let s = build_spec(
+            "/usr/local/bin/cloud-hypervisor",
+            vec![],
+            (200_001, 200_001),
+            993,
+            Path::new("/r/root"),
+            Path::new("/run/cloudhv/d/pool-1-4"),
+            Path::new("/run/cloudhv/d/.out/pool-1-4"),
+            "/k",
+            "/rootfs",
+            "/cache",
+            &[],
+            &SYSTEM_LIB_DIRS,
+            None,
+            1024,
+            "pool-1-4",
+            None,
+        );
+        assert!(!s.binds.iter().any(|b| b.path.contains("emptydir")));
     }
 
     #[test]
     fn the_plan_builds_the_root_first_then_binds_parents_before_children_then_proc_and_tmp() {
         let mut s = spec();
-        s.binds.push(Bind { path: "/opt/cloudhv".into(), rw: false, dev: false, exec: false });
+        s.binds.push(Bind {
+            path: "/opt/cloudhv".into(),
+            rw: false,
+            dev: false,
+            exec: false,
+        });
         let steps = plan(&s);
-        assert!(matches!(&steps[0], Step::Root { target, .. } if target == "/run/cloudhv/d/.ctl/pool-1-4/root"));
+        assert!(
+            matches!(&steps[0], Step::Root { target, .. } if target == "/run/cloudhv/d/.ctl/pool-1-4/root")
+        );
         let dsts: Vec<String> = steps
             .iter()
             .filter_map(|st| match st {
@@ -715,9 +926,18 @@ mod tests {
             })
             .collect();
         let root = "/run/cloudhv/d/.ctl/pool-1-4/root";
-        assert!(dsts.iter().all(|d| d.starts_with(root)), "everything is bound inside the new root");
-        let a = dsts.iter().position(|d| d == &format!("{root}/opt/cloudhv")).unwrap();
-        let b = dsts.iter().position(|d| d == &format!("{root}/opt/cloudhv/vmlinux")).unwrap();
+        assert!(
+            dsts.iter().all(|d| d.starts_with(root)),
+            "everything is bound inside the new root"
+        );
+        let a = dsts
+            .iter()
+            .position(|d| d == &format!("{root}/opt/cloudhv"))
+            .unwrap();
+        let b = dsts
+            .iter()
+            .position(|d| d == &format!("{root}/opt/cloudhv/vmlinux"))
+            .unwrap();
         assert!(a < b, "the directory before what is in it");
         assert!(matches!(steps[steps.len() - 2], Step::Proc { .. }));
         assert!(matches!(steps[steps.len() - 1], Step::Tmp { .. }));
@@ -726,9 +946,16 @@ mod tests {
     #[test]
     fn the_restricting_flags() {
         let ro = bind_flags(false, false, false);
-        assert!(ro & libc::MS_RDONLY != 0 && ro & libc::MS_NODEV != 0 && ro & libc::MS_NOEXEC != 0 && ro & libc::MS_NOSUID != 0);
+        assert!(
+            ro & libc::MS_RDONLY != 0
+                && ro & libc::MS_NODEV != 0
+                && ro & libc::MS_NOEXEC != 0
+                && ro & libc::MS_NOSUID != 0
+        );
         let kvm = bind_flags(true, true, false);
-        assert!(kvm & libc::MS_RDONLY == 0 && kvm & libc::MS_NODEV == 0 && kvm & libc::MS_NOEXEC != 0);
+        assert!(
+            kvm & libc::MS_RDONLY == 0 && kvm & libc::MS_NODEV == 0 && kvm & libc::MS_NOEXEC != 0
+        );
         let exe = bind_flags(false, false, true);
         assert!(exe & libc::MS_NOEXEC == 0 && exe & libc::MS_RDONLY != 0);
         assert!(exe & libc::MS_REMOUNT != 0 && exe & libc::MS_BIND != 0);
@@ -744,36 +971,75 @@ mod tests {
         s.groups = vec![0];
         assert!(validate_spec(&s).is_err(), "root group");
         let mut s = ok.clone();
-        s.binds.push(Bind { path: "/run/../etc".into(), rw: true, dev: false, exec: false });
+        s.binds.push(Bind {
+            path: "/run/../etc".into(),
+            rw: true,
+            dev: false,
+            exec: false,
+        });
         assert!(validate_spec(&s).is_err(), "..");
         let mut s = ok.clone();
-        s.binds.push(Bind { path: "relative".into(), rw: false, dev: false, exec: false });
+        s.binds.push(Bind {
+            path: "relative".into(),
+            rw: false,
+            dev: false,
+            exec: false,
+        });
         assert!(validate_spec(&s).is_err(), "relative");
         let mut s = ok.clone();
-        s.binds.push(Bind { path: "/proc/sys".into(), rw: true, dev: false, exec: false });
+        s.binds.push(Bind {
+            path: "/proc/sys".into(),
+            rw: true,
+            dev: false,
+            exec: false,
+        });
         assert!(validate_spec(&s).is_err(), "over /proc");
         let mut s = ok.clone();
-        s.binds.push(Bind { path: "/tmp".into(), rw: true, dev: false, exec: false });
+        s.binds.push(Bind {
+            path: "/tmp".into(),
+            rw: true,
+            dev: false,
+            exec: false,
+        });
         assert!(validate_spec(&s).is_err(), "the whole /tmp");
         let mut s = ok.clone();
-        s.binds.push(Bind { path: "/tmp/x".into(), rw: false, dev: false, exec: false });
+        s.binds.push(Bind {
+            path: "/tmp/x".into(),
+            rw: false,
+            dev: false,
+            exec: false,
+        });
         validate_spec(&s).unwrap();
-        assert!(!plan(&s).iter().any(|st| matches!(st, Step::Tmp { .. })), "no tmpfs over what is bound under /tmp");
+        assert!(
+            !plan(&s).iter().any(|st| matches!(st, Step::Tmp { .. })),
+            "no tmpfs over what is bound under /tmp"
+        );
         let mut s = ok.clone();
         s.binds.push(s.binds[0].clone());
         assert!(validate_spec(&s).is_err(), "twice");
         let mut s = ok.clone();
-        s.binds.push(Bind { path: "/".into(), rw: true, dev: false, exec: false });
+        s.binds.push(Bind {
+            path: "/".into(),
+            rw: true,
+            dev: false,
+            exec: false,
+        });
         assert!(validate_spec(&s).is_err(), "the whole root");
         let mut s = ok.clone();
         s.cgroup = Some("/etc/cgroup".into());
-        assert!(validate_spec(&s).is_err(), "a cgroup outside the cgroup file system");
+        assert!(
+            validate_spec(&s).is_err(),
+            "a cgroup outside the cgroup file system"
+        );
         let mut s = ok.clone();
         s.cgroup = Some("/sys/fs/cgroup/../../etc".into());
         assert!(validate_spec(&s).is_err(), "a cgroup with ..");
         let mut s = ok.clone();
         s.binary = "cloud-hypervisor".into();
-        assert!(validate_spec(&s).is_err(), "a program that is not an absolute path");
+        assert!(
+            validate_spec(&s).is_err(),
+            "a program that is not an absolute path"
+        );
         let mut s = ok.clone();
         s.hostname = "a b".into();
         assert!(validate_spec(&s).is_err(), "host name");

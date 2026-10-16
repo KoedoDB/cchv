@@ -116,7 +116,9 @@ impl ApiServer {
         std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
         info!("daemon API listening on {}", socket_path);
 
-        let limit = Arc::new(tokio::sync::Semaphore::new(self.config.max_connections.max(1)));
+        let limit = Arc::new(tokio::sync::Semaphore::new(
+            self.config.max_connections.max(1),
+        ));
         loop {
             let (stream, _) = listener.accept().await?;
             // Only root: the shim runs as root. Whoever else could reach the socket (the mode is 0600, so this is a second wall) is not served.
@@ -132,7 +134,10 @@ impl ApiServer {
                 }
             }
             let Ok(permit) = Arc::clone(&limit).try_acquire_owned() else {
-                warn!("closing a connection: {} are open", self.config.max_connections);
+                warn!(
+                    "closing a connection: {} are open",
+                    self.config.max_connections
+                );
                 continue;
             };
             let pool = Arc::clone(&self.pool);
@@ -212,7 +217,9 @@ async fn handle_connection(
             "KillContainer" => handle_kill_container(agents, &request).await,
             "WaitContainer" => handle_wait_container(agents, &request).await,
             "ReadLogs" => handle_read_logs(agents, &request).await,
-            m if crate::exec::is_exec_method(m) => crate::exec::handle(m, pool, agents, &request).await,
+            m if crate::exec::is_exec_method(m) => {
+                crate::exec::handle(m, pool, agents, &request).await
+            }
             "DeleteContainer" => handle_delete_container(agents, &request).await,
             "Status" => handle_status(pool, snapshots).await,
             _ => serde_json::json!({"error": format!("unknown method: {}", method)}),
@@ -238,7 +245,10 @@ fn error(what: &str, e: impl std::fmt::Display) -> serde_json::Value {
 }
 
 /// An identifier field of a request that must be there and must be plain.
-pub(crate) fn required_id<'a>(request: &'a serde_json::Value, key: &str) -> Result<&'a str, serde_json::Value> {
+pub(crate) fn required_id<'a>(
+    request: &'a serde_json::Value,
+    key: &str,
+) -> Result<&'a str, serde_json::Value> {
     let v = field(request, key);
     validate::check_id(key, v).map_err(|e| error("bad request", e))?;
     Ok(v)
@@ -275,7 +285,10 @@ async fn handle_acquire(
             return error("bad request (erofs_path)", format!("{e:#}"));
         }
     }
-    let want_memory = request.get("memory_mb").and_then(|v| v.as_u64()).unwrap_or(0);
+    let want_memory = request
+        .get("memory_mb")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     let want_vcpus = request.get("vcpus").and_then(|v| v.as_u64()).unwrap_or(0);
     if let Err(e) = validate::check_size(config, want_memory, want_vcpus) {
         return error("bad request (size)", e);
@@ -285,6 +298,10 @@ async fn handle_acquire(
         return serde_json::json!({"error": format!("{} VMs are active, the most max_active_vms allows", pool.active_count())});
     }
     let volumes = volumes_from_request(request);
+    let disks = match crate::emptydir::parse(request) {
+        Ok(d) => d,
+        Err(e) => return error("bad request (volumes)", e),
+    };
     let terminal = terminal_from_request(request);
 
     // The key of the warm snapshot is made here, from the content of the image. The one the caller sends is not used: with it, a pod
@@ -317,6 +334,7 @@ async fn handle_acquire(
                 container_id,
                 config_json_b64,
                 volumes: &volumes,
+                disks: &disks,
                 terminal,
             },
             want_memory,
@@ -354,6 +372,7 @@ async fn handle_acquire(
                     container_id,
                     config_json_b64,
                     &volumes,
+                    &disks,
                     terminal,
                 )
                 .await
@@ -401,6 +420,7 @@ async fn handle_acquire(
                             container_id,
                             config_json_b64,
                             volumes: &volumes,
+                            disks: &disks,
                             terminal,
                         },
                         agents,
@@ -452,6 +472,7 @@ async fn finish_warm_restore(
     container_id: &str,
     config_json_b64: &str,
     volumes: &[cloudhv_proto::VolumeMount],
+    disks: &[crate::emptydir::DiskRequest],
     terminal: bool,
 ) -> Result<serde_json::Value> {
     // Connect to the guest agent of the restored VM. It is needed for the network configuration
@@ -466,7 +487,8 @@ async fn finish_warm_restore(
         let (tap, net_info) = setup_vm_networking(netns, vm_id, api_socket)
             .await
             .context("networking")?;
-        if let Err(e) = configure_guest_network(&agent, &net_info.ip_cidr, &net_info.gateway).await {
+        if let Err(e) = configure_guest_network(&agent, &net_info.ip_cidr, &net_info.gateway).await
+        {
             warn!("configure_network on warm restore: {e:#}");
         }
         tap
@@ -480,9 +502,13 @@ async fn finish_warm_restore(
     // run, with its own OCI config and under the ID the pod's runtime uses; without this the pod's
     // runtime asks the agent about an ID it does not know ("unknown container", exit 137), or, if the
     // shadow's container is simply handed over, gets the exit status of a container that ended long ago.
-    let container_pid = run_container_in_warm_vm(&agent, container_id, config_json_b64, volumes, terminal)
+    crate::emptydir::attach(api_socket, disks)
         .await
-        .context("run container")?;
+        .context("emptyDir disks")?;
+    let container_pid =
+        run_container_in_warm_vm(&agent, container_id, config_json_b64, volumes, terminal)
+            .await
+            .context("run container")?;
 
     // Register as active so release() works correctly
     pool.register_active(crate::pool::PoolVm {
@@ -629,6 +655,8 @@ struct RunContainerParams<'a> {
     config_json_b64: &'a str,
     /// What the pod's runtime bind-mounts into the container; the agent writes it into the VM.
     volumes: &'a [cloudhv_proto::VolumeMount],
+    /// The disks (emptyDirs) the volumes name: made and hot-plugged before the container runs.
+    disks: &'a [crate::emptydir::DiskRequest],
     /// Whether the container's process has a terminal (`tty: true`).
     terminal: bool,
 }
@@ -676,6 +704,9 @@ async fn run_container_in_vm(
     )
     .await
     .context("hot-plug rootfs")?;
+    crate::emptydir::attach(params.api_socket, params.disks)
+        .await
+        .context("emptyDir disks")?;
 
     // Connect to agent (or reuse existing connection)
     let agent = {
@@ -753,6 +784,10 @@ async fn handle_add_container(
     }
     let config_json_b64 = field(request, "config_json");
     let volumes = volumes_from_request(request);
+    let disks = match crate::emptydir::parse(request) {
+        Ok(d) => d,
+        Err(e) => return error("bad request (volumes)", e),
+    };
     let terminal = terminal_from_request(request);
 
     let vm = match pool.get_active(vm_id).await {
@@ -772,6 +807,7 @@ async fn handle_add_container(
             container_id,
             config_json_b64,
             volumes: &volumes,
+            disks: &disks,
             terminal,
         },
         agents,
@@ -1138,7 +1174,10 @@ const MAX_FILES_PER_VOLUME: usize = 1024;
 /// Whether the container's process has a terminal (`tty: true`): the optional boolean `terminal` of AcquireSandbox and AddContainer.
 /// Anything but `true` is no terminal.
 fn terminal_from_request(request: &serde_json::Value) -> bool {
-    request.get("terminal").and_then(|v| v.as_bool()).unwrap_or(false)
+    request
+        .get("terminal")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
 }
 
 /// The `volumes` of a request (see the shim's `volumes.rs`): [{destination, source, readonly, files: [{path, content (base64), mode}]}].
@@ -1155,7 +1194,19 @@ pub(crate) fn volumes_from_request(request: &serde_json::Value) -> Vec<cloudhv_p
             m.destination = v["destination"].as_str().unwrap_or("").to_string();
             m.source = v["source"].as_str().unwrap_or("").to_string();
             m.readonly = v["readonly"].as_bool().unwrap_or(false);
-            for f in v["files"].as_array().into_iter().flatten().take(MAX_FILES_PER_VOLUME) {
+            // A disk-backed emptyDir: the guest agent mounts the disk the daemon hot-plugs (`emptydir::attach`), found by its serial.
+            if let Some(id) = v["disk"]["id"].as_str() {
+                m.volume_type = cloudhv_proto::VolumeType::BLOCK.into();
+                m.fs_type = "ext4".to_string();
+                m.serial = crate::emptydir::serial_of(id);
+                return m;
+            }
+            for f in v["files"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .take(MAX_FILES_PER_VOLUME)
+            {
                 let mut file = cloudhv_proto::InlineFile::new();
                 file.path = f["path"].as_str().unwrap_or("").to_string();
                 file.content = base64::engine::general_purpose::STANDARD
@@ -1201,7 +1252,10 @@ mod tap_name_tests {
         let id = "test-reserve-1";
         let name = tap_name_for(id);
         assert!(reserve_tap_name(&name));
-        assert!(!reserve_tap_name(&name), "a second VM with the same name is refused");
+        assert!(
+            !reserve_tap_name(&name),
+            "a second VM with the same name is refused"
+        );
         release_tap_name_of(id);
         assert!(reserve_tap_name(&name));
         release_tap_name_of(id);
@@ -1228,17 +1282,33 @@ mod request_tests {
         assert_eq!(buf, b"{\"a\":1}\n");
         assert!(read_request_line(&mut ok, 64, &mut buf).await.unwrap());
         assert_eq!(buf, b"next\n");
-        assert!(!read_request_line(&mut ok, 64, &mut buf).await.unwrap(), "end of stream");
+        assert!(
+            !read_request_line(&mut ok, 64, &mut buf).await.unwrap(),
+            "end of stream"
+        );
 
         let long = vec![b'x'; 1000];
         let mut r = tokio::io::BufReader::new(&long[..]);
-        assert!(read_request_line(&mut r, 100, &mut buf).await.is_err(), "no newline within the limit");
-        assert!(buf.len() <= 101, "not read on past the limit: {}", buf.len());
+        assert!(
+            read_request_line(&mut r, 100, &mut buf).await.is_err(),
+            "no newline within the limit"
+        );
+        assert!(
+            buf.len() <= 101,
+            "not read on past the limit: {}",
+            buf.len()
+        );
 
         let mut exact = tokio::io::BufReader::new(&b"12345\n"[..]);
-        assert!(read_request_line(&mut exact, 6, &mut buf).await.is_ok(), "a line of exactly the limit");
+        assert!(
+            read_request_line(&mut exact, 6, &mut buf).await.is_ok(),
+            "a line of exactly the limit"
+        );
         let mut over = tokio::io::BufReader::new(&b"123456\n"[..]);
-        assert!(read_request_line(&mut over, 6, &mut buf).await.is_err(), "one byte over");
+        assert!(
+            read_request_line(&mut over, 6, &mut buf).await.is_err(),
+            "one byte over"
+        );
     }
 
     #[test]
@@ -1253,7 +1323,13 @@ mod request_tests {
     fn the_terminal_flag_of_a_request_is_a_boolean_that_defaults_to_false() {
         use serde_json::json;
         assert!(terminal_from_request(&json!({"terminal": true})));
-        for no in [json!({}), json!({"terminal": false}), json!({"terminal": "true"}), json!({"terminal": 1}), json!({"terminal": null})] {
+        for no in [
+            json!({}),
+            json!({"terminal": false}),
+            json!({"terminal": "true"}),
+            json!({"terminal": 1}),
+            json!({"terminal": null}),
+        ] {
             assert!(!terminal_from_request(&no), "{no}");
         }
     }
@@ -1262,13 +1338,37 @@ mod request_tests {
     fn volumes_of_a_request_are_bounded_and_modes_masked() {
         let mut vols = Vec::new();
         for _ in 0..100 {
-            vols.push(serde_json::json!({"destination": "/d", "source": "/s", "readonly": false,
-                "files": [{"path": "f", "content": "eA==", "mode": 0o4755}]}));
+            vols.push(
+                serde_json::json!({"destination": "/d", "source": "/s", "readonly": false,
+                "files": [{"path": "f", "content": "eA==", "mode": 0o4755}]}),
+            );
         }
         let r = serde_json::json!({ "volumes": vols });
         let v = volumes_from_request(&r);
         assert_eq!(v.len(), MAX_VOLUMES);
         assert_eq!(v[0].files[0].mode, 0o755, "the setuid bit is not passed");
+    }
+
+    #[test]
+    fn a_disk_volume_becomes_a_block_volume_with_a_serial_and_no_files() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let r = serde_json::json!({ "volumes": [
+            {"destination": "/data", "source": format!("/run/cloudhv-vols/{id}"), "readonly": false, "files": [],
+             "disk": {"id": id, "size_mb": 1024}},
+            {"destination": "/etc/hosts", "source": "/run/cloudhv-vols/ab", "readonly": true, "files": []},
+        ]});
+        let v = volumes_from_request(&r);
+        assert_eq!(v[0].volume_type, cloudhv_proto::VolumeType::BLOCK.into());
+        assert_eq!(v[0].fs_type, "ext4");
+        assert_eq!(v[0].serial, "ed0123456789abcdef");
+        assert!(v[0].files.is_empty());
+        assert_eq!(v[0].source, format!("/run/cloudhv-vols/{id}"));
+        assert_eq!(
+            v[1].volume_type,
+            cloudhv_proto::VolumeType::FILESYSTEM.into(),
+            "other volumes stay file volumes"
+        );
+        assert!(v[1].serial.is_empty());
     }
 }
 

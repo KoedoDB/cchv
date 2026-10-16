@@ -61,6 +61,14 @@ pub struct ShimLimits {
     #[serde(default = "crate::volumes::default_pv_roots")]
     pub volume_source_roots: Vec<String>,
 
+    /// The size (MiB) of the disk an emptyDir gets when it is not `medium: Memory` (the kubelet does not tell the runtime the volume's
+    /// `sizeLimit`), and the most one may be (the daemon's `emptydir_max_mib` refuses more). 0 turns disk-backed emptyDirs off: they are
+    /// then in the guest's memory, as `medium: Memory` ones are.
+    #[serde(default = "default_emptydir_default_mib")]
+    pub emptydir_default_mib: u64,
+    #[serde(default = "default_emptydir_max_mib")]
+    pub emptydir_max_mib: u64,
+
     /// Seconds a request to the daemon may take (not WaitContainer, which has no limit).
     #[serde(default = "default_rpc_timeout_secs")]
     pub rpc_timeout_secs: u64,
@@ -75,6 +83,12 @@ pub struct ShimLimits {
     pub require_pod_cgroup: bool,
 }
 
+fn default_emptydir_default_mib() -> u64 {
+    1024
+}
+fn default_emptydir_max_mib() -> u64 {
+    16 * 1024
+}
 fn default_max_memory_mb() -> u64 {
     16 * 1024
 }
@@ -118,7 +132,8 @@ pub fn load_shim_limits(path: Option<&str>) -> Result<ShimLimits> {
     let config_path = path.unwrap_or(DEFAULT_CONFIG_PATH);
     let data = std::fs::read_to_string(config_path)
         .with_context(|| format!("failed to read config from {config_path}"))?;
-    serde_json::from_str(&data).with_context(|| format!("failed to parse the shim's limits in {config_path}"))
+    serde_json::from_str(&data)
+        .with_context(|| format!("failed to parse the shim's limits in {config_path}"))
 }
 
 #[cfg(test)]
@@ -151,7 +166,9 @@ mod tests {
         assert_eq!(none.erofs_cache_max_mib, 4096);
         assert_eq!(none.mkfs_erofs_timeout_secs, 300);
         assert!(none.require_pod_cgroup);
-        assert!(none.volume_source_roots.contains(&"/var/openebs/local".to_string()));
+        assert!(none
+            .volume_source_roots
+            .contains(&"/var/openebs/local".to_string()));
         assert_eq!(none.mkfs_candidates().len(), 2);
 
         let mut f = NamedTempFile::new().unwrap();
@@ -163,7 +180,10 @@ mod tests {
         let l = load_shim_limits(Some(f.path().to_str().unwrap())).unwrap();
         assert_eq!(l.max_memory_mb, 2048);
         assert_eq!(l.volume_source_roots, vec!["/data/pv".to_string()]);
-        assert_eq!(l.mkfs_candidates(), vec![std::path::PathBuf::from("/opt/mkfs.erofs")]);
+        assert_eq!(
+            l.mkfs_candidates(),
+            vec![std::path::PathBuf::from("/opt/mkfs.erofs")]
+        );
         assert!(!l.require_pod_cgroup);
     }
 

@@ -20,14 +20,18 @@ use sha2::{Digest, Sha256};
 
 /// `sha256:` and 64 lowercase hex digits.
 pub fn valid_digest(s: &str) -> bool {
-    s.strip_prefix("sha256:")
-        .is_some_and(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    s.strip_prefix("sha256:").is_some_and(|h| {
+        h.len() == 64
+            && h.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
 }
 
 /// The key of the rootfs at `rootfs`, as a 32 digit hex string.
 pub fn rootfs_key(rootfs: &Path, digest: Option<&str>) -> Result<String, String> {
     let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
-    let canonical = std::fs::canonicalize(rootfs).map_err(|e| format!("rootfs {}: {e}", rootfs.display()))?;
+    let canonical =
+        std::fs::canonicalize(rootfs).map_err(|e| format!("rootfs {}: {e}", rootfs.display()))?;
     let material = match material_from_mountinfo(&mountinfo, &canonical.to_string_lossy()) {
         Some(m) => m,
         None => material_from_directory(&canonical)?,
@@ -42,7 +46,10 @@ fn key_of(material: &str, digest: Option<&str>) -> String {
         h.update(b"\0digest\0");
         h.update(d.as_bytes());
     }
-    h.finalize()[..16].iter().map(|b| format!("{b:02x}")).collect()
+    h.finalize()[..16]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// A path in `mountinfo` writes space, tab, newline and backslash as `\040`, `\011`, `\012`, `\134`.
@@ -51,7 +58,10 @@ fn unescape(s: &str) -> String {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'\\' && i + 3 < b.len() + 0 && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c)) {
+        if b[i] == b'\\'
+            && i + 3 < b.len() + 0
+            && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c))
+        {
             let v = (b[i + 1] - b'0') * 64 + (b[i + 2] - b'0') * 8 + (b[i + 3] - b'0');
             out.push(v);
             i += 4;
@@ -67,7 +77,9 @@ fn unescape(s: &str) -> String {
 fn material_from_mountinfo(text: &str, rootfs: &str) -> Option<String> {
     let mut found = None;
     for line in text.lines() {
-        let Some((left, right)) = line.split_once(" - ") else { continue };
+        let Some((left, right)) = line.split_once(" - ") else {
+            continue;
+        };
         let l: Vec<&str> = left.split(' ').collect();
         let r: Vec<&str> = right.split(' ').collect();
         if l.len() < 6 || r.len() < 3 || unescape(l[4]) != rootfs {
@@ -80,7 +92,10 @@ fn material_from_mountinfo(text: &str, rootfs: &str) -> Option<String> {
             for opt in super_opts.split(',') {
                 if let Some(v) = opt.strip_prefix("lowerdir=") {
                     lowers.extend(v.split(':').map(unescape));
-                } else if let Some(v) = opt.strip_prefix("lowerdir+=").or_else(|| opt.strip_prefix("datadir+=")) {
+                } else if let Some(v) = opt
+                    .strip_prefix("lowerdir+=")
+                    .or_else(|| opt.strip_prefix("datadir+="))
+                {
                     lowers.push(unescape(v));
                 }
             }
@@ -89,7 +104,12 @@ fn material_from_mountinfo(text: &str, rootfs: &str) -> Option<String> {
             }
             format!("overlay\0{}", lowers.join("\n"))
         } else {
-            format!("mount\0{fstype}\0{}\0{}\0{}", l[2], unescape(l[3]), unescape(r[1]))
+            format!(
+                "mount\0{fstype}\0{}\0{}\0{}",
+                l[2],
+                unescape(l[3]),
+                unescape(r[1])
+            )
         });
     }
     found
@@ -129,8 +149,16 @@ mod tests {
     #[test]
     fn pods_of_one_image_share_a_key_and_the_order_of_layers_matters() {
         let k = |c: &str| key_of(&material_from_mountinfo(OVERLAY, &rootfs(c)).unwrap(), None);
-        assert_eq!(k("c1"), k("c2"), "same layers, other upperdir: the same image");
-        assert_ne!(k("c1"), k("c3"), "the same layers in another order are another file system");
+        assert_eq!(
+            k("c1"),
+            k("c2"),
+            "same layers, other upperdir: the same image"
+        );
+        assert_ne!(
+            k("c1"),
+            k("c3"),
+            "the same layers in another order are another file system"
+        );
         assert_ne!(k("c1"), k("c4"), "another layer");
         assert_eq!(k("c1").len(), 32);
     }
@@ -147,7 +175,11 @@ mod tests {
         let m = material_from_mountinfo(OVERLAY, &rootfs("c1")).unwrap();
         let d = format!("sha256:{}", "ab".repeat(32));
         assert_ne!(key_of(&m, Some(&d)), key_of(&m, None));
-        assert_eq!(key_of(&m, Some("latest")), key_of(&m, None), "a tag is not a digest and is ignored");
+        assert_eq!(
+            key_of(&m, Some("latest")),
+            key_of(&m, None),
+            "a tag is not a digest and is ignored"
+        );
         assert_eq!(key_of(&m, Some("sha256:XYZ")), key_of(&m, None));
         assert!(valid_digest(&d));
         assert!(!valid_digest(&d.to_uppercase()));
@@ -167,7 +199,9 @@ mod tests {
         let two = "1 0 0:1 / /r rw - overlay o rw,lowerdir=/a\n2 1 0:2 / /r rw - overlay o rw,lowerdir=/b\n";
         let m = material_from_mountinfo(two, "/r").unwrap();
         assert!(m.contains("/b") && !m.contains("/a"));
-        assert!(material_from_mountinfo("1 0 0:1 / /r rw - overlay o rw,upperdir=/u", "/r").is_none());
+        assert!(
+            material_from_mountinfo("1 0 0:1 / /r rw - overlay o rw,upperdir=/u", "/r").is_none()
+        );
     }
 
     #[test]

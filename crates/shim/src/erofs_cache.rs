@@ -47,7 +47,11 @@ const MIN_FREE_BYTES: u64 = 64 * 1024 * 1024;
 const ESTIMATE_DEADLINE: Duration = Duration::from_secs(60);
 
 fn valid_key(key: &str) -> bool {
-    !key.is_empty() && key.len() <= 64 && key.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    !key.is_empty()
+        && key.len() <= 64
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
 /// The image of `rootfs` under `key`, built if it is not in the cache, and a lease on it.
@@ -88,7 +92,8 @@ pub fn prepare(cfg: &CacheConfig, rootfs: &Path, key: &str) -> Result<(PathBuf, 
     let guard = Temporary(tmp.clone());
     run_mkfs(mkfs, &tmp, rootfs, cfg.mkfs_timeout)?;
     // 0600 already (umask 077 in the build); say it again, then publish a finished file.
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).map_err(|e| format!("chmod erofs: {e}"))?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("chmod erofs: {e}"))?;
     std::fs::rename(&tmp, &cache_path).map_err(|e| format!("rename erofs: {e}"))?;
     guard.disarm();
     Ok((cache_path, lease))
@@ -110,7 +115,8 @@ impl Drop for Temporary {
 fn ensure_dir(dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("create erofs cache dir: {e}"))?;
     // Search but not list for others: a rootless Cloud Hypervisor reaches the one file it has an ACL for.
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o711)).map_err(|e| format!("chmod erofs cache dir: {e}"))
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o711))
+        .map_err(|e| format!("chmod erofs cache dir: {e}"))
 }
 
 /// Open (create, 0600) a lock file and take the lock; waits.
@@ -124,7 +130,11 @@ fn lock_file(path: &Path, op: i32) -> Result<File, String> {
         .open(path)
         .map_err(|e| format!("open {}: {e}", path.display()))?;
     if unsafe { libc::flock(f.as_raw_fd(), op) } != 0 {
-        return Err(format!("flock {}: {}", path.display(), std::io::Error::last_os_error()));
+        return Err(format!(
+            "flock {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
     }
     Ok(f)
 }
@@ -152,11 +162,17 @@ fn touch(path: &Path) {
 
 /// Temporaries of builds that died with their shim: the pid in the name is gone and the file is not new.
 fn remove_stale_temporaries(dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
-        let Some(stem) = name.strip_suffix(".tmp") else { continue };
-        let Some(pid) = stem.rsplit('.').next().and_then(|p| p.parse::<u32>().ok()) else { continue };
+        let Some(stem) = name.strip_suffix(".tmp") else {
+            continue;
+        };
+        let Some(pid) = stem.rsplit('.').next().and_then(|p| p.parse::<u32>().ok()) else {
+            continue;
+        };
         let old = e
             .metadata()
             .and_then(|m| m.modified())
@@ -179,11 +195,19 @@ fn estimate_size(rootfs: &Path, cap: u64) -> Result<u64, String> {
     let mut total: u64 = 0;
     let mut stack = vec![rootfs.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let entries = std::fs::read_dir(&dir).map_err(|e| format!("read {}: {e}", dir.display()))?;
+        let entries =
+            std::fs::read_dir(&dir).map_err(|e| format!("read {}: {e}", dir.display()))?;
         for e in entries {
             let e = e.map_err(|e| format!("read {}: {e}", dir.display()))?;
-            let m = e.metadata().map_err(|e| format!("stat {}: {e}", e_path(&dir)))?;
-            total += 64 + if m.is_file() { m.len().div_ceil(4096) * 4096 } else { 0 };
+            let m = e
+                .metadata()
+                .map_err(|e| format!("stat {}: {e}", e_path(&dir)))?;
+            total += 64
+                + if m.is_file() {
+                    m.len().div_ceil(4096) * 4096
+                } else {
+                    0
+                };
             if m.is_dir() {
                 stack.push(e.path());
             }
@@ -206,7 +230,8 @@ fn e_path(p: &Path) -> String {
 }
 
 fn check_free_space(dir: &Path, need: u64) -> Result<(), String> {
-    let c = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).map_err(|_| "NUL in the path".to_string())?;
+    let c = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes())
+        .map_err(|_| "NUL in the path".to_string())?;
     let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 {
         return Err(format!("statvfs: {}", std::io::Error::last_os_error()));
@@ -245,7 +270,9 @@ pub fn fits(used: u64, need: u64, max: u64) -> bool {
 }
 
 fn list(dir: &Path) -> Vec<Entry> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
     entries
         .flatten()
         .filter_map(|e| {
@@ -276,7 +303,11 @@ fn make_room(cfg: &CacheConfig, need: u64) -> Result<(), String> {
             continue;
         };
         if std::fs::remove_file(cfg.dir.join(format!("{}.erofs", e.key))).is_ok() {
-            info!("erofs cache: evicted {} ({} MiB)", e.key, e.size / (1024 * 1024));
+            info!(
+                "erofs cache: evicted {} ({} MiB)",
+                e.key,
+                e.size / (1024 * 1024)
+            );
             used = used.saturating_sub(e.size);
         }
         if fits(used, need, cfg.max_bytes) {
@@ -331,7 +362,10 @@ fn run_mkfs(mkfs: &Path, out: &Path, rootfs: &Path, timeout: Duration) -> Result
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = reader.join();
-                return Err(format!("mkfs.erofs did not finish in {} s and was killed", timeout.as_secs()));
+                return Err(format!(
+                    "mkfs.erofs did not finish in {} s and was killed",
+                    timeout.as_secs()
+                ));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
             Err(e) if e.raw_os_error() == Some(libc::ECHILD) => break None,
@@ -353,7 +387,9 @@ fn run_mkfs(mkfs: &Path, out: &Path, rootfs: &Path, timeout: Duration) -> Result
 /// The erofs superblock sits at offset 1024 and starts with the magic 0xE0F5E1E2 (little endian).
 fn has_erofs_superblock(path: &Path) -> bool {
     use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut f) = std::fs::File::open(path) else { return false };
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
     let mut magic = [0u8; 4];
     f.seek(SeekFrom::Start(1024)).is_ok()
         && f.read_exact(&mut magic).is_ok()
@@ -380,7 +416,8 @@ mod tests {
     struct Tmp(PathBuf);
     impl Tmp {
         fn new(tag: &str) -> Tmp {
-            let p = std::env::temp_dir().join(format!("cloudhv-erofs-{tag}-{}", std::process::id()));
+            let p =
+                std::env::temp_dir().join(format!("cloudhv-erofs-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&p);
             std::fs::create_dir_all(&p).unwrap();
             Tmp(p)
@@ -435,14 +472,21 @@ mod tests {
         assert_eq!(p, c.dir.join("abc123.erofs"));
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&p), 0o600, "the image is root's alone");
-        assert_eq!(mode(&c.dir), 0o711, "the directory can be searched but not listed");
+        assert_eq!(
+            mode(&c.dir),
+            0o711,
+            "the directory can be searched but not listed"
+        );
         assert_eq!(mode(&c.dir.join("abc123.use")), 0o600);
         assert_eq!(mode(&c.dir.join("abc123.lock")), 0o600);
         // The second time it is the same file, with no build (a failing mkfs would show).
         let c2 = cfg(&t, script(&t.0, "bad", "exit 1"), 10 << 20);
         assert_eq!(prepare(&c2, &r, "abc123").unwrap().0, p);
         // No temporary is left.
-        assert!(std::fs::read_dir(&c.dir).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().ends_with(".tmp")));
+        assert!(std::fs::read_dir(&c.dir)
+            .unwrap()
+            .flatten()
+            .all(|e| !e.file_name().to_string_lossy().ends_with(".tmp")));
     }
 
     #[test]
@@ -450,18 +494,30 @@ mod tests {
         let t = Tmp::new("fail");
         let r = rootfs(&t.0, 10);
         let leftover = |c: &CacheConfig| {
-            std::fs::read_dir(&c.dir)
-                .unwrap()
-                .flatten()
-                .any(|e| e.file_name().to_string_lossy().ends_with(".tmp") || e.file_name().to_string_lossy().ends_with(".erofs"))
+            std::fs::read_dir(&c.dir).unwrap().flatten().any(|e| {
+                e.file_name().to_string_lossy().ends_with(".tmp")
+                    || e.file_name().to_string_lossy().ends_with(".erofs")
+            })
         };
         // Writes part of the file, then fails.
-        let c = cfg(&t, script(&t.0, "half", r#"head -c 5000 /dev/zero > "$1"; echo boom >&2; exit 3"#), 10 << 20);
+        let c = cfg(
+            &t,
+            script(
+                &t.0,
+                "half",
+                r#"head -c 5000 /dev/zero > "$1"; echo boom >&2; exit 3"#,
+            ),
+            10 << 20,
+        );
         let e = prepare(&c, &r, "aa").unwrap_err();
         assert!(e.contains("boom"), "{e}");
         assert!(!leftover(&c));
         // Hangs.
-        let mut c = cfg(&t, script(&t.0, "hang", r#"head -c 5000 /dev/zero > "$1"; sleep 30"#), 10 << 20);
+        let mut c = cfg(
+            &t,
+            script(&t.0, "hang", r#"head -c 5000 /dev/zero > "$1"; sleep 30"#),
+            10 << 20,
+        );
         c.mkfs_timeout = Duration::from_millis(300);
         let started = Instant::now();
         let e = prepare(&c, &r, "bb").unwrap_err();
@@ -470,7 +526,10 @@ mod tests {
         assert!(!leftover(&c));
         // No mkfs at all.
         let mut c = cfg(&t, PathBuf::from("/nonexistent/x"), 10 << 20);
-        c.mkfs_candidates = vec![PathBuf::from("relative/mkfs"), PathBuf::from("/nonexistent/y")];
+        c.mkfs_candidates = vec![
+            PathBuf::from("relative/mkfs"),
+            PathBuf::from("/nonexistent/y"),
+        ];
         assert!(prepare(&c, &r, "cc").unwrap_err().contains("not found"));
     }
 
@@ -519,7 +578,10 @@ mod tests {
             modified: now - Duration::from_secs(ago),
         };
         let entries = vec![e("new", 1), e("old", 100), e("mid", 50)];
-        let order: Vec<&str> = eviction_order(&entries).iter().map(|&i| entries[i].key.as_str()).collect();
+        let order: Vec<&str> = eviction_order(&entries)
+            .iter()
+            .map(|&i| entries[i].key.as_str())
+            .collect();
         assert_eq!(order, vec!["old", "mid", "new"]);
         assert!(fits(10, 5, 15));
         assert!(!fits(10, 6, 15));
@@ -536,8 +598,14 @@ mod tests {
             std::fs::write(p, b"x").unwrap();
             let old = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap();
             let times = [
-                libc::timespec { tv_sec: 1_000_000, tv_nsec: 0 },
-                libc::timespec { tv_sec: 1_000_000, tv_nsec: 0 },
+                libc::timespec {
+                    tv_sec: 1_000_000,
+                    tv_nsec: 0,
+                },
+                libc::timespec {
+                    tv_sec: 1_000_000,
+                    tv_nsec: 0,
+                },
             ];
             unsafe { libc::utimensat(libc::AT_FDCWD, old.as_ptr(), times.as_ptr(), 0) };
         }

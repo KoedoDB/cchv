@@ -9,6 +9,7 @@ mod cgroup;
 mod config;
 mod confine;
 mod ctl;
+mod emptydir;
 mod exec;
 mod fsutil;
 mod imagekey;
@@ -78,6 +79,8 @@ async fn daemon_main() -> Result<()> {
         rootless::sweep_processes(&config).await;
         rootless::sweep_acls(&config);
         rootless::sweep_outboxes(std::path::Path::new(&config.state_dir));
+        // The disks of the emptyDirs of the VMs just stopped go with them; the directory is made if it is not there.
+        emptydir::init(&config);
         // The workload snapshots of an earlier daemon are unknown to this one (its cache is empty) and were made by VMs it can no longer
         // vouch for: they go. The base snapshot is reused only if the daemon marked it complete (see `Pool::base_snapshot_valid`).
         if let Ok(entries) = std::fs::read_dir(config.snapshot_cache_dir()) {
@@ -140,19 +143,30 @@ impl StopSignals {
 /// Descriptors the daemon may hold open: one per connection, and the sockets, files and pipes of its VMs. The usual limit of 1024 would
 /// stop it far below `max_connections`.
 fn wanted_open_files(max_connections: usize) -> u64 {
-    (max_connections as u64).saturating_mul(2).saturating_add(4096)
+    (max_connections as u64)
+        .saturating_mul(2)
+        .saturating_add(4096)
 }
 
 fn raise_open_files_limit(max_connections: usize) {
     let want = wanted_open_files(max_connections);
-    let mut cur = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    let mut cur = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
     if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut cur) } != 0 || cur.rlim_cur >= want {
         return;
     }
-    let new = libc::rlimit { rlim_cur: want, rlim_max: want.max(cur.rlim_max) };
+    let new = libc::rlimit {
+        rlim_cur: want,
+        rlim_max: want.max(cur.rlim_max),
+    };
     if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &new) } != 0 {
         // Not allowed to raise the hard limit: take what the hard limit allows.
-        let capped = libc::rlimit { rlim_cur: cur.rlim_max, rlim_max: cur.rlim_max };
+        let capped = libc::rlimit {
+            rlim_cur: cur.rlim_max,
+            rlim_max: cur.rlim_max,
+        };
         let _ = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &capped) };
         log::warn!("open files limit is {} (wanted {want}); at most about that many connections can be served", cur.rlim_max);
     }
@@ -163,6 +177,9 @@ mod nofile_tests {
     #[test]
     fn the_descriptor_limit_covers_the_connections() {
         assert_eq!(super::wanted_open_files(8192), 8192 * 2 + 4096);
-        assert!(super::wanted_open_files(usize::MAX) >= u64::MAX / 2, "no overflow");
+        assert!(
+            super::wanted_open_files(usize::MAX) >= u64::MAX / 2,
+            "no overflow"
+        );
     }
 }

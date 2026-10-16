@@ -146,7 +146,9 @@ pub struct ExecManager {
 pub fn valid_exec_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
-        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 fn key(container_id: &str, exec_id: &str) -> Result<Key> {
@@ -186,7 +188,9 @@ impl ExecManager {
     ) -> Result<()> {
         let k = key(container_id, exec_id)?;
         if exec_id == INIT_EXEC_ID {
-            anyhow::bail!("the exec id {INIT_EXEC_ID:?} is reserved for the container's own terminal");
+            anyhow::bail!(
+                "the exec id {INIT_EXEC_ID:?} is reserved for the container's own terminal"
+            );
         }
         if process_json.len() > MAX_PROCESS_JSON {
             anyhow::bail!("the process definition is larger than {MAX_PROCESS_JSON} bytes");
@@ -271,7 +275,10 @@ impl ExecManager {
         write_private(&process_file, e.process.to_string().as_bytes())?;
 
         let listener = if e.terminal {
-            Some(std::os::unix::net::UnixListener::bind(&sock_file).context("bind the console socket")?)
+            Some(
+                std::os::unix::net::UnixListener::bind(&sock_file)
+                    .context("bind the console socket")?,
+            )
         } else {
             None
         };
@@ -284,16 +291,25 @@ impl ExecManager {
             .arg(&pid_file);
         if e.terminal {
             cmd.arg("--console-socket").arg(&sock_file);
-            cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            cmd.stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
         } else {
-            cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+            cmd.stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
         }
         cmd.arg(container_id);
         // The agent's own descriptors must not reach the process (everything above stderr is closed on exec).
         unsafe {
             cmd.pre_exec(|| {
                 const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
-                libc::syscall(libc::SYS_close_range, 3 as libc::c_uint, !0 as libc::c_uint, CLOSE_RANGE_CLOEXEC);
+                libc::syscall(
+                    libc::SYS_close_range,
+                    3 as libc::c_uint,
+                    !0 as libc::c_uint,
+                    CLOSE_RANGE_CLOEXEC,
+                );
                 Ok(())
             });
         }
@@ -377,7 +393,9 @@ impl ExecManager {
                             info!("exec {exec_id}: signal {signal}: the process is gone");
                         }
                     }
-                    None => info!("exec {exec_id}: no pidfd (the process was gone when it started)"),
+                    None => {
+                        info!("exec {exec_id}: no pidfd (the process was gone when it started)")
+                    }
                 }
                 Ok(())
             }
@@ -462,13 +480,23 @@ impl ExecManager {
     ) -> Result<crate::container::LogRead> {
         let exec = self.get(container_id, exec_id).await?;
         let logs = exec.lock().await.logs.clone();
-        let max = if max == 0 { DEFAULT_READ } else { max.min(MAX_READ) };
+        let max = if max == 0 {
+            DEFAULT_READ
+        } else {
+            max.min(MAX_READ)
+        };
         let r = logs.lock().await.read(stdout_offset, stderr_offset, max);
         Ok(r)
     }
 
     /// Set the size of the terminal.
-    pub async fn resize(&self, container_id: &str, exec_id: &str, width: u32, height: u32) -> Result<()> {
+    pub async fn resize(
+        &self,
+        container_id: &str,
+        exec_id: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
         if !valid_terminal_size(width, height) {
             anyhow::bail!("invalid terminal size");
         }
@@ -478,7 +506,8 @@ impl ExecManager {
             .master
             .clone()
             .ok_or_else(|| anyhow::anyhow!("exec {exec_id} has no terminal"))?;
-        set_window_size(master.fd.get_ref().as_raw_fd(), width as u16, height as u16).context("TIOCSWINSZ")
+        set_window_size(master.fd.get_ref().as_raw_fd(), width as u16, height as u16)
+            .context("TIOCSWINSZ")
     }
 
     /// Kill the process if it still runs and forget the exec. Not an error if there is none.
@@ -495,7 +524,11 @@ impl ExecManager {
     pub async fn remove_container(&self, container_id: &str) {
         let taken: Vec<Arc<Mutex<Exec>>> = {
             let mut execs = self.execs.lock().await;
-            let keys: Vec<Key> = execs.keys().filter(|(c, _)| c == container_id).cloned().collect();
+            let keys: Vec<Key> = execs
+                .keys()
+                .filter(|(c, _)| c == container_id)
+                .cloned()
+                .collect();
             keys.iter().filter_map(|k| execs.remove(k)).collect()
         };
         for exec in taken {
@@ -611,7 +644,10 @@ fn write_private(path: &Path, data: &[u8]) -> Result<()> {
 }
 
 /// The pid crun writes (as soon as it has made the process). Waits until it is there, or crun has ended without it, or the time is up.
-async fn wait_for_pid(pid_file: &Path, mut exit: watch::Receiver<Option<ExitStatus>>) -> Result<u32> {
+async fn wait_for_pid(
+    pid_file: &Path,
+    mut exit: watch::Receiver<Option<ExitStatus>>,
+) -> Result<u32> {
     let deadline = tokio::time::Instant::now() + START_WAIT;
     let mut delay = Duration::from_millis(2);
     loop {
@@ -620,10 +656,14 @@ async fn wait_for_pid(pid_file: &Path, mut exit: watch::Receiver<Option<ExitStat
         }
         if exit.borrow().is_some() {
             // crun is over; the file may have been written just before.
-            return read_pid(pid_file).ok_or_else(|| anyhow::anyhow!("crun exited before the process started"));
+            return read_pid(pid_file)
+                .ok_or_else(|| anyhow::anyhow!("crun exited before the process started"));
         }
         if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!("crun did not start the process within {} s", START_WAIT.as_secs());
+            anyhow::bail!(
+                "crun did not start the process within {} s",
+                START_WAIT.as_secs()
+            );
         }
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
@@ -645,8 +685,12 @@ fn read_pid(path: &Path) -> Option<u32> {
 
 // ── pipes and the terminal ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
-fn spawn_pipe_reader<R>(mut reader: R, logs: Arc<Mutex<ContainerLogs>>, readers: Arc<Readers>, is_err: bool)
-where
+fn spawn_pipe_reader<R>(
+    mut reader: R,
+    logs: Arc<Mutex<ContainerLogs>>,
+    readers: Arc<Readers>,
+    is_err: bool,
+) where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     readers.add();
@@ -678,7 +722,13 @@ pub(crate) async fn read_master(master: Arc<Master>, logs: Arc<Mutex<ContainerLo
             Err(_) => break,
         };
         let r = guard.try_io(|inner| {
-            let n = unsafe { libc::read(inner.as_raw_fd(), buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            let n = unsafe {
+                libc::read(
+                    inner.as_raw_fd(),
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf.len(),
+                )
+            };
             if n < 0 {
                 Err(io::Error::last_os_error())
             } else {
@@ -699,7 +749,13 @@ pub(crate) async fn write_master(master: &Master, mut data: &[u8]) -> io::Result
     while !data.is_empty() {
         let mut guard = master.fd.writable().await?;
         let r = guard.try_io(|inner| {
-            let n = unsafe { libc::write(inner.as_raw_fd(), data.as_ptr() as *const libc::c_void, data.len()) };
+            let n = unsafe {
+                libc::write(
+                    inner.as_raw_fd(),
+                    data.as_ptr() as *const libc::c_void,
+                    data.len(),
+                )
+            };
             if n < 0 {
                 Err(io::Error::last_os_error())
             } else {
@@ -763,7 +819,10 @@ pub(crate) async fn receive_master(
                         anyhow::bail!("crun exited without a terminal");
                     }
                     if std::time::Instant::now() >= deadline {
-                        anyhow::bail!("crun did not send a terminal within {} s", START_WAIT.as_secs());
+                        anyhow::bail!(
+                            "crun did not send a terminal within {} s",
+                            START_WAIT.as_secs()
+                        );
                     }
                     std::thread::sleep(Duration::from_millis(5));
                 }
@@ -826,7 +885,8 @@ pub fn recv_fd(sock: RawFd) -> Result<OwnedFd> {
         }
     }
     let mut it = got.into_iter();
-    it.next().ok_or_else(|| anyhow::anyhow!("no descriptor was sent"))
+    it.next()
+        .ok_or_else(|| anyhow::anyhow!("no descriptor was sent"))
 }
 
 // ── pidfd ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -842,7 +902,15 @@ fn pidfd_open(pid: u32) -> Option<OwnedFd> {
 
 /// Signal the process behind a pidfd. False if it is gone.
 fn pidfd_send_signal(fd: RawFd, sig: i32) -> bool {
-    let r = unsafe { libc::syscall(libc::SYS_pidfd_send_signal, fd, sig, std::ptr::null::<libc::siginfo_t>(), 0) };
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            fd,
+            sig,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        )
+    };
     r == 0
 }
 
@@ -869,37 +937,74 @@ mod tests {
     fn a_pid_file_holds_a_pid_that_can_be_signalled() {
         assert_eq!(parse_pid("1234\n"), Some(1234));
         assert_eq!(parse_pid(" 7 "), Some(7));
-        for bad in ["", "0", "1", "-1", "abc", "4294967295", "2147483648", "12 34"] {
+        for bad in [
+            "",
+            "0",
+            "1",
+            "-1",
+            "abc",
+            "4294967295",
+            "2147483648",
+            "12 34",
+        ] {
             assert_eq!(parse_pid(bad), None, "{bad:?}");
         }
     }
 
     fn proc_json() -> Vec<u8> {
-        json!({"args": ["sh", "-c", "true"], "env": ["A=b"], "cwd": "/"}).to_string().into_bytes()
+        json!({"args": ["sh", "-c", "true"], "env": ["A=b"], "cwd": "/"})
+            .to_string()
+            .into_bytes()
     }
 
     #[tokio::test]
     async fn create_checks_the_definition_and_limits_the_execs_of_a_container() {
         let m = ExecManager::new();
-        assert!(m.create("c1", "e1", &proc_json(), false, None).await.is_ok());
+        assert!(m
+            .create("c1", "e1", &proc_json(), false, None)
+            .await
+            .is_ok());
         // The same id twice, a bad id, a bad definition, a definition too large.
-        assert!(m.create("c1", "e1", &proc_json(), false, None).await.is_err());
-        assert!(m.create("c1", "../e", &proc_json(), false, None).await.is_err());
-        assert!(m.create("c1", "e2", b"not json", false, None).await.is_err());
-        assert!(m.create("c1", "e2", b"{\"args\": []}", false, None).await.is_err());
+        assert!(m
+            .create("c1", "e1", &proc_json(), false, None)
+            .await
+            .is_err());
+        assert!(m
+            .create("c1", "../e", &proc_json(), false, None)
+            .await
+            .is_err());
+        assert!(m
+            .create("c1", "e2", b"not json", false, None)
+            .await
+            .is_err());
+        assert!(m
+            .create("c1", "e2", b"{\"args\": []}", false, None)
+            .await
+            .is_err());
         let big = vec![b' '; MAX_PROCESS_JSON + 1];
         assert!(m.create("c1", "e2", &big, false, None).await.is_err());
         // Up to the limit per container; another container is not affected.
         for i in 2..=MAX_EXECS_PER_CONTAINER {
-            m.create("c1", &format!("e{i}"), &proc_json(), false, None).await.unwrap();
+            m.create("c1", &format!("e{i}"), &proc_json(), false, None)
+                .await
+                .unwrap();
         }
-        assert!(m.create("c1", "one-more", &proc_json(), false, None).await.is_err());
-        assert!(m.create("c2", "e1", &proc_json(), false, None).await.is_ok());
+        assert!(m
+            .create("c1", "one-more", &proc_json(), false, None)
+            .await
+            .is_err());
+        assert!(m
+            .create("c2", "e1", &proc_json(), false, None)
+            .await
+            .is_ok());
         assert_eq!(m.count().await, MAX_EXECS_PER_CONTAINER + 1);
         // Deleting frees a place, and deleting what is not there is not an error.
         m.delete("c1", "e1").await.unwrap();
         m.delete("c1", "e1").await.unwrap();
-        assert!(m.create("c1", "one-more", &proc_json(), false, None).await.is_ok());
+        assert!(m
+            .create("c1", "one-more", &proc_json(), false, None)
+            .await
+            .is_ok());
         m.remove_container("c1").await;
         assert_eq!(m.count().await, 1);
     }
@@ -907,7 +1012,9 @@ mod tests {
     #[tokio::test]
     async fn an_exec_that_was_not_started_cannot_be_killed_written_to_or_waited_for() {
         let m = ExecManager::new();
-        m.create("c1", "e1", &proc_json(), false, None).await.unwrap();
+        m.create("c1", "e1", &proc_json(), false, None)
+            .await
+            .unwrap();
         assert!(m.kill("c1", "e1", 15).await.is_err());
         assert!(m.kill("c1", "e1", 0).await.is_err(), "signal 0 is refused");
         assert!(m.kill("c1", "e1", 65).await.is_err());
@@ -921,9 +1028,15 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert!(!waiter.is_finished(), "the wait blocks");
         m.delete("c1", "e1").await.unwrap();
-        let st = tokio::time::timeout(Duration::from_secs(2), waiter).await.expect("the wait ended").unwrap().unwrap();
+        let st = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("the wait ended")
+            .unwrap()
+            .unwrap();
         assert_eq!(st.code, 137);
-        m.create("c1", "e1", &proc_json(), false, None).await.unwrap();
+        m.create("c1", "e1", &proc_json(), false, None)
+            .await
+            .unwrap();
         assert!(m.resize("c1", "e1", 80, 24).await.is_err(), "no terminal");
         assert!(m.resize("c1", "e1", 0, 24).await.is_err());
         assert!(m.kill("c1", "unknown", 15).await.is_err());
@@ -939,7 +1052,13 @@ mod tests {
     fn the_window_size_of_a_real_terminal_is_set() {
         let (mut master, mut slave) = (-1, -1);
         let r = unsafe {
-            libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), std::ptr::null())
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
         };
         if r != 0 {
             return; // no ptys here (a sandboxed test run)
@@ -948,7 +1067,10 @@ mod tests {
         let slave = unsafe { OwnedFd::from_raw_fd(slave) };
         set_window_size(master.as_raw_fd(), 132, 43).unwrap();
         let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
-        assert_eq!(unsafe { libc::ioctl(slave.as_raw_fd(), libc::TIOCGWINSZ, &mut ws) }, 0);
+        assert_eq!(
+            unsafe { libc::ioctl(slave.as_raw_fd(), libc::TIOCGWINSZ, &mut ws) },
+            0
+        );
         assert_eq!((ws.ws_col, ws.ws_row), (132, 43));
     }
 
@@ -964,7 +1086,10 @@ mod tests {
         let space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) } as usize;
         let mut control = vec![0u8; space];
         let data = b"/dev/pts/0";
-        let mut iov = libc::iovec { iov_base: data.as_ptr() as *mut libc::c_void, iov_len: data.len() };
+        let mut iov = libc::iovec {
+            iov_base: data.as_ptr() as *mut libc::c_void,
+            iov_len: data.len(),
+        };
         let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
         msg.msg_iov = &mut iov;
         msg.msg_iovlen = 1;
@@ -1007,7 +1132,9 @@ mod tests {
             r2.finish();
             r2.finish();
         });
-        tokio::time::timeout(Duration::from_secs(2), r.wait()).await.expect("waited for both readers");
+        tokio::time::timeout(Duration::from_secs(2), r.wait())
+            .await
+            .expect("waited for both readers");
         t.await.unwrap();
     }
 
@@ -1017,13 +1144,25 @@ mod tests {
         let d = std::env::temp_dir().join(format!("cloudhv-exec-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         make_dir(&d).unwrap();
-        assert_eq!(std::fs::metadata(&d).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            std::fs::metadata(&d).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         let f = d.join("x1.json");
         write_private(&f, b"{}").unwrap();
-        assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
-        assert!(write_private(&f, b"{}").is_err(), "an existing file is not written");
+        assert_eq!(
+            std::fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            write_private(&f, b"{}").is_err(),
+            "an existing file is not written"
+        );
         std::os::unix::fs::symlink("/etc/passwd", d.join("x2.json")).unwrap();
-        assert!(write_private(&d.join("x2.json"), b"{}").is_err(), "a link is not followed");
+        assert!(
+            write_private(&d.join("x2.json"), b"{}").is_err(),
+            "a link is not followed"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -1031,7 +1170,13 @@ mod tests {
     fn pty() -> Option<(Arc<Master>, OwnedFd)> {
         let (mut master, mut slave) = (-1, -1);
         let r = unsafe {
-            libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), std::ptr::null())
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
         };
         if r != 0 {
             return None; // no ptys here (a sandboxed test run)
@@ -1039,7 +1184,12 @@ mod tests {
         let master = unsafe { OwnedFd::from_raw_fd(master) };
         set_nonblocking(master.as_raw_fd()).unwrap();
         let slave = unsafe { OwnedFd::from_raw_fd(slave) };
-        Some((Arc::new(Master { fd: AsyncFd::new(master).unwrap() }), slave))
+        Some((
+            Arc::new(Master {
+                fd: AsyncFd::new(master).unwrap(),
+            }),
+            slave,
+        ))
     }
 
     #[tokio::test]
@@ -1048,7 +1198,13 @@ mod tests {
         // Output: what the process writes to its terminal reaches the container's log (stdout stream).
         let logs = Arc::new(Mutex::new(ContainerLogs::default()));
         let reader = tokio::spawn(read_master(master.clone(), logs.clone()));
-        unsafe { libc::write(slave.as_raw_fd(), b"hello\n".as_ptr() as *const libc::c_void, 6) };
+        unsafe {
+            libc::write(
+                slave.as_raw_fd(),
+                b"hello\n".as_ptr() as *const libc::c_void,
+                6,
+            )
+        };
         for _ in 0..100 {
             if logs.lock().await.stdout.len() >= 7 {
                 break;
@@ -1056,7 +1212,10 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let got = logs.lock().await.read(0, 0, 4096);
-        assert_eq!(got.stdout, b"hello\r\n", "the line discipline turns a newline into CR LF");
+        assert_eq!(
+            got.stdout, b"hello\r\n",
+            "the line discipline turns a newline into CR LF"
+        );
         assert!(got.stderr.is_empty(), "a terminal has no stderr");
 
         // Input: written to the master, read from the slave (raw mode, so that the line discipline does not hold it back).
@@ -1070,7 +1229,13 @@ mod tests {
         let mut buf = [0u8; 3];
         let mut n = 0;
         for _ in 0..100 {
-            let r = unsafe { libc::read(slave.as_raw_fd(), buf.as_mut_ptr().add(n) as *mut libc::c_void, 3 - n) };
+            let r = unsafe {
+                libc::read(
+                    slave.as_raw_fd(),
+                    buf.as_mut_ptr().add(n) as *mut libc::c_void,
+                    3 - n,
+                )
+            };
             if r > 0 {
                 n += r as usize;
             }
@@ -1081,26 +1246,41 @@ mod tests {
         }
         assert_eq!(&buf, b"abc");
         // A write over the limit is refused.
-        assert!(write_terminal(&master, &vec![0u8; MAX_WRITE + 1]).await.is_err());
+        assert!(write_terminal(&master, &vec![0u8; MAX_WRITE + 1])
+            .await
+            .is_err());
 
         // Size.
         assert!(valid_terminal_size(80, 24));
-        assert!(!valid_terminal_size(0, 24) && !valid_terminal_size(80, 0) && !valid_terminal_size(10_001, 24));
+        assert!(
+            !valid_terminal_size(0, 24)
+                && !valid_terminal_size(80, 0)
+                && !valid_terminal_size(10_001, 24)
+        );
         set_window_size(master.raw_fd(), 100, 30).unwrap();
         let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
-        assert_eq!(unsafe { libc::ioctl(slave.as_raw_fd(), libc::TIOCGWINSZ, &mut ws) }, 0);
+        assert_eq!(
+            unsafe { libc::ioctl(slave.as_raw_fd(), libc::TIOCGWINSZ, &mut ws) },
+            0
+        );
         assert_eq!((ws.ws_col, ws.ws_row), (100, 30));
 
         // The reader ends when the slave side is gone (the process and its children have exited).
         drop(slave);
-        tokio::time::timeout(Duration::from_secs(3), reader).await.expect("the reader ended").unwrap();
+        tokio::time::timeout(Duration::from_secs(3), reader)
+            .await
+            .expect("the reader ended")
+            .unwrap();
     }
 
     #[tokio::test]
     async fn the_init_exec_id_is_not_an_exec_process() {
         let m = ExecManager::new();
         assert!(valid_exec_id(INIT_EXEC_ID), "it is an id the host can send");
-        let err = m.create("c1", INIT_EXEC_ID, br#"{"args":["ls"]}"#, false, None).await.unwrap_err();
+        let err = m
+            .create("c1", INIT_EXEC_ID, br#"{"args":["ls"]}"#, false, None)
+            .await
+            .unwrap_err();
         assert!(format!("{err:#}").contains("reserved"), "{err:#}");
         assert_eq!(m.count().await, 0);
         // Nothing but write, close and resize means anything for it; the exec manager does not know it.

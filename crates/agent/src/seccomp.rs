@@ -110,7 +110,9 @@ pub const ALLOWED_SOCKET_FAMILIES: &[u64] = &[0, 1, 2, 10, 16];
 const AF_MAX: u64 = 46;
 
 pub fn denied_socket_families() -> Vec<u64> {
-    (0..=AF_MAX).filter(|f| !ALLOWED_SOCKET_FAMILIES.contains(f)).collect()
+    (0..=AF_MAX)
+        .filter(|f| !ALLOWED_SOCKET_FAMILIES.contains(f))
+        .collect()
 }
 
 /// The `CLONE_NEW*` flags: CLONE_NEWNS, CLONE_NEWCGROUP, CLONE_NEWUTS, CLONE_NEWIPC, CLONE_NEWUSER, CLONE_NEWPID, CLONE_NEWNET,
@@ -169,15 +171,27 @@ pub fn denial_rules() -> Vec<Value> {
     // socket(domain, ...): domain is argument 0.
     // One rule for each refused family: libseccomp does not AND several conditions on one argument.
     for family in denied_socket_families() {
-        rules.push(rule(&["socket"], EPERM, vec![arg(0, family, 0, "SCMP_CMP_EQ")]));
+        rules.push(rule(
+            &["socket"],
+            EPERM,
+            vec![arg(0, family, 0, "SCMP_CMP_EQ")],
+        ));
     }
     // clone(flags, ...): a namespace flag is refused. (arg & flag) == flag.
     for flag in CLONE_NEW_FLAGS {
-        rules.push(rule(&["clone"], EPERM, vec![arg(0, *flag, *flag, "SCMP_CMP_MASKED_EQ")]));
+        rules.push(rule(
+            &["clone"],
+            EPERM,
+            vec![arg(0, *flag, *flag, "SCMP_CMP_MASKED_EQ")],
+        ));
     }
     // personality(persona): a dangerous bit set. One condition per rule.
     for bit in PERSONALITY_BITS {
-        rules.push(rule(&["personality"], EPERM, vec![arg(0, *bit, *bit, "SCMP_CMP_MASKED_EQ")]));
+        rules.push(rule(
+            &["personality"],
+            EPERM,
+            vec![arg(0, *bit, *bit, "SCMP_CMP_MASKED_EQ")],
+        ));
     }
     rules
 }
@@ -208,7 +222,13 @@ fn condition_holds(c: &Value, v: u64) -> Option<bool> {
 }
 
 fn allows(action: Option<&str>) -> bool {
-    matches!(action, Some("SCMP_ACT_ALLOW") | Some("SCMP_ACT_LOG") | Some("SCMP_ACT_TRACE") | Some("SCMP_ACT_NOTIFY"))
+    matches!(
+        action,
+        Some("SCMP_ACT_ALLOW")
+            | Some("SCMP_ACT_LOG")
+            | Some("SCMP_ACT_TRACE")
+            | Some("SCMP_ACT_NOTIFY")
+    )
 }
 
 /// The profile to give crun for a spec whose seccomp section is `existing`.
@@ -238,8 +258,15 @@ pub fn enforce(existing: Option<&Value>) -> Value {
     let mut kept: Vec<Value> = Vec::new();
     let mut socket_families_allowed = std::collections::HashSet::new();
 
-    for entry in profile.get("syscalls").and_then(|s| s.as_array()).cloned().unwrap_or_default() {
-        let Value::Object(mut e) = entry else { continue };
+    for entry in profile
+        .get("syscalls")
+        .and_then(|s| s.as_array())
+        .cloned()
+        .unwrap_or_default()
+    {
+        let Value::Object(mut e) = entry else {
+            continue;
+        };
         // (Also when the profile allows by default: a rule that allows a refused syscall would overlap the refusal put in front of it,
         // and libseccomp does not promise which one wins; found by fuzzing. Such a rule adds nothing in a default-allow profile.)
         if allows(e.get("action").and_then(|a| a.as_str())) {
@@ -249,7 +276,11 @@ pub fn enforce(existing: Option<&Value>) -> Value {
                 .cloned()
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|n| n.as_str().map(|n| !DENIED.contains(&n) && n != "clone3").unwrap_or(false))
+                .filter(|n| {
+                    n.as_str()
+                        .map(|n| !DENIED.contains(&n) && n != "clone3")
+                        .unwrap_or(false)
+                })
                 .collect();
             if names.is_empty() {
                 continue;
@@ -259,8 +290,16 @@ pub fn enforce(existing: Option<&Value>) -> Value {
             // as a set of families and cut to the allowed ones: no conditions = every family, `domain == f` = {f}, `domain != f` =
             // every family but f; any other condition on it allows nothing (closed).
             if names.iter().any(|n| n.as_str() == Some("socket")) {
-                let others: Vec<Value> = names.iter().filter(|n| n.as_str() != Some("socket")).cloned().collect();
-                let args = e.get("args").and_then(|a| a.as_array()).cloned().unwrap_or_default();
+                let others: Vec<Value> = names
+                    .iter()
+                    .filter(|n| n.as_str() != Some("socket"))
+                    .cloned()
+                    .collect();
+                let args = e
+                    .get("args")
+                    .and_then(|a| a.as_array())
+                    .cloned()
+                    .unwrap_or_default();
                 let action = e.get("action").cloned().unwrap_or(json!("SCMP_ACT_ALLOW"));
                 if !others.is_empty() {
                     let mut rest = e.clone();
@@ -290,7 +329,11 @@ pub fn enforce(existing: Option<&Value>) -> Value {
         kept.push(Value::Object(e));
     }
 
-    let mut syscalls = if default_allows { denial_rules() } else { Vec::new() };
+    let mut syscalls = if default_allows {
+        denial_rules()
+    } else {
+        Vec::new()
+    };
     syscalls.extend(kept);
     profile.insert("syscalls".to_string(), Value::Array(syscalls));
     if !profile.contains_key("architectures") {
@@ -332,27 +375,50 @@ mod tests {
             ]
         })));
         for r in p["syscalls"].as_array().unwrap() {
-            let allows = matches!(r["action"].as_str(), Some("SCMP_ACT_ALLOW") | Some("SCMP_ACT_LOG"));
+            let allows = matches!(
+                r["action"].as_str(),
+                Some("SCMP_ACT_ALLOW") | Some("SCMP_ACT_LOG")
+            );
             for n in r["names"].as_array().unwrap() {
                 let n = n.as_str().unwrap();
-                assert!(!(allows && (DENIED.contains(&n) || n == "clone3")), "{n} is allowed by {r}");
+                assert!(
+                    !(allows && (DENIED.contains(&n) || n == "clone3")),
+                    "{n} is allowed by {r}"
+                );
             }
         }
         // What was refused by the pod stays refused, and the harmless allow is not lost.
-        assert!(find(&p, "ptrace").iter().any(|r| r["action"] == "SCMP_ACT_ERRNO"));
-        assert!(find(&p, "read").iter().any(|r| r["action"] == "SCMP_ACT_ALLOW"));
+        assert!(find(&p, "ptrace")
+            .iter()
+            .any(|r| r["action"] == "SCMP_ACT_ERRNO"));
+        assert!(find(&p, "read")
+            .iter()
+            .any(|r| r["action"] == "SCMP_ACT_ALLOW"));
         // socket is allowed for the allowed families only.
-        assert!(find(&p, "socket").iter().filter(|r| r["action"] == "SCMP_ACT_ALLOW").all(|r| r["args"].is_array()));
+        assert!(find(&p, "socket")
+            .iter()
+            .filter(|r| r["action"] == "SCMP_ACT_ALLOW")
+            .all(|r| r["args"].is_array()));
     }
 
     #[test]
     fn a_seccomp_section_with_no_default_action_is_replaced_by_the_default_profile() {
         assert_eq!(enforce(Some(&json!({}))), default_profile());
-        assert_eq!(enforce(Some(&json!({"syscalls": [{"names": ["socket"], "action": "SCMP_ACT_ALLOW"}]}))), default_profile());
-        assert_eq!(enforce(Some(&json!({"defaultAction": 5}))), default_profile());
+        assert_eq!(
+            enforce(Some(
+                &json!({"syscalls": [{"names": ["socket"], "action": "SCMP_ACT_ALLOW"}]})
+            )),
+            default_profile()
+        );
+        assert_eq!(
+            enforce(Some(&json!({"defaultAction": 5}))),
+            default_profile()
+        );
         assert_eq!(enforce(Some(&json!("SCMP_ACT_ALLOW"))), default_profile());
         // With an action it is kept, with the denials.
-        let p = enforce(Some(&json!({"defaultAction": "SCMP_ACT_ERRNO", "syscalls": []})));
+        let p = enforce(Some(
+            &json!({"defaultAction": "SCMP_ACT_ERRNO", "syscalls": []}),
+        ));
         assert_eq!(p["defaultAction"], "SCMP_ACT_ERRNO");
     }
 
@@ -367,12 +433,25 @@ mod tests {
     #[test]
     fn the_dangerous_syscalls_answer_eperm() {
         let p = default_profile();
-        for name in ["bpf", "perf_event_open", "userfaultfd", "unshare", "setns", "mount", "keyctl", "init_module", "kexec_load"] {
+        for name in [
+            "bpf",
+            "perf_event_open",
+            "userfaultfd",
+            "unshare",
+            "setns",
+            "mount",
+            "keyctl",
+            "init_module",
+            "kexec_load",
+        ] {
             let r = find(&p, name);
             assert_eq!(r.len(), 1, "{name}");
             assert_eq!(r[0]["action"], "SCMP_ACT_ERRNO");
             assert_eq!(r[0]["errnoRet"], 1);
-            assert!(r[0].get("args").is_none(), "{name} is refused whatever the arguments");
+            assert!(
+                r[0].get("args").is_none(),
+                "{name} is refused whatever the arguments"
+            );
         }
     }
 
@@ -388,7 +467,10 @@ mod tests {
     fn vsock_and_the_other_unneeded_socket_families_are_refused() {
         let p = default_profile();
         let r = find(&p, "socket");
-        let refused: Vec<u64> = r.iter().map(|r| r["args"][0]["value"].as_u64().unwrap()).collect();
+        let refused: Vec<u64> = r
+            .iter()
+            .map(|r| r["args"][0]["value"].as_u64().unwrap())
+            .collect();
         for family in [40u64, 17, 38, 15, 44, 21, 30, 43] {
             assert!(refused.contains(&family), "family {family} must be refused");
         }
@@ -399,7 +481,10 @@ mod tests {
         }
         // what workloads use stays allowed: AF_UNSPEC, AF_UNIX, AF_INET, AF_INET6, AF_NETLINK
         for family in ALLOWED_SOCKET_FAMILIES {
-            assert!(!refused.contains(family), "family {family} must stay allowed");
+            assert!(
+                !refused.contains(family),
+                "family {family} must stay allowed"
+            );
         }
     }
 
@@ -415,7 +500,10 @@ mod tests {
             for r in p["syscalls"].as_array().unwrap() {
                 let mut seen = std::collections::HashSet::new();
                 for a in r["args"].as_array().into_iter().flatten() {
-                    assert!(seen.insert(a["index"].as_u64().unwrap()), "two conditions on one argument in {r}");
+                    assert!(
+                        seen.insert(a["index"].as_u64().unwrap()),
+                        "two conditions on one argument in {r}"
+                    );
                 }
             }
         }
@@ -429,7 +517,10 @@ mod tests {
         for (rule, flag) in r.iter().zip(CLONE_NEW_FLAGS) {
             assert_eq!(rule["args"][0]["op"], "SCMP_CMP_MASKED_EQ");
             assert_eq!(rule["args"][0]["value"], *flag);
-            assert_eq!(rule["args"][0]["valueTwo"], *flag, "refused when the whole flag is set");
+            assert_eq!(
+                rule["args"][0]["valueTwo"], *flag,
+                "refused when the whole flag is set"
+            );
         }
     }
 
@@ -488,7 +579,10 @@ mod tests {
         assert_eq!(p["defaultAction"], "SCMP_ACT_ERRNO");
         assert!(p.get("listenerPath").is_none() && p.get("listenerMetadata").is_none());
         for name in ["bpf", "mount", "unshare", "clone3"] {
-            assert!(find(&p, name).is_empty(), "{name} must not be allowed any more");
+            assert!(
+                find(&p, name).is_empty(),
+                "{name} must not be allowed any more"
+            );
         }
         for name in ["read", "write", "futex"] {
             assert_eq!(find(&p, name).len(), 1, "{name} stays allowed");
@@ -502,7 +596,10 @@ mod tests {
         let p = enforce(Some(&runtime_default_like()));
         let s = find(&p, "socket");
         assert_eq!(s.len(), ALLOWED_SOCKET_FAMILIES.len());
-        let mut families: Vec<u64> = s.iter().map(|r| r["args"][0]["value"].as_u64().unwrap()).collect();
+        let mut families: Vec<u64> = s
+            .iter()
+            .map(|r| r["args"][0]["value"].as_u64().unwrap())
+            .collect();
         families.sort();
         assert_eq!(families, ALLOWED_SOCKET_FAMILIES.to_vec());
         for r in s {
@@ -510,7 +607,9 @@ mod tests {
             assert_eq!(r["args"][0]["op"], "SCMP_CMP_EQ");
         }
         // and read/write do not share a rule with socket any more
-        assert!(find(&p, "read").iter().all(|r| !names_of(r).contains(&"socket".to_string())));
+        assert!(find(&p, "read")
+            .iter()
+            .all(|r| !names_of(r).contains(&"socket".to_string())));
     }
 
     #[test]
@@ -525,7 +624,10 @@ mod tests {
             ]
         });
         let p = enforce(Some(&own));
-        let families: Vec<u64> = find(&p, "socket").iter().map(|r| r["args"][0]["value"].as_u64().unwrap()).collect();
+        let families: Vec<u64> = find(&p, "socket")
+            .iter()
+            .map(|r| r["args"][0]["value"].as_u64().unwrap())
+            .collect();
         // 2 and 1 from the equal rules; 40 refused; "!= 40" is every allowed family, of which 0, 10 and 16 are new (2 and 1 are not repeated)
         assert_eq!(families, vec![2, 0, 1, 10, 16]);
     }
@@ -538,7 +640,11 @@ mod tests {
         });
         let p = enforce(Some(&own));
         let list = p["syscalls"].as_array().unwrap();
-        assert_eq!(list.last().unwrap()["names"][0], "chmod", "the profile's own rules come after ours");
+        assert_eq!(
+            list.last().unwrap()["names"][0],
+            "chmod",
+            "the profile's own rules come after ours"
+        );
         assert!(names_of(&list[0]).contains(&"bpf".to_string()));
         assert!(!find(&p, "socket").is_empty());
         assert!(p.get("architectures").is_some());
@@ -546,7 +652,9 @@ mod tests {
 
     #[test]
     fn a_profile_with_a_deny_default_and_no_syscalls_stays_closed() {
-        let p = enforce(Some(&json!({"defaultAction": "SCMP_ACT_ERRNO", "syscalls": []})));
+        let p = enforce(Some(
+            &json!({"defaultAction": "SCMP_ACT_ERRNO", "syscalls": []}),
+        ));
         assert_eq!(p["defaultAction"], "SCMP_ACT_ERRNO");
         assert!(p["syscalls"].as_array().unwrap().is_empty());
     }
@@ -561,10 +669,15 @@ mod tests {
     #[test]
     #[ignore]
     fn dump_the_profiles_for_trying_them_by_hand() {
-        let dir = std::env::var("CLOUDHV_SECCOMP_DUMP").expect("set CLOUDHV_SECCOMP_DUMP to a directory");
+        let dir =
+            std::env::var("CLOUDHV_SECCOMP_DUMP").expect("set CLOUDHV_SECCOMP_DUMP to a directory");
         let dir = std::path::Path::new(&dir);
         std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(dir.join("default.json"), serde_json::to_string_pretty(&default_profile()).unwrap()).unwrap();
+        std::fs::write(
+            dir.join("default.json"),
+            serde_json::to_string_pretty(&default_profile()).unwrap(),
+        )
+        .unwrap();
         std::fs::write(
             dir.join("merged.json"),
             serde_json::to_string_pretty(&enforce(Some(&runtime_default_like()))).unwrap(),
@@ -572,7 +685,8 @@ mod tests {
         .unwrap();
         // A real allow list to merge into: CLOUDHV_SECCOMP_EXISTING=<profile in OCI form>.
         if let Ok(existing) = std::env::var("CLOUDHV_SECCOMP_EXISTING") {
-            let existing: Value = serde_json::from_str(&std::fs::read_to_string(existing).unwrap()).unwrap();
+            let existing: Value =
+                serde_json::from_str(&std::fs::read_to_string(existing).unwrap()).unwrap();
             std::fs::write(
                 dir.join("merged-real.json"),
                 serde_json::to_string_pretty(&enforce(Some(&existing))).unwrap(),

@@ -196,7 +196,9 @@ pub fn apply_sysctls() {
     for (key, value) in SYSCTLS {
         match std::fs::write(sysctl_path(key), value) {
             Ok(()) => debug!("sysctl {key}={value}"),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => debug!("sysctl {key}: not in this kernel"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                debug!("sysctl {key}: not in this kernel")
+            }
             Err(e) => log::warn!("sysctl {key}={value}: {e}"),
         }
     }
@@ -211,8 +213,16 @@ mod tests {
 
     #[test]
     fn sysctl_keys_become_paths_under_proc_sys() {
-        assert_eq!(sysctl_path("kernel.dmesg_restrict"), "/proc/sys/kernel/dmesg_restrict");
-        assert_eq!(sysctl_path("kernel.yama.ptrace_scope"), "/proc/sys/kernel/yama/ptrace_scope");
-        assert!(SYSCTLS.iter().any(|(k, v)| *k == "user.max_user_namespaces" && *v == "0"));
+        assert_eq!(
+            sysctl_path("kernel.dmesg_restrict"),
+            "/proc/sys/kernel/dmesg_restrict"
+        );
+        assert_eq!(
+            sysctl_path("kernel.yama.ptrace_scope"),
+            "/proc/sys/kernel/yama/ptrace_scope"
+        );
+        assert!(SYSCTLS
+            .iter()
+            .any(|(k, v)| *k == "user.max_user_namespaces" && *v == "0"));
     }
 }

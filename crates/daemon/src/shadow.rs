@@ -126,7 +126,13 @@ impl SnapshotManager {
             }
         };
 
-        let ch_pid = vm_lifecycle::spawn_ch(&self.config, state_dir, self.config.default_memory_mb, self.config.default_vcpus).await?;
+        let ch_pid = vm_lifecycle::spawn_ch(
+            &self.config,
+            state_dir,
+            self.config.default_memory_mb,
+            self.config.default_vcpus,
+        )
+        .await?;
         let api_socket = state_dir.join("api.sock");
         let steps = async {
             // Rootless: the VM may read the two big files of this snapshot (hard links of the cached ones) and the image, and nothing
@@ -318,10 +324,19 @@ impl SnapshotManager {
             crate::rootless::allow_read(Path::new(erofs_path), state_dir)
                 .context("let the shadow VM read the rootfs")?;
         }
-        vm_lifecycle::api_request_with_body(api_socket, "PUT", "/api/v1/vm.add-disk", &disk_json.to_string())
-            .await
-            .context("hot-plug rootfs for shadow")?;
-        info!("shadow {}: rootfs hot-plugged ({}ms)", image_key, t0.elapsed().as_millis());
+        vm_lifecycle::api_request_with_body(
+            api_socket,
+            "PUT",
+            "/api/v1/vm.add-disk",
+            &disk_json.to_string(),
+        )
+        .await
+        .context("hot-plug rootfs for shadow")?;
+        info!(
+            "shadow {}: rootfs hot-plugged ({}ms)",
+            image_key,
+            t0.elapsed().as_millis()
+        );
 
         // 3. Run container via agent RPC
         // Connect to agent and send RunContainer
@@ -362,7 +377,11 @@ impl SnapshotManager {
         std::fs::create_dir(snap_dir).with_context(|| format!("create {}", snap_dir.display()))?;
         vm_lifecycle::pause_vm(api_socket).await?;
         vm_lifecycle::snapshot_vm(api_socket, snap_dir).await?;
-        info!("shadow {}: snapshot created ({}ms total)", image_key, t0.elapsed().as_millis());
+        info!(
+            "shadow {}: snapshot created ({}ms total)",
+            image_key,
+            t0.elapsed().as_millis()
+        );
         Ok(())
     }
 
@@ -414,7 +433,8 @@ mod tests {
         )
         .unwrap();
         strip_kernel_ip(&d).unwrap();
-        let cfg: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(d.join("config.json")).unwrap()).unwrap();
+        let cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(d.join("config.json")).unwrap()).unwrap();
         assert_eq!(cfg["payload"]["cmdline"], "console=ttyS0 root=/dev/vda");
         let _ = std::fs::remove_dir_all(&d);
     }

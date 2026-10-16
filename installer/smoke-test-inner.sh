@@ -30,7 +30,7 @@ cat > "$STUBS/systemd-run" << 'S'
 echo "systemd-run $*" >> /calls
 exit 0
 S
-for c in modprobe tc mkfs.erofs; do printf '#!/bin/sh\nexit 0\n' > "$STUBS/$c"; done
+for c in modprobe tc mkfs.erofs mke2fs; do printf '#!/bin/sh\nexit 0\n' > "$STUBS/$c"; done
 chmod +x "$STUBS"/*
 export PATH="$STUBS:$PATH"
 

@@ -53,10 +53,12 @@ pub fn legacy_name(source: &str) -> Option<&str> {
 /// this container's own `volumes` directory, by its last component. The path is never used as it came.
 pub fn location(source: &str, bundle: &Path) -> Result<(PathBuf, String)> {
     if source.starts_with(VOLUME_ROOT) {
-        let name = shared_name(source).with_context(|| format!("volume source {source:?} is not allowed"))?;
+        let name = shared_name(source)
+            .with_context(|| format!("volume source {source:?} is not allowed"))?;
         return Ok((PathBuf::from(VOLUME_ROOT), name.to_string()));
     }
-    let name = legacy_name(source).with_context(|| format!("volume source {source:?} is not allowed"))?;
+    let name =
+        legacy_name(source).with_context(|| format!("volume source {source:?} is not allowed"))?;
     Ok((bundle.join("volumes"), name.to_string()))
 }
 
@@ -98,7 +100,8 @@ fn open_dir_at(dirfd: RawFd, name: &str) -> Result<OwnedFd> {
         )
     };
     if fd < 0 {
-        return Err(errno()).with_context(|| format!("open directory {name} (a link or a file in the way?)"));
+        return Err(errno())
+            .with_context(|| format!("open directory {name} (a link or a file in the way?)"));
     }
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
@@ -206,9 +209,7 @@ pub fn materialize(
     }
 
     if in_use {
-        log::info!(
-            "volume {name} is in use by a running container; its files are not rewritten"
-        );
+        log::info!("volume {name} is in use by a running container; its files are not rewritten");
     } else {
         for f in files {
             let rel = safe_relative(f.path)
@@ -219,7 +220,9 @@ pub fn materialize(
 
     if files.len() == 1 {
         let dest_base = Path::new(destination).file_name().and_then(|n| n.to_str());
-        let file_base = Path::new(files[0].path).file_name().and_then(|n| n.to_str());
+        let file_base = Path::new(files[0].path)
+            .file_name()
+            .and_then(|n| n.to_str());
         if dest_base.is_some() && dest_base == file_base {
             return Ok(path.join(files[0].path));
         }
@@ -240,14 +243,19 @@ mod tests {
     use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 
     fn tmp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("cloudhv-agent-vol-{tag}-{}", std::process::id()));
+        let d =
+            std::env::temp_dir().join(format!("cloudhv-agent-vol-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
     }
 
     fn f<'a>(path: &'a str, content: &'a [u8], mode: u32) -> VolumeFile<'a> {
-        VolumeFile { path, content, mode }
+        VolumeFile {
+            path,
+            content,
+            mode,
+        }
     }
 
     #[test]
@@ -255,7 +263,15 @@ mod tests {
         // Found by fuzzing: with `in_use` nothing is written, and the lone file named like the destination was returned as
         // `volume.join(path)`, which for "/etc/shadow" is "/etc/shadow": the thing to bind.
         let root = tmp("badpath").join("root");
-        for path in ["/etc/shadow", "../x", "a/../../x", "", "a//b", "..data/x", "a\0b"] {
+        for path in [
+            "/etc/shadow",
+            "../x",
+            "a/../../x",
+            "",
+            "a//b",
+            "..data/x",
+            "a\0b",
+        ] {
             for in_use in [false, true] {
                 let r = materialize(&root, "vol", &[f(path, b"x", 0o644)], "/x/shadow", in_use);
                 assert!(r.is_err(), "{path:?} (in use: {in_use}) gave {r:?}");
@@ -263,7 +279,14 @@ mod tests {
         }
         // A plain one still gives the file to bind, in use or not.
         for in_use in [false, true] {
-            let p = materialize(&root, "vol", &[f("shadow", b"x", 0o644)], "/x/shadow", in_use).unwrap();
+            let p = materialize(
+                &root,
+                "vol",
+                &[f("shadow", b"x", 0o644)],
+                "/x/shadow",
+                in_use,
+            )
+            .unwrap();
             assert_eq!(p, root.join("vol").join("shadow"));
         }
     }
@@ -274,8 +297,14 @@ mod tests {
         let root = tmp("badname").join("root");
         let outside = root.parent().unwrap().join("x");
         for name in ["/", "", ".", "..", "../x", "a/b", "/tmp", ".hidden", "a\0b"] {
-            assert!(materialize(&root, name, &[], "/d", false).is_err(), "{name:?}");
-            assert!(materialize(&root, name, &[f("a", b"x", 0o644)], "/d", false).is_err(), "{name:?} with files");
+            assert!(
+                materialize(&root, name, &[], "/d", false).is_err(),
+                "{name:?}"
+            );
+            assert!(
+                materialize(&root, name, &[f("a", b"x", 0o644)], "/d", false).is_err(),
+                "{name:?} with files"
+            );
         }
         assert!(!outside.exists());
         assert!(materialize(&root, "ok-name.1", &[], "/d", false).is_ok());
@@ -301,12 +330,18 @@ mod tests {
     #[test]
     fn a_volume_is_located_by_its_name_only() {
         let b = Path::new("/run/containers/c1");
-        assert_eq!(location("/run/cloudhv-vols/ab12", b).unwrap(), (PathBuf::from(VOLUME_ROOT), "ab12".to_string()));
+        assert_eq!(
+            location("/run/cloudhv-vols/ab12", b).unwrap(),
+            (PathBuf::from(VOLUME_ROOT), "ab12".to_string())
+        );
         assert!(location("/run/cloudhv-vols/../../etc", b).is_err());
         assert!(location("/run/cloudhv-volsX/a", b).is_err());
         assert!(location("/run/cloudhv-vols/a/b", b).is_err());
         // not under the shared root: only the last component names a directory of the container's own
-        assert_eq!(location("/some/where/data", b).unwrap(), (b.join("volumes"), "data".to_string()));
+        assert_eq!(
+            location("/some/where/data", b).unwrap(),
+            (b.join("volumes"), "data".to_string())
+        );
         assert!(location("/", b).is_err());
         assert!(location("/a/..", b).is_err());
     }
@@ -316,7 +351,10 @@ mod tests {
         assert_eq!(safe_relative("app.conf"), Some(vec!["app.conf"]));
         assert_eq!(safe_relative("a/b/c.txt"), Some(vec!["a", "b", "c.txt"]));
         assert_eq!(safe_relative(".env"), Some(vec![".env"]));
-        assert_eq!(safe_relative("my file (1).txt"), Some(vec!["my file (1).txt"]));
+        assert_eq!(
+            safe_relative("my file (1).txt"),
+            Some(vec!["my file (1).txt"])
+        );
         assert_eq!(safe_relative("/abs"), None);
         assert_eq!(safe_relative("a/../b"), None);
         assert_eq!(safe_relative("a//b"), None);
@@ -347,15 +385,28 @@ mod tests {
         .unwrap();
         assert_eq!(p, root.join("v1"));
         assert_eq!(std::fs::read(root.join("v1/app.conf")).unwrap(), b"x=1");
-        assert_eq!(std::fs::metadata(root.join("v1/app.conf")).unwrap().mode() & 0o7777, 0o644);
-        assert_eq!(std::fs::metadata(root.join("v1/sub/dir/t")).unwrap().mode() & 0o7777, 0o400);
+        assert_eq!(
+            std::fs::metadata(root.join("v1/app.conf")).unwrap().mode() & 0o7777,
+            0o644
+        );
+        assert_eq!(
+            std::fs::metadata(root.join("v1/sub/dir/t")).unwrap().mode() & 0o7777,
+            0o400
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn a_single_file_named_like_its_destination_is_bound_as_the_file() {
         let root = tmp("single");
-        let p = materialize(&root, "v2", &[f("resolv.conf", b"nameserver 1.1.1.1", 0o644)], "/etc/resolv.conf", false).unwrap();
+        let p = materialize(
+            &root,
+            "v2",
+            &[f("resolv.conf", b"nameserver 1.1.1.1", 0o644)],
+            "/etc/resolv.conf",
+            false,
+        )
+        .unwrap();
         assert_eq!(p, root.join("v2/resolv.conf"));
         let q = materialize(&root, "v3", &[f("a", b"1", 0o644)], "/etc/other", false).unwrap();
         assert_eq!(q, root.join("v3"));
@@ -370,9 +421,16 @@ mod tests {
         std::fs::create_dir_all(root.join("v")).unwrap();
         symlink(&victim, root.join("v/token")).unwrap();
         materialize(&root, "v", &[f("token", b"new", 0o600)], "/t", false).unwrap();
-        assert_eq!(std::fs::read(&victim).unwrap(), b"keep", "the target of the link is untouched");
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"keep",
+            "the target of the link is untouched"
+        );
         assert_eq!(std::fs::read(root.join("v/token")).unwrap(), b"new");
-        assert!(!std::fs::symlink_metadata(root.join("v/token")).unwrap().file_type().is_symlink());
+        assert!(!std::fs::symlink_metadata(root.join("v/token"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -385,7 +443,10 @@ mod tests {
         symlink(&outside, root.join("v/sub")).unwrap();
         let r = materialize(&root, "v", &[f("sub/evil", b"x", 0o644)], "/t", false);
         assert!(r.is_err());
-        assert!(!outside.join("evil").exists(), "nothing was written through the link");
+        assert!(
+            !outside.join("evil").exists(),
+            "nothing was written through the link"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -405,7 +466,11 @@ mod tests {
         let root = tmp("use");
         materialize(&root, "v", &[f("a", b"one", 0o644)], "/t", false).unwrap();
         materialize(&root, "v", &[f("a", b"two", 0o644)], "/t", true).unwrap();
-        assert_eq!(std::fs::read(root.join("v/a")).unwrap(), b"one", "first writer wins while a container uses it");
+        assert_eq!(
+            std::fs::read(root.join("v/a")).unwrap(),
+            b"one",
+            "first writer wins while a container uses it"
+        );
         materialize(&root, "v", &[f("a", b"two", 0o644)], "/t", false).unwrap();
         assert_eq!(std::fs::read(root.join("v/a")).unwrap(), b"two");
         let _ = std::fs::remove_dir_all(&root);
@@ -415,7 +480,10 @@ mod tests {
     fn an_empty_dir_is_world_writable_and_keeps_what_is_in_it() {
         let root = tmp("empty");
         let p = materialize(&root, "e", &[], "/data", false).unwrap();
-        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o777);
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o777
+        );
         std::fs::write(p.join("kept"), b"x").unwrap();
         materialize(&root, "e", &[], "/data", false).unwrap();
         assert!(p.join("kept").exists());

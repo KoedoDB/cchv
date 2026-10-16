@@ -170,22 +170,35 @@ pub async fn boot_vm_sized(
 
 /// Spawn a Cloud Hypervisor process. Returns PID. Records it where only root can (`ctl.rs`). If rootless, the VM gets a user of its own
 /// first, who owns the state directory (and `console.log`, if it is there already). A failure leaves no user and no record behind.
-pub async fn spawn_ch(config: &DaemonConfig, state_dir: &Path, memory_mb: u64, vcpus: u32) -> Result<u32> {
+pub async fn spawn_ch(
+    config: &DaemonConfig,
+    state_dir: &Path,
+    memory_mb: u64,
+    vcpus: u32,
+) -> Result<u32> {
     match spawn_ch_inner(config, state_dir, memory_mb, vcpus).await {
         Ok(pid) => Ok(pid),
         Err(e) => {
             crate::rootless::release(state_dir).await;
             crate::rootless::drop_outbox(state_dir);
             crate::ctl::remove(state_dir);
+            crate::emptydir::remove_vm_dir(state_dir);
             Err(e)
         }
     }
 }
 
-async fn spawn_ch_inner(config: &DaemonConfig, state_dir: &Path, memory_mb: u64, vcpus: u32) -> Result<u32> {
+async fn spawn_ch_inner(
+    config: &DaemonConfig,
+    state_dir: &Path,
+    memory_mb: u64,
+    vcpus: u32,
+) -> Result<u32> {
     let api_socket = state_dir.join("api.sock");
 
     crate::ctl::create(state_dir)?;
+    // The directory of the VM's emptyDir disks (root's; a confined VM gets it bound into its root).
+    let disk_dir = crate::emptydir::prepare_vm_dir(state_dir)?;
     let user = crate::rootless::alloc_for(state_dir)?;
     if user.is_some() {
         crate::rootless::give(state_dir, state_dir)?;
@@ -195,7 +208,16 @@ async fn spawn_ch_inner(config: &DaemonConfig, state_dir: &Path, memory_mb: u64,
         }
     }
     if let (Some(ids), true) = (user, crate::rootless::confined()) {
-        return spawn_confined(config, state_dir, &api_socket, ids, memory_mb, vcpus).await;
+        return spawn_confined(
+            config,
+            state_dir,
+            &api_socket,
+            ids,
+            memory_mb,
+            vcpus,
+            disk_dir.as_deref(),
+        )
+        .await;
     }
 
     let mut cmd = Command::new(&config.cloud_hypervisor_binary);
@@ -218,7 +240,10 @@ async fn spawn_ch_inner(config: &DaemonConfig, state_dir: &Path, memory_mb: u64,
         cmd.pre_exec(move || {
             reset_signal_mask()?;
             // No core file: it would hold the guest's memory.
-            let no_core = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+            let no_core = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
             if libc::setrlimit(libc::RLIMIT_CORE, &no_core) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -280,6 +305,7 @@ async fn spawn_confined(
     ids: (u32, u32),
     memory_mb: u64,
     vcpus: u32,
+    disk_dir: Option<&Path>,
 ) -> Result<u32> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     use tokio::io::AsyncWriteExt;
@@ -300,7 +326,9 @@ async fn spawn_confined(
     );
     let cgroup = match crate::cgroup::create(&vm_name, &limits) {
         Ok(c) => c,
-        Err(e) if config.ch_require_cgroup => return Err(e.context("the VM's cgroup (ch_require_cgroup is set)")),
+        Err(e) if config.ch_require_cgroup => {
+            return Err(e.context("the VM's cgroup (ch_require_cgroup is set)"))
+        }
         Err(e) => {
             warn!("VM {vm_name} runs without cgroup limits: {e:#}");
             None
@@ -333,8 +361,10 @@ async fn spawn_confined(
         cgroup.as_deref(),
         config.ch_max_processes,
         &vm_name,
+        disk_dir,
     );
-    crate::confine::validate_spec(&spec).map_err(|e| anyhow::anyhow!("the confinement of {vm_name}: {e}"))?;
+    crate::confine::validate_spec(&spec)
+        .map_err(|e| anyhow::anyhow!("the confinement of {vm_name}: {e}"))?;
 
     let exe = std::env::current_exe().context("the daemon's own path (the launcher)")?;
     let log = std::fs::OpenOptions::new()
@@ -359,7 +389,10 @@ async fn spawn_confined(
     let mut child = cmd.spawn().context("spawn the launcher")?;
     let pid = child.id().context("get the launcher's pid")?;
     let wrote = async {
-        let mut stdin = child.stdin.take().context("the launcher's standard input")?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .context("the launcher's standard input")?;
         stdin.write_all(&serde_json::to_vec(&spec)?).await?;
         stdin.shutdown().await?;
         Ok::<(), anyhow::Error>(())
@@ -407,7 +440,9 @@ pub async fn wait_ch_ready(api_socket: &Path) -> Result<()> {
 
 /// What the launcher of a confined VM said (it says something only when it could not build the confinement or start Cloud Hypervisor).
 fn launcher_log_tail(api_socket: &Path) -> String {
-    let Some(state_dir) = api_socket.parent() else { return String::new() };
+    let Some(state_dir) = api_socket.parent() else {
+        return String::new();
+    };
     let log = crate::ctl::dir_of(state_dir).join("launcher.log");
     match std::fs::read(&log) {
         Ok(b) if !b.is_empty() => {
@@ -494,15 +529,34 @@ pub async fn snapshot_vm(api_socket: &Path, dest_dir: &Path) -> Result<()> {
     .await
 }
 
-/// The memory restore mode of `vm.restore`: `OnDemand` (userfaultfd, lazy) or `Copy` (the snapshot is read into guest RAM before the
-/// resume). Cloud Hypervisor has `memory_restore_mode` from v52 (the change, cloud-hypervisor#7800, came after v51.1). The daemon asks for
-/// `OnDemand`; `CLOUDHV_MEMORY_RESTORE_MODE=Copy` asks for the other. With v53.0 `Copy` leaves a restored VM at about 40 MiB resident,
-/// `OnDemand` at about 137 MiB of a 128 MiB guest (measured 2026-10-15): the opposite of what lazy loading is for.
+/// The memory restore mode of `vm.restore`: `Copy` (the snapshot is read into guest RAM before the resume) or `OnDemand` (userfaultfd,
+/// lazy). Cloud Hypervisor has `memory_restore_mode` from v52 (the change, cloud-hypervisor#7800, came after v51.1).
+///
+/// The default is `Copy`: it needs nothing from the host kernel, and with v53.0 it leaves a restored VM at about 40 MiB resident,
+/// `OnDemand` at about 137 MiB of a 128 MiB guest (measured 2026-10-15), the opposite of what lazy loading is for. `OnDemand` is opt-in
+/// with `CLOUDHV_MEMORY_RESTORE_MODE=OnDemand` and needs userfaultfd for the rootless Cloud Hypervisor (`docs/memory-restore.md`). A
+/// kernel without the syscall (`ENOSYS`, as in the CI VM) cannot do it; then the daemon uses `Copy`, once logged.
 fn memory_restore_mode() -> &'static str {
-    match std::env::var("CLOUDHV_MEMORY_RESTORE_MODE").as_deref() {
-        Ok("Copy") | Ok("copy") => "Copy",
-        _ => "OnDemand",
+    static MODE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    MODE.get_or_init(|| match std::env::var("CLOUDHV_MEMORY_RESTORE_MODE").as_deref() {
+        Ok("OnDemand") | Ok("ondemand") if userfaultfd_missing() => {
+            log::warn!("the kernel has no userfaultfd: restoring snapshots with memory_restore_mode=Copy");
+            "Copy"
+        }
+        Ok("OnDemand") | Ok("ondemand") => "OnDemand",
+        _ => "Copy",
+    })
+}
+
+/// True when the kernel does not implement the `userfaultfd` syscall. Other errors (`EPERM`) are left to Cloud Hypervisor.
+fn userfaultfd_missing() -> bool {
+    // SAFETY: a plain syscall; a returned fd is closed at once.
+    let fd = unsafe { libc::syscall(libc::SYS_userfaultfd, libc::O_CLOEXEC) };
+    if fd >= 0 {
+        unsafe { libc::close(fd as i32) };
+        return false;
     }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOSYS)
 }
 
 /// Restore a VM from a snapshot directory (see `memory_restore_mode`).
@@ -568,7 +622,7 @@ pub fn prepare_snapshot(
         image,
         crate::validate::SnapshotSize::of(config),
     )
-        .context("the snapshot's configuration is not accepted")?;
+    .context("the snapshot's configuration is not accepted")?;
 
     // Hardlink large files
     for name in &["memory-ranges", "state.json"] {
@@ -615,7 +669,10 @@ pub fn prepare_snapshot(
         }
     }
 
-    std::fs::write(work_dir.join("config.json"), serde_json::to_string_pretty(&cfg)?)?;
+    std::fs::write(
+        work_dir.join("config.json"),
+        serde_json::to_string_pretty(&cfg)?,
+    )?;
 
     Ok(work_dir)
 }
@@ -643,7 +700,11 @@ pub async fn shutdown_and_destroy(_api_socket: &Path, ch_pid: u32, state_dir: &P
     if crate::ctl::pid_alive(ch_pid) {
         crate::ctl::signal_ch(ch_pid, state_dir, libc::SIGTERM);
         if wait_gone(ch_pid, 1000).await {
-            info!("VM {} exited gracefully in {}ms", ch_pid, t0.elapsed().as_millis());
+            info!(
+                "VM {} exited gracefully in {}ms",
+                ch_pid,
+                t0.elapsed().as_millis()
+            );
         } else {
             // Fallback: force kill if CH did not exit within 1s
             warn!(
@@ -662,6 +723,7 @@ pub async fn shutdown_and_destroy(_api_socket: &Path, ch_pid: u32, state_dir: &P
     crate::rootless::release(state_dir).await;
     crate::rootless::drop_outbox(state_dir);
     crate::ctl::remove(state_dir);
+    crate::emptydir::remove_vm_dir(state_dir);
     let _ = std::fs::remove_dir_all(state_dir);
     info!("VM {} destroyed in {}ms", ch_pid, t0.elapsed().as_millis());
 }
@@ -686,7 +748,10 @@ pub async fn api_request_timeout(
 ) -> Result<()> {
     match tokio::time::timeout(timeout, api_request_inner(socket_path, method, path, body)).await {
         Ok(r) => r,
-        Err(_) => anyhow::bail!("CH API {method} {path}: no answer in {}s", timeout.as_secs()),
+        Err(_) => anyhow::bail!(
+            "CH API {method} {path}: no answer in {}s",
+            timeout.as_secs()
+        ),
     }
 }
 
@@ -807,7 +872,10 @@ pub async fn api_request_with_fds(
         // honoured), so waiting for the end of the stream waited for the read timeout, ten seconds, on every request.
         let (status, answer) = read_http_answer(&mut stream).context("read the answer")?;
         if !(200..300).contains(&status) {
-            anyhow::bail!("CH API {method} {path}: {status} {}", String::from_utf8_lossy(&answer));
+            anyhow::bail!(
+                "CH API {method} {path}: {status} {}",
+                String::from_utf8_lossy(&answer)
+            );
         }
         Ok(())
     })
@@ -871,11 +939,17 @@ fn read_http_answer<R: std::io::Read>(r: &mut R) -> std::io::Result<(u16, Vec<u8
             break i + 4;
         }
         if buf.len() > MAX_HEAD {
-            return Err(Error::new(ErrorKind::InvalidData, "the answer's head is too long"));
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "the answer's head is too long",
+            ));
         }
         let n = r.read(&mut chunk)?;
         if n == 0 {
-            return Err(Error::new(ErrorKind::UnexpectedEof, "the connection closed before the end of the answer's head"));
+            return Err(Error::new(
+                ErrorKind::UnexpectedEof,
+                "the connection closed before the end of the answer's head",
+            ));
         }
         buf.extend_from_slice(&chunk[..n]);
     };
@@ -891,11 +965,16 @@ fn read_http_answer<R: std::io::Read>(r: &mut R) -> std::io::Result<(u16, Vec<u8
         .skip(1)
         .find_map(|l| {
             let (k, v) = l.split_once(':')?;
-            k.trim().eq_ignore_ascii_case("content-length").then(|| v.trim().parse().ok())?
+            k.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then(|| v.trim().parse().ok())?
         })
         .unwrap_or(0);
     if length > MAX_BODY {
-        return Err(Error::new(ErrorKind::InvalidData, "the answer's body is too long"));
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "the answer's body is too long",
+        ));
     }
     while buf.len() < head_end + length {
         let n = r.read(&mut chunk)?;
@@ -923,7 +1002,10 @@ mod http_answer_tests {
         fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
             if self.pos >= self.data.len() {
                 // would block: the test fails by this error instead of hanging
-                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "the connection stayed open and nothing more came"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "the connection stayed open and nothing more came",
+                ));
             }
             let n = self.step.min(out.len()).min(self.data.len() - self.pos);
             out[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
@@ -933,27 +1015,59 @@ mod http_answer_tests {
     }
 
     fn open(data: &str, step: usize) -> OpenStream {
-        OpenStream { data: data.as_bytes().to_vec(), pos: 0, step }
+        OpenStream {
+            data: data.as_bytes().to_vec(),
+            pos: 0,
+            step,
+        }
     }
 
     #[test]
     fn the_answer_is_read_by_its_length_without_waiting_for_the_connection_to_close() {
-        let (st, body) = read_http_answer(&mut open("HTTP/1.1 204 No Content\r\nServer: x\r\n\r\n", 7)).unwrap();
+        let (st, body) =
+            read_http_answer(&mut open("HTTP/1.1 204 No Content\r\nServer: x\r\n\r\n", 7)).unwrap();
         assert_eq!((st, body.len()), (204, 0));
-        let (st, body) = read_http_answer(&mut open("HTTP/1.1 500 Internal Server Error\r\ncontent-length: 11\r\n\r\nhello world", 3)).unwrap();
+        let (st, body) = read_http_answer(&mut open(
+            "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 11\r\n\r\nhello world",
+            3,
+        ))
+        .unwrap();
         assert_eq!(st, 500);
         assert_eq!(body, b"hello world");
-        let (st, body) = read_http_answer(&mut open("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}", 1000)).unwrap();
+        let (st, body) = read_http_answer(&mut open(
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}",
+            1000,
+        ))
+        .unwrap();
         assert_eq!((st, body.as_slice()), (200, &b"{}"[..]));
     }
 
     #[test]
     fn an_odd_answer_is_an_error_not_a_hang() {
-        assert!(read_http_answer(&mut open("", 10)).is_err(), "closed with nothing");
-        assert!(read_http_answer(&mut open("HTTP/1.1 200 OK\r\nContent-Le", 10)).is_err(), "no end of head");
-        assert!(read_http_answer(&mut open("garbage\r\n\r\n", 10)).is_err(), "no status");
-        assert!(read_http_answer(&mut open("HTTP/1.1 200 OK\r\nContent-Length: 99999999\r\n\r\n", 10)).is_err(), "a body that is too long");
+        assert!(
+            read_http_answer(&mut open("", 10)).is_err(),
+            "closed with nothing"
+        );
+        assert!(
+            read_http_answer(&mut open("HTTP/1.1 200 OK\r\nContent-Le", 10)).is_err(),
+            "no end of head"
+        );
+        assert!(
+            read_http_answer(&mut open("garbage\r\n\r\n", 10)).is_err(),
+            "no status"
+        );
+        assert!(
+            read_http_answer(&mut open(
+                "HTTP/1.1 200 OK\r\nContent-Length: 99999999\r\n\r\n",
+                10
+            ))
+            .is_err(),
+            "a body that is too long"
+        );
         let long = format!("HTTP/1.1 200 OK\r\n{}", "X: y\r\n".repeat(20000));
-        assert!(read_http_answer(&mut open(&long, 4096)).is_err(), "a head that is too long");
+        assert!(
+            read_http_answer(&mut open(&long, 4096)).is_err(),
+            "a head that is too long"
+        );
     }
 }

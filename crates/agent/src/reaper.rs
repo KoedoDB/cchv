@@ -93,7 +93,12 @@ fn read_procs() -> Vec<Proc> {
         return Vec::new();
     };
     dir.filter_map(|e| e.ok())
-        .filter(|e| e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit()))
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .bytes()
+                .all(|b| b.is_ascii_digit())
+        })
         .filter_map(|e| std::fs::read_to_string(e.path().join("stat")).ok())
         .filter_map(|l| parse_stat(&l))
         .collect()
@@ -137,7 +142,12 @@ mod tests {
         let line = "123 (my (odd) name) Z 1 123 123 0 -1 4210692 0 0 0 0 0 0 0 0 20 0 1 0 98765 0 0 18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0";
         assert_eq!(
             parse_stat(line),
-            Some(Proc { pid: 123, state: 'Z', ppid: 1, start: 98765 })
+            Some(Proc {
+                pid: 123,
+                state: 'Z',
+                ppid: 1,
+                start: 98765
+            })
         );
         assert_eq!(parse_stat("garbage"), None);
         assert_eq!(parse_stat("1 (a) S"), None);
@@ -145,14 +155,24 @@ mod tests {
 
     #[test]
     fn only_zombies_seen_twice_that_are_ours_and_not_tracked_are_reaped() {
-        let z = |pid, ppid, start| Proc { pid, state: 'Z', ppid, start };
+        let z = |pid, ppid, start| Proc {
+            pid,
+            state: 'Z',
+            ppid,
+            start,
+        };
         let procs = vec![
-            z(10, 1, 100),                                         // new: remember, do not reap yet
-            z(11, 1, 100),                                         // seen before: reap
-            z(12, 1, 100),                                         // seen before but tracked (the agent waits for it)
-            z(13, 99, 100),                                        // someone else's child
-            z(14, 1, 200),                                         // same pid as before, but a different process
-            Proc { pid: 15, state: 'S', ppid: 1, start: 100 },     // alive
+            z(10, 1, 100),  // new: remember, do not reap yet
+            z(11, 1, 100),  // seen before: reap
+            z(12, 1, 100),  // seen before but tracked (the agent waits for it)
+            z(13, 99, 100), // someone else's child
+            z(14, 1, 200),  // same pid as before, but a different process
+            Proc {
+                pid: 15,
+                state: 'S',
+                ppid: 1,
+                start: 100,
+            }, // alive
         ];
         let tracked: HashSet<u32> = [12].into();
         let seen: HashSet<(u32, u64)> = [(11, 100), (12, 100), (13, 100), (14, 100)].into();

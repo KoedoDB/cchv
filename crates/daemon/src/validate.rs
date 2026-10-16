@@ -31,13 +31,19 @@ pub fn check_id(what: &str, s: &str) -> Result<()> {
 /// A requested size: within the limits of the configuration, and one whose byte count fits. 0 means "the default".
 pub fn check_size(config: &DaemonConfig, memory_mb: u64, vcpus: u64) -> Result<()> {
     if memory_mb > config.max_memory_mb {
-        anyhow::bail!("a VM of {memory_mb} MiB is more than max_memory_mb ({})", config.max_memory_mb);
+        anyhow::bail!(
+            "a VM of {memory_mb} MiB is more than max_memory_mb ({})",
+            config.max_memory_mb
+        );
     }
     if memory_mb.checked_mul(1024 * 1024).is_none() {
         anyhow::bail!("{memory_mb} MiB does not fit");
     }
     if vcpus > config.max_vcpus as u64 {
-        anyhow::bail!("{vcpus} vCPUs is more than max_vcpus ({})", config.max_vcpus);
+        anyhow::bail!(
+            "{vcpus} vCPUs is more than max_vcpus ({})",
+            config.max_vcpus
+        );
     }
     Ok(())
 }
@@ -45,14 +51,20 @@ pub fn check_size(config: &DaemonConfig, memory_mb: u64, vcpus: u64) -> Result<(
 /// Whether `path` names a network namespace the daemon may enter: `/var/run/netns/<name>`, `/run/netns/<name>` (where the runtime
 /// puts a pod's) or `/proc/<pid>/ns/net`. Lexical only; `netns::open_checked` looks at what the path really is.
 pub fn netns_path_allowed(path: &str) -> bool {
-    netns_path_allowed_with(path, ALLOW_PROC_NETNS.load(std::sync::atomic::Ordering::Relaxed))
+    netns_path_allowed_with(
+        path,
+        ALLOW_PROC_NETNS.load(std::sync::atomic::Ordering::Relaxed),
+    )
 }
 
 /// Set once at start from the configuration (`allow_proc_netns`).
 static ALLOW_PROC_NETNS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn init(config: &DaemonConfig) {
-    ALLOW_PROC_NETNS.store(config.allow_proc_netns, std::sync::atomic::Ordering::Relaxed);
+    ALLOW_PROC_NETNS.store(
+        config.allow_proc_netns,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 pub(crate) fn netns_path_allowed_with(path: &str, allow_proc: bool) -> bool {
@@ -60,7 +72,10 @@ pub(crate) fn netns_path_allowed_with(path: &str, allow_proc: bool) -> bool {
         return false;
     }
     let p = Path::new(path);
-    if !p.is_absolute() || p.components().any(|c| matches!(c, Component::ParentDir | Component::CurDir)) {
+    if !p.is_absolute()
+        || p.components()
+            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
         return false;
     }
     for root in ["/var/run/netns", "/run/netns"] {
@@ -86,7 +101,10 @@ pub fn erofs_path_allowed(path: &str, root: &str) -> bool {
         return false;
     }
     let p = Path::new(path);
-    if !p.is_absolute() || p.components().any(|c| matches!(c, Component::ParentDir | Component::CurDir)) {
+    if !p.is_absolute()
+        || p.components()
+            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
         return false;
     }
     match p.strip_prefix(root) {
@@ -107,7 +125,10 @@ pub fn erofs_path_allowed(path: &str, root: &str) -> bool {
 /// An image path from a request: lexically inside the images' directory, and (opened without following a link) a regular file.
 pub fn check_erofs_path(config: &DaemonConfig, path: &str) -> Result<()> {
     if !erofs_path_allowed(path, &config.erofs_cache_dir) {
-        anyhow::bail!("erofs_path is not an image inside {}", config.erofs_cache_dir);
+        anyhow::bail!(
+            "erofs_path is not an image inside {}",
+            config.erofs_cache_dir
+        );
     }
     let fd = fsutil::open_nosymlinks(Path::new(path), libc::O_RDONLY | libc::O_NONBLOCK)
         .with_context(|| format!("erofs_path {path}"))?;
@@ -132,15 +153,57 @@ fn unset(v: Option<&serde_json::Value>) -> bool {
 /// that took it, and a guest that escaped can have changed it; a key not listed means a Cloud Hypervisor newer than this check, and
 /// the snapshot is not used (the pod gets a VM from the pool).
 const KNOWN_KEYS: &[&str] = &[
-    "cpus", "memory", "payload", "rate_limit_groups", "disks", "net", "rng", "balloon", "generic_vhost_user", "fs", "pmem", "serial",
-    "console", "debug_console", "devices", "user_devices", "vdpa", "vsock", "pvmemcontrol", "pvpanic", "iommu", "numa", "watchdog",
-    "rtc", "gdb", "pci_segments", "platform", "tpm", "preserved_fds", "landlock_enable", "landlock_rules", "ivshmem",
+    "cpus",
+    "memory",
+    "payload",
+    "rate_limit_groups",
+    "disks",
+    "net",
+    "rng",
+    "balloon",
+    "generic_vhost_user",
+    "fs",
+    "pmem",
+    "serial",
+    "console",
+    "debug_console",
+    "devices",
+    "user_devices",
+    "vdpa",
+    "vsock",
+    "pvmemcontrol",
+    "pvpanic",
+    "iommu",
+    "numa",
+    "watchdog",
+    "rtc",
+    "gdb",
+    "pci_segments",
+    "platform",
+    "tpm",
+    "preserved_fds",
+    "landlock_enable",
+    "landlock_rules",
+    "ivshmem",
 ];
 
 /// Keys that must be empty: each gives a guest access to something of the host (files shared in, host devices, pass-through).
 const MUST_BE_UNSET: &[&str] = &[
-    "fs", "pmem", "devices", "user_devices", "vdpa", "generic_vhost_user", "tpm", "numa", "iommu", "preserved_fds", "landlock_rules",
-    "net", "gdb", "ivshmem", "pvmemcontrol",
+    "fs",
+    "pmem",
+    "devices",
+    "user_devices",
+    "vdpa",
+    "generic_vhost_user",
+    "tpm",
+    "numa",
+    "iommu",
+    "preserved_fds",
+    "landlock_rules",
+    "net",
+    "gdb",
+    "ivshmem",
+    "pvmemcontrol",
 ];
 
 /// The size every warm snapshot has: the pool's (a warm VM is made from a pool VM, and a pod with other limits gets a VM of its own size
@@ -170,7 +233,9 @@ pub fn validate_snapshot_config(
     extra_disk: Option<&str>,
     size: SnapshotSize,
 ) -> Result<()> {
-    let obj = cfg.as_object().context("the configuration is not an object")?;
+    let obj = cfg
+        .as_object()
+        .context("the configuration is not an object")?;
     for k in obj.keys() {
         if !KNOWN_KEYS.contains(&k.as_str()) {
             anyhow::bail!("unknown key {k:?}");
@@ -183,22 +248,43 @@ pub fn validate_snapshot_config(
     }
 
     // payload: our kernel and nothing else to boot from
-    let payload = obj.get("payload").and_then(|p| p.as_object()).context("no payload")?;
+    let payload = obj
+        .get("payload")
+        .and_then(|p| p.as_object())
+        .context("no payload")?;
     if payload.get("kernel").and_then(|k| k.as_str()) != Some(kernel) {
         anyhow::bail!("the kernel is not the daemon's");
     }
-    for k in ["initramfs", "firmware", "igvm", "host_data", "fw_cfg_config"] {
+    for k in [
+        "initramfs",
+        "firmware",
+        "igvm",
+        "host_data",
+        "fw_cfg_config",
+    ] {
         if !unset(payload.get(k)) {
             anyhow::bail!("payload.{k} is set");
         }
     }
 
     // cpus: exactly the pool's count, and no topology, affinity or features to bend it
-    let cpus = obj.get("cpus").and_then(|c| c.as_object()).context("no cpus")?;
-    let boot = cpus.get("boot_vcpus").and_then(|v| v.as_u64()).context("no cpus.boot_vcpus")?;
-    let max = cpus.get("max_vcpus").and_then(|v| v.as_u64()).unwrap_or(boot);
+    let cpus = obj
+        .get("cpus")
+        .and_then(|c| c.as_object())
+        .context("no cpus")?;
+    let boot = cpus
+        .get("boot_vcpus")
+        .and_then(|v| v.as_u64())
+        .context("no cpus.boot_vcpus")?;
+    let max = cpus
+        .get("max_vcpus")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(boot);
     if boot != size.vcpus as u64 || max != size.vcpus as u64 {
-        anyhow::bail!("cpus ({boot} booted, {max} at most) are not the {} of the pool", size.vcpus);
+        anyhow::bail!(
+            "cpus ({boot} booted, {max} at most) are not the {} of the pool",
+            size.vcpus
+        );
     }
     for (k, v) in cpus {
         let ok = match k.as_str() {
@@ -206,7 +292,10 @@ pub fn validate_snapshot_config(
             // what Cloud Hypervisor writes for a default VM: the host's CPU model, core scheduling by VM, no CPU features switched on
             "core_scheduling" => matches!(v.as_str(), Some("Vm" | "Vcpu" | "Off")),
             "profile" => v.as_str() == Some("Host"),
-            "features" => v.as_object().map(|o| o.values().all(|x| x == &serde_json::Value::Bool(false))).unwrap_or(unset(Some(v))),
+            "features" => v
+                .as_object()
+                .map(|o| o.values().all(|x| x == &serde_json::Value::Bool(false)))
+                .unwrap_or(unset(Some(v))),
             _ => unset(Some(v)),
         };
         if !ok {
@@ -215,11 +304,24 @@ pub fn validate_snapshot_config(
     }
 
     // memory: guest RAM, not a file of the host, and as much as the pool's VMs have
-    let memory = obj.get("memory").and_then(|m| m.as_object()).context("no memory")?;
+    let memory = obj
+        .get("memory")
+        .and_then(|m| m.as_object())
+        .context("no memory")?;
     if memory.get("size").and_then(|v| v.as_u64()) != Some(size.memory_bytes) {
-        anyhow::bail!("memory.size is not the {} bytes of the pool", size.memory_bytes);
+        anyhow::bail!(
+            "memory.size is not the {} bytes of the pool",
+            size.memory_bytes
+        );
     }
-    for k in ["hotplug_size", "hotplugged_size", "hugepages", "hugepage_size", "mergeable", "prefault"] {
+    for k in [
+        "hotplug_size",
+        "hotplugged_size",
+        "hugepages",
+        "hugepage_size",
+        "mergeable",
+        "prefault",
+    ] {
         if !unset(memory.get(k)) {
             anyhow::bail!("memory.{k} is set");
         }
@@ -234,7 +336,12 @@ pub fn validate_snapshot_config(
     }
 
     // disks: the rootfs of the platform and the pod's image, read-only
-    for d in obj.get("disks").and_then(|d| d.as_array()).into_iter().flatten() {
+    for d in obj
+        .get("disks")
+        .and_then(|d| d.as_array())
+        .into_iter()
+        .flatten()
+    {
         let path = d.get("path").and_then(|p| p.as_str()).unwrap_or("");
         if path != rootfs && Some(path) != extra_disk {
             anyhow::bail!("disk {path:?} is not one the VM may have");
@@ -252,7 +359,10 @@ pub fn validate_snapshot_config(
     }
 
     // consoles
-    for (key, modes) in [("serial", &["Off", "Null", "File"][..]), ("console", &["Off", "Null"][..])] {
+    for (key, modes) in [
+        ("serial", &["Off", "Null", "File"][..]),
+        ("console", &["Off", "Null"][..]),
+    ] {
         if let Some(c) = obj.get(key).filter(|c| !c.is_null()) {
             let mode = c.get("mode").and_then(|m| m.as_str()).unwrap_or("Off");
             if !modes.contains(&mode) {
@@ -288,10 +398,30 @@ mod tests {
 
     #[test]
     fn identifiers_are_plain_words() {
-        for ok in ["a", "pool-1-4", "warm-0123abcd-7", "shadow_ctr", &"a".repeat(64)] {
+        for ok in [
+            "a",
+            "pool-1-4",
+            "warm-0123abcd-7",
+            "shadow_ctr",
+            &"a".repeat(64),
+        ] {
             assert!(is_id(ok), "{ok}");
         }
-        for bad in ["", "..", "../x", "/var", "a/b", "a.b", "a b", "a\nb", "a\0b", "é", "コンテナ", &"a".repeat(65), "-"] {
+        for bad in [
+            "",
+            "..",
+            "../x",
+            "/var",
+            "a/b",
+            "a.b",
+            "a b",
+            "a\nb",
+            "a\0b",
+            "é",
+            "コンテナ",
+            &"a".repeat(65),
+            "-",
+        ] {
             // "-" is a legal character; only the others are tested as bad
             if bad == "-" {
                 assert!(is_id(bad));
@@ -314,7 +444,10 @@ mod tests {
         assert!(check_size(&c, u64::MAX, 1).is_err());
         let mut big = config();
         big.max_memory_mb = u64::MAX;
-        assert!(check_size(&big, u64::MAX, 1).is_err(), "the byte count overflows");
+        assert!(
+            check_size(&big, u64::MAX, 1).is_err(),
+            "the byte count overflows"
+        );
     }
 
     #[test]
@@ -322,7 +455,10 @@ mod tests {
         for ok in ["/var/run/netns/cni-1234-abcd", "/run/netns/x"] {
             assert!(netns_path_allowed_with(ok, false), "{ok}");
         }
-        assert!(!netns_path_allowed_with("/proc/4242/ns/net", false), "a process's namespace only when the configuration allows it");
+        assert!(
+            !netns_path_allowed_with("/proc/4242/ns/net", false),
+            "a process's namespace only when the configuration allows it"
+        );
         assert!(netns_path_allowed_with("/proc/4242/ns/net", true));
         for bad in [
             "",
@@ -347,7 +483,10 @@ mod tests {
     #[test]
     fn an_image_is_a_plain_erofs_file_in_the_cache() {
         let root = "/run/cloudhv/erofs-cache";
-        assert!(erofs_path_allowed("/run/cloudhv/erofs-cache/0123abcd.erofs", root));
+        assert!(erofs_path_allowed(
+            "/run/cloudhv/erofs-cache/0123abcd.erofs",
+            root
+        ));
         for bad in [
             "/run/cloudhv/erofs-cache/0123abcd",
             "/run/cloudhv/erofs-cache/.erofs",
@@ -363,7 +502,10 @@ mod tests {
         }
     }
 
-    const SIZE: SnapshotSize = SnapshotSize { memory_bytes: 134217728, vcpus: 1 };
+    const SIZE: SnapshotSize = SnapshotSize {
+        memory_bytes: 134217728,
+        vcpus: 1,
+    };
 
     fn good_config() -> serde_json::Value {
         json!({
@@ -386,25 +528,77 @@ mod tests {
 
     #[test]
     fn the_configuration_of_a_good_snapshot_passes() {
-        assert!(validate_snapshot_config(&good_config(), "/k", "/r", Some("/cache/x.erofs"), SIZE).is_ok());
-        assert!(validate_snapshot_config(&good_config(), "/k", "/r", Some("/cache/y.erofs"), SIZE).is_err(), "another image");
+        assert!(
+            validate_snapshot_config(&good_config(), "/k", "/r", Some("/cache/x.erofs"), SIZE)
+                .is_ok()
+        );
+        assert!(
+            validate_snapshot_config(&good_config(), "/k", "/r", Some("/cache/y.erofs"), SIZE)
+                .is_err(),
+            "another image"
+        );
     }
 
     #[test]
     fn a_snapshot_that_asks_for_more_than_the_pool_has_is_refused() {
         let cases: Vec<(&str, Box<dyn Fn(&mut serde_json::Value)>)> = vec![
-            ("more memory", Box::new(|c| c["memory"]["size"] = json!(1u64 << 40))),
-            ("less memory", Box::new(|c| c["memory"]["size"] = json!(1u64 << 20))),
-            ("no memory size", Box::new(|c| c["memory"].as_object_mut().unwrap().remove("size").map(|_| ()).unwrap_or(()))),
-            ("hot-pluggable memory", Box::new(|c| c["memory"]["hotplug_size"] = json!(1u64 << 40))),
-            ("huge pages", Box::new(|c| c["memory"]["hugepages"] = json!(true))),
-            ("more vcpus", Box::new(|c| c["cpus"]["boot_vcpus"] = json!(64))),
-            ("room for more vcpus", Box::new(|c| c["cpus"]["max_vcpus"] = json!(240))),
-            ("a topology", Box::new(|c| c["cpus"]["topology"] = json!({"threads_per_core": 2}))),
-            ("a CPU feature switched on", Box::new(|c| c["cpus"]["features"] = json!({"amx": true}))),
-            ("nested virtualization", Box::new(|c| c["cpus"]["nested"] = json!(true))),
-            ("another CPU profile", Box::new(|c| c["cpus"]["profile"] = json!("Sapphire"))),
-            ("no cpus", Box::new(|c| { c.as_object_mut().unwrap().remove("cpus"); })),
+            (
+                "more memory",
+                Box::new(|c| c["memory"]["size"] = json!(1u64 << 40)),
+            ),
+            (
+                "less memory",
+                Box::new(|c| c["memory"]["size"] = json!(1u64 << 20)),
+            ),
+            (
+                "no memory size",
+                Box::new(|c| {
+                    c["memory"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("size")
+                        .map(|_| ())
+                        .unwrap_or(())
+                }),
+            ),
+            (
+                "hot-pluggable memory",
+                Box::new(|c| c["memory"]["hotplug_size"] = json!(1u64 << 40)),
+            ),
+            (
+                "huge pages",
+                Box::new(|c| c["memory"]["hugepages"] = json!(true)),
+            ),
+            (
+                "more vcpus",
+                Box::new(|c| c["cpus"]["boot_vcpus"] = json!(64)),
+            ),
+            (
+                "room for more vcpus",
+                Box::new(|c| c["cpus"]["max_vcpus"] = json!(240)),
+            ),
+            (
+                "a topology",
+                Box::new(|c| c["cpus"]["topology"] = json!({"threads_per_core": 2})),
+            ),
+            (
+                "a CPU feature switched on",
+                Box::new(|c| c["cpus"]["features"] = json!({"amx": true})),
+            ),
+            (
+                "nested virtualization",
+                Box::new(|c| c["cpus"]["nested"] = json!(true)),
+            ),
+            (
+                "another CPU profile",
+                Box::new(|c| c["cpus"]["profile"] = json!("Sapphire")),
+            ),
+            (
+                "no cpus",
+                Box::new(|c| {
+                    c.as_object_mut().unwrap().remove("cpus");
+                }),
+            ),
         ];
         for (what, change) in cases {
             let mut c = good_config();
@@ -419,27 +613,90 @@ mod tests {
     #[test]
     fn a_snapshot_that_reaches_for_the_host_is_refused() {
         let cases: Vec<(&str, Box<dyn Fn(&mut serde_json::Value)>)> = vec![
-            ("a shared directory", Box::new(|c| c["fs"] = json!([{"tag": "h", "socket": "/x"}]))),
-            ("a host device", Box::new(|c| c["devices"] = json!([{"path": "/sys/bus/pci/devices/0000:01:00.0"}]))),
-            ("user devices", Box::new(|c| c["user_devices"] = json!([{"socket": "/x"}]))),
-            ("pmem", Box::new(|c| c["pmem"] = json!([{"file": "/etc/shadow"}]))),
-            ("a network device", Box::new(|c| c["net"] = json!([{"tap": "tap0"}]))),
-            ("another disk", Box::new(|c| c["disks"][1]["path"] = json!("/etc/shadow"))),
-            ("a writable disk", Box::new(|c| c["disks"][1]["readonly"] = json!(false))),
-            ("a vhost-user disk", Box::new(|c| c["disks"][1]["vhost_user"] = json!(true))),
-            ("another kernel", Box::new(|c| c["payload"]["kernel"] = json!("/boot/vmlinuz"))),
-            ("an initramfs", Box::new(|c| c["payload"]["initramfs"] = json!("/x"))),
-            ("memory zones", Box::new(|c| c["memory"]["zones"] = json!([{"id": "z", "file": "/dev/mem"}]))),
-            ("a serial socket", Box::new(|c| c["serial"] = json!({"mode": "Socket", "socket": "/x"}))),
-            ("a tty console", Box::new(|c| c["console"] = json!({"mode": "Tty"}))),
-            ("a debug console", Box::new(|c| c["debug_console"] = json!({"mode": "File", "file": "/x"}))),
-            ("another entropy source", Box::new(|c| c["rng"]["src"] = json!("/dev/zero"))),
-            ("an unknown key", Box::new(|c| c["something_new"] = json!(1))),
-            ("preserved fds", Box::new(|c| c["preserved_fds"] = json!([3]))),
+            (
+                "a shared directory",
+                Box::new(|c| c["fs"] = json!([{"tag": "h", "socket": "/x"}])),
+            ),
+            (
+                "a host device",
+                Box::new(|c| c["devices"] = json!([{"path": "/sys/bus/pci/devices/0000:01:00.0"}])),
+            ),
+            (
+                "user devices",
+                Box::new(|c| c["user_devices"] = json!([{"socket": "/x"}])),
+            ),
+            (
+                "pmem",
+                Box::new(|c| c["pmem"] = json!([{"file": "/etc/shadow"}])),
+            ),
+            (
+                "a network device",
+                Box::new(|c| c["net"] = json!([{"tap": "tap0"}])),
+            ),
+            (
+                "another disk",
+                Box::new(|c| c["disks"][1]["path"] = json!("/etc/shadow")),
+            ),
+            (
+                "a writable disk",
+                Box::new(|c| c["disks"][1]["readonly"] = json!(false)),
+            ),
+            (
+                "a vhost-user disk",
+                Box::new(|c| c["disks"][1]["vhost_user"] = json!(true)),
+            ),
+            (
+                "another kernel",
+                Box::new(|c| c["payload"]["kernel"] = json!("/boot/vmlinuz")),
+            ),
+            (
+                "an initramfs",
+                Box::new(|c| c["payload"]["initramfs"] = json!("/x")),
+            ),
+            (
+                "memory zones",
+                Box::new(|c| c["memory"]["zones"] = json!([{"id": "z", "file": "/dev/mem"}])),
+            ),
+            (
+                "a serial socket",
+                Box::new(|c| c["serial"] = json!({"mode": "Socket", "socket": "/x"})),
+            ),
+            (
+                "a tty console",
+                Box::new(|c| c["console"] = json!({"mode": "Tty"})),
+            ),
+            (
+                "a debug console",
+                Box::new(|c| c["debug_console"] = json!({"mode": "File", "file": "/x"})),
+            ),
+            (
+                "another entropy source",
+                Box::new(|c| c["rng"]["src"] = json!("/dev/zero")),
+            ),
+            (
+                "an unknown key",
+                Box::new(|c| c["something_new"] = json!(1)),
+            ),
+            (
+                "preserved fds",
+                Box::new(|c| c["preserved_fds"] = json!([3])),
+            ),
             ("a gdb stub", Box::new(|c| c["gdb"] = json!(true))),
-            ("shared memory with the host", Box::new(|c| c["ivshmem"] = json!({"path": "/dev/shm/x", "size": 1}))),
-            ("fw_cfg files", Box::new(|c| c["payload"]["fw_cfg_config"] = json!({"items": [{"name": "x", "file": "/etc/shadow"}]}))),
-            ("backing files", Box::new(|c| c["disks"][1]["backing_files"] = json!(true))),
+            (
+                "shared memory with the host",
+                Box::new(|c| c["ivshmem"] = json!({"path": "/dev/shm/x", "size": 1})),
+            ),
+            (
+                "fw_cfg files",
+                Box::new(|c| {
+                    c["payload"]["fw_cfg_config"] =
+                        json!({"items": [{"name": "x", "file": "/etc/shadow"}]})
+                }),
+            ),
+            (
+                "backing files",
+                Box::new(|c| c["disks"][1]["backing_files"] = json!(true)),
+            ),
         ];
         for (what, mutate) in cases {
             let mut c = good_config();

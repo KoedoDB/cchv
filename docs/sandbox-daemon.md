@@ -828,10 +828,23 @@ The daemon is root and its socket is the one door:
 | `ch_extra_ro_paths` | `[]` | paths shown read-only in every confined root |
 | `serial_console` | `true`, `false` with `ch_rootless` | write the guest's serial console to `console.log` in the VM's directory (in memory, no size limit) |
 | `erofs_cache_dir` | `/run/cloudhv/erofs-cache` | where the shim keeps the images; must be the shim's `EROFS_CACHE_DIR` |
+| `emptydir_dir` | `/var/lib/cloudhv/emptydir` | where the disks of emptyDirs are made (the host's disk, not `/run`); empty turns them off and a request for one is refused. See "emptyDir disks" |
+| `emptydir_max_mib`, `emptydir_reserve_mib` | `16384`, `2048` | the largest disk a request may ask for; a disk is refused when the free space of `emptydir_dir` is below `size/4 + reserve` |
+| `mke2fs_path` | `/usr/sbin/mke2fs` | makes the file system on the file (falls back to `/sbin`, `/usr/bin`, `/usr/local/bin`; it must be e2fsprogs', not BusyBox's, which makes ext2 only) |
 | `max_memory_mb`, `max_vcpus` | `65536`, `64` | the most a request may ask for |
 | `max_active_vms` | `512` | VMs handed to pods |
 | `max_shadow_vms` | `2` | shadow VMs (warm-up) at once; a shadow that failed for an image is not retried for 5 minutes |
 | `max_request_bytes` | `8388608` | the longest request line (volumes of a pod are in it; the agent's own limit is 4 MiB) |
 | `max_connections` | `64` | |
+
+### emptyDir disks
+
+The request's `volumes` may carry `"disk": {"id": "<32 hex>", "size_mb": N}` (the shim sends it for an emptyDir on the host's disk; see `docs/shim.md`). `AcquireSandbox` and `AddContainer` check it first (`emptydir::parse`: the id is 32 lower-case hex characters, the size between 16 MiB and `emptydir_max_mib`, at most 16 disks, a repeated id is one disk, the feature must be on; anything else is `bad request (volumes)`), and then, before the container runs:
+
+1. The VM's directory `<emptydir_dir>/<vm name>/` was made when its Cloud Hypervisor was spawned: root's, 0711, empty. A confined Cloud Hypervisor has *that directory only* bound into its root, writable (never the parent, so it sees no other VM's disks). It can write the file it is given and cannot create, rename or remove a name in it, so there is no race for a name between root and the VM.
+2. For a disk the VM does not have yet (a file `<id>.img` in the directory), root checks the free space, creates the file (`O_EXCL | O_NOFOLLOW`, 0600) and sets its size (sparse), runs `mke2fs -t ext4 -O ^has_journal -m 0 -E lazy_itable_init=1,nodiscard` on it (60 s limit, empty environment), and only then gives it to the VM's user (`rootless::give`). The host never mounts it. The disk is `vm.add-disk` with `"serial": "ed" + the first 16 hex of the id` (virtio-blk serials are 20 bytes), `readonly: false`.
+3. The `VolumeMount` goes to the agent as a `BLOCK` volume (`fs_type` `ext4`, the `serial`, `source` `/run/cloudhv-vols/<id>`). A disk already in the VM is not made again, whatever size a second container asks for (the first wins).
+
+The directory is removed when the VM is destroyed (`shutdown_and_destroy`, and a failed spawn), and everything in `emptydir_dir` is removed when the daemon starts (the VMs of an earlier daemon are stopped by then). Limits to know: the space of disks already made is not reserved (a host whose disks are all written fills up; the guest then gets I/O errors on that disk, and the page cache of the file is charged to the VM's cgroup), the disk is not rate limited, and `emptydir_dir` should be on a disk of its own or at least not the one `/var/lib/kubelet` and the images are on if the pods are not trusted.
 
 The daemon keeps its records in `<state_dir>/.ctl/` (0700 root), the outboxes of confined VMs in `<state_dir>/.out/` (0700 root; each VM's own is its user's), and the state directory is made 0711.
