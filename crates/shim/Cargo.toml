@@ -13,10 +13,10 @@ path = "src/main.rs"
 cloudhv-common = { workspace = true }
 
 # containerd task service for a shim whose containers run in a VM: our cut-down shimkit (a start from containerd/runwasi), pinned by commit
-containerd-shimkit = { git = "https://github.com/KoedoDB/containerd-shimkit.git", rev = "e8f7dadb94959bad77b1a6d4cc090ca042d85559" }
+containerd-shimkit = { git = "https://github.com/KoedoDB/containerd-shimkit.git", rev = "587d8b37ae0e4e26701a3717e10fb0309a4eb76f" } # tag v0.1.2-koedodb.1
 
 # containerd gRPC client (for image digest resolution)
-containerd-client = "0.8.0"
+containerd-client = "0.9.0"
 
 # Async runtime
 tokio = { workspace = true }
@@ -40,14 +40,14 @@ libc = { workspace = true }
 chrono = { workspace = true }
 
 # Encoding
-base64 = "0.22"
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 
 # Hashing (the names of volumes in the guest, the keys of the erofs cache)
-sha2 = "0.10"
+sha2 = "0.11"
 
 [dev-dependencies]
 tempfile = "3"
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
 
 [[bench]]
 name = "vm_overhead"

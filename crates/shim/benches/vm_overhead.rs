@@ -9,7 +9,8 @@
 //! For full VM lifecycle benchmarks (requires KVM + root), use
 //! the integration test suite with timing output.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
+use std::hint::black_box;
 
 use cloudhv_common::types::*;
 
