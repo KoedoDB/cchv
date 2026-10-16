@@ -173,7 +173,7 @@ pub enum ContainerState {
     Stopped,
 }
 
-/// The most output the agent keeps for each stream of a container that nobody reads. The guest has little memory (128 MiB), and
+/// The most output the agent keeps for each stream of a container that nobody reads. The guest has little memory (320 MiB by default), and
 /// a container that prints without end would otherwise fill it. When the buffer is full the oldest bytes go (and are counted).
 pub const MAX_LOG_BUFFER: usize = 1024 * 1024;
 

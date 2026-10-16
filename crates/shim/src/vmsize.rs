@@ -1,7 +1,7 @@
 //! How big a pod's VM is: from the limits of the pod, which containerd puts on the sandbox's OCI spec as annotations
 //! (`io.kubernetes.cri.sandbox-memory` in bytes, `io.kubernetes.cri.sandbox-cpu-quota` and `-period` in microseconds).
 //!
-//! Until this existed every VM had the daemon's default size (128 MiB, 1 vCPU) whatever the pod asked for: a pod with a limit
+//! Until this existed every VM had the daemon's default size (320 MiB, 1 vCPU) whatever the pod asked for: a pod with a limit
 //! of 512 MiB and 2 CPUs saw 112 MB and one CPU.
 
 /// What the guest needs besides the pod's containers: its kernel, the agent, crun, the page cache of the rootfs. Added to the pod's

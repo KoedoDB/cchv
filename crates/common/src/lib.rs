@@ -15,7 +15,7 @@ pub const AGENT_STARTUP_TIMEOUT_SECS: u64 = 10;
 pub const DEFAULT_VCPUS: u32 = 1;
 
 /// Default guest memory in MiB.
-pub const DEFAULT_MEMORY_MB: u64 = 128;
+pub const DEFAULT_MEMORY_MB: u64 = 320;
 
 /// Runtime state directory on the host.
 pub const RUNTIME_STATE_DIR: &str = "/run/cloudhv";

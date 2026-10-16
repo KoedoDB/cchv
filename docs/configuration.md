@@ -12,7 +12,7 @@ The shim loads its configuration from `/opt/cloudhv/config.json` at startup.
 | `kernel_args` | `console=hvc0 root=/dev/vda rw quiet init=/init net.ifnames=0` | Guest kernel cmdline |
 | `default_vcpus` | `1` | Boot vCPUs per VM |
 | `max_default_vcpus` | `0` | Max vCPUs when no CPU limit (0 = host CPU count) |
-| `default_memory_mb` | `128` | Boot memory in MiB |
+| `default_memory_mb` | `320` | Boot memory in MiB |
 | `max_containers_per_vm` | `5` | Max containers sharing a VM |
 | `hotplug_memory_mb` | `0` | Hotpluggable memory (0 = disabled) |
 | `hotplug_method` | `acpi` | `acpi` or `virtio-mem` |
@@ -28,7 +28,7 @@ The shim loads its configuration from `/opt/cloudhv/config.json` at startup.
   "rootfs_path": "/opt/cloudhv/rootfs.erofs",
   "kernel_args": "console=ttyS0 root=/dev/vda rw init=/init net.ifnames=0",
   "default_vcpus": 1,
-  "default_memory_mb": 128,
+  "default_memory_mb": 320,
   "max_containers_per_vm": 5,
   "tpm_enabled": false,
   "daemon_socket": "/run/cloudhv/daemon.sock"
@@ -54,7 +54,7 @@ The sandbox daemon loads its configuration from `/opt/cloudhv/daemon.json`.
 | `pool_size` | `3` | Target number of pre-booted idle VMs |
 | `max_pool_size` | `10` | Hard cap on idle pool VMs |
 | `default_vcpus` | `1` | vCPUs per pool VM |
-| `default_memory_mb` | `128` | Memory per pool VM in MiB |
+| `default_memory_mb` | `320` | Memory per pool VM in MiB |
 | `cloud_hypervisor_binary` | `/usr/local/bin/cloud-hypervisor` | Path to CH binary (requires v51+) |
 | `kernel_path` | — | Path to guest vmlinux |
 | `rootfs_path` | — | Path to guest rootfs.erofs |
@@ -71,7 +71,7 @@ The sandbox daemon loads its configuration from `/opt/cloudhv/daemon.json`.
   "pool_size": 3,
   "max_pool_size": 10,
   "default_vcpus": 1,
-  "default_memory_mb": 128,
+  "default_memory_mb": 320,
   "kernel_path": "/opt/cloudhv/vmlinux",
   "rootfs_path": "/opt/cloudhv/rootfs.erofs",
   "kernel_args": "console=ttyS0 root=/dev/vda rw init=/init net.ifnames=0",

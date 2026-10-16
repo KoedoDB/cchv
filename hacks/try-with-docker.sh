@@ -146,7 +146,7 @@ docker exec -i "$NAME" sh -c 'cat > /opt/cloudhv/daemon.json' <<EOF
 {
   "pool_size": 3,
   "default_vcpus": 1,
-  "default_memory_mb": 128,
+  "default_memory_mb": 320,
   "cloud_hypervisor_binary": "/usr/local/bin/cloud-hypervisor",
   "kernel_path": "/opt/cloudhv/vmlinux",
   "rootfs_path": "/opt/cloudhv/rootfs.erofs",
@@ -165,7 +165,7 @@ docker exec -i "$NAME" sh -c 'cat > /opt/cloudhv/config.json' <<'EOF'
   "kernel_path": "/opt/cloudhv/vmlinux",
   "rootfs_path": "/opt/cloudhv/rootfs.erofs",
   "default_vcpus": 1,
-  "default_memory_mb": 128,
+  "default_memory_mb": 320,
   "daemon_socket": "/run/cloudhv/daemon.sock",
   "mkfs_erofs_path": "/usr/bin/mkfs.erofs",
   "require_pod_cgroup": false,

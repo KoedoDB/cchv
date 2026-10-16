@@ -162,7 +162,7 @@ sudo tee /opt/cloudhv/config.json > /dev/null <<EOF
   "kernel_args": "console=ttyS0 root=/dev/vda rw init=/init net.ifnames=0",
   "default_vcpus": 1,
   "max_default_vcpus": 0,
-  "default_memory_mb": 128,
+  "default_memory_mb": 320,
   "max_containers_per_vm": 5,
   "daemon_socket": "/run/cloudhv/daemon.sock"
 }
@@ -174,7 +174,7 @@ sudo tee /opt/cloudhv/daemon.json > /dev/null <<EOF
   "pool_size": 3,
   "max_pool_size": 10,
   "default_vcpus": 1,
-  "default_memory_mb": 128,
+  "default_memory_mb": 320,
   "kernel_path": "/opt/cloudhv/vmlinux",
   "rootfs_path": "/opt/cloudhv/rootfs.erofs",
   "kernel_args": "console=ttyS0 root=/dev/vda rw init=/init net.ifnames=0",

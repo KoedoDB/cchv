@@ -5,7 +5,7 @@
   "rootfs_path": "/opt/cloudhv/guest/rootfs.erofs",
   "kernel_args": "${KERNEL_CONSOLE} root=/dev/vda rw init=/init net.ifnames=0",
   "default_vcpus": 1,
-  "default_memory_mb": 128,
+  "default_memory_mb": 320,
   "socket_path": "/run/cloudhv/daemon.sock",
   "state_dir": "/run/cloudhv/daemon"
 }

@@ -233,7 +233,9 @@ fn default_vcpus() -> u32 {
     1
 }
 fn default_memory_mb() -> u64 {
-    512
+    // 320: 256 MiB for the workload, and the guest kernel, the agent and its reserved memory take the rest (measured: a 288 MiB VM has
+    // 240 MiB available).
+    320
 }
 fn default_ch_binary() -> String {
     "/usr/local/bin/cloud-hypervisor".to_string()
