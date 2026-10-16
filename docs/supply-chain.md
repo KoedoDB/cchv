@@ -87,7 +87,8 @@ comments in `sysext/root/usr/lib/systemd/system/cloudhv-sandbox-daemon.service`.
 - The Flatcar image that `hacks/test-sysext.sh` boots is downloaded by the bakery and is not checked by us (CI test only).
 - `containerd-shimkit` is a git dependency on a **branch** of a personal fork (`crates/shim/Cargo.toml`); `Cargo.lock` fixes the commit,
   but `rev = "<commit>"` in `Cargo.toml` would make that explicit and stop an accidental `cargo update` from moving it.
-- No SBOM, no signature on the release binaries (only on the installer image), no `cargo audit`/`cargo vet` in CI.
+- The release now has SBOMs (CycloneDX) and a keyless signature of the checksums file (and so of every file in it), besides the signature of the installer
+  image; **neither has run on a real tag yet**. Still no `cargo audit`/`cargo vet` in CI.
 - The workspace `Cargo.lock` was out of date when `--locked` was introduced (`containerd-shim-cloudhv` depends on `sha2`, the lock entry
   does not list it): run `cargo metadata` once and commit the result, or every `--locked` build fails.
 - `guest/kernel/build-kernel.sh` and `guest/rootfs/build-rootfs.sh` still download the kernel and crun with a bare `wget`. Until they

@@ -237,4 +237,6 @@ See the **[docs/](docs/)** folder for detailed documentation:
 ## License
 
 MIT — see [LICENSE](LICENSE). Copyright (c) 2026 David Justice for the original work; the modifications in this fork are copyright
-(c) 2026 RadarWorks LLC (KoedoDB) and under the same license.
+(c) 2026 RadarWorks LLC (KoedoDB) and under the same license. A release also carries software of others (Cloud Hypervisor, crun, the Linux
+kernel, the Rust crates): [THIRD-PARTY.md](THIRD-PARTY.md) lists it with the licenses and the source of the GPL parts, and each release
+attaches the license texts and CycloneDX SBOMs.
