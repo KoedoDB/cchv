@@ -295,6 +295,59 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
+if want recovery; then
+  section "recovery: a pod whose VM is killed comes back by itself (needs E2E_NODE=1)"
+  if [ "$NODE" != 1 ]; then
+    skip "recovery" "needs E2E_NODE=1: the VM is found and killed through the pod's cgroup"
+  else
+    # The Cloud Hypervisor processes of a pod (found through the pod's cgroup).
+    ch_pids() {
+      u=$(kubectl get pod "$1" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+      c=$(ls -d /sys/fs/cgroup/kubepods/*/pod"$u" 2>/dev/null | head -1)
+      [ -n "$c" ] || return 0
+      find "$c" -name cgroup.procs -exec cat {} + 2>/dev/null | sort -u | while read -r q; do
+        [ "$(cat /proc/"$q"/comm 2>/dev/null)" = cloud-hyperviso ] && echo "$q"
+      done
+    }
+    # recover NAME: kill the VM, wait until the pod is Ready with another VM; prints the seconds, or fails
+    recover() {
+      old=$(ch_pids "$1" | tr '\n' ' ')
+      [ -n "$old" ] || return 2
+      for q in $old; do kill -9 "$q" 2>/dev/null; done
+      t0=$(date +%s)
+      while [ $(( $(date +%s) - t0 )) -lt 120 ]; do
+        sleep 1
+        new=$(ch_pids "$1" | tr '\n' ' ')
+        if [ -n "$new" ] && [ "$new" != "$old" ] && [ "$(kubectl get pod "$1" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" = True ]; then
+          echo $(( $(date +%s) - t0 )); return 0
+        fi
+      done
+      return 1
+    }
+    sleeper e2e-rec1
+    cat <<EOF | apply
+apiVersion: v1
+kind: Pod
+metadata: {name: e2e-rec2, labels: {e2e: "yes"}}
+spec:
+  runtimeClassName: $RC
+  terminationGracePeriodSeconds: 2
+  containers:
+  - {name: a, image: $IMAGE, command: ["sleep", "3600"]}
+  - {name: b, image: $IMAGE, command: ["sleep", "3600"]}
+EOF
+    wait_ready e2e-rec1 120 && wait_ready e2e-rec2 120 || fail "recovery: pods Ready"
+    sec=$(recover e2e-rec1) && pass "recovery: a pod with one container is Ready again with a new VM after $sec s" || fail "recovery: one container" "not Ready with a new VM within 120 s"
+    sec=$(recover e2e-rec2) && pass "recovery: a pod with two containers is Ready again with a new VM after $sec s" || fail "recovery: two containers" "not Ready with a new VM within 120 s"
+    kubectl delete pod e2e-rec1 e2e-rec2 --wait=true --timeout=120s >/dev/null 2>&1
+    sleep 8
+    n=$(ls /run/netns 2>/dev/null | wc -l)
+    say "        (node: $n network namespaces after the pods are gone)"
+  fi
+  cleanup_pods
+fi
+
+# ---------------------------------------------------------------------------
 if want security; then
   section "security: what the guest denies"
   sleeper e2e-sec2
