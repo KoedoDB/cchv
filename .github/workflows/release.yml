@@ -372,3 +372,6 @@ jobs:
           body_path: /tmp/release-notes.md
           files: /tmp/release/*
           generate_release_notes: false
+          # A tag with a dash (v0.15.0-koedodb.2) is a pre-release, and never "Latest": this project is experimental.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}
