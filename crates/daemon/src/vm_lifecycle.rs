@@ -544,6 +544,7 @@ fn memory_restore_mode() -> &'static str {
             "Copy"
         }
         Ok("OnDemand") | Ok("ondemand") => "OnDemand",
+        Ok("CopyOnWrite") | Ok("copyonwrite") => "CopyOnWrite",
         _ => "Copy",
     })
 }
