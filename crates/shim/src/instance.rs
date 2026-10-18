@@ -92,7 +92,7 @@ async fn release_vm(vm_state: &SharedVmState) {
         }
     }
     if let Some(ref cg) = vm_state.cgroups_path {
-        remove_pod_cgroup_child(cg);
+        remove_pod_cgroup_child(cg).await;
     }
     if let (Some(ref netns), Some(ref tap)) = (&vm_state.netns, &vm_state.tap_name) {
         crate::netns::cleanup_tap(netns, tap).await;
@@ -269,7 +269,7 @@ impl Instance for CloudHvInstance {
                         info!("daemon release failed (non-fatal): {e:#}");
                     }
                     if let Some(ref cg) = vm_state.cgroups_path {
-                        remove_pod_cgroup_child(cg);
+                        remove_pod_cgroup_child(cg).await;
                     }
                 }
 
@@ -350,7 +350,7 @@ impl Instance for CloudHvInstance {
                     info!("daemon release failed (non-fatal): {e:#}");
                 }
                 if let Some(ref cg) = vm_state.cgroups_path {
-                    remove_pod_cgroup_child(cg);
+                    remove_pod_cgroup_child(cg).await;
                 }
 
                 // Clean up TAP
@@ -1253,14 +1253,83 @@ fn dest_cgroup_of(proc_cgroup: &str) -> Option<String> {
     Some(path.to_string())
 }
 
-/// Take away the child cgroup `place_in_pod_cgroup` made for the VM (best effort: the Cloud Hypervisor process is gone by now, and a
-/// cgroup that still has processes cannot be removed, which is fine). The kubelet could not remove the pod's cgroup while it was there.
-fn remove_pod_cgroup_child(cgroups_path: &str) {
-    if cgroups_path.contains(':') || !valid_cgroups_path(cgroups_path) {
-        return;
+/// The directory of the child cgroup `place_in_pod_cgroup` makes for the VM, under `base` (`/sys/fs/cgroup`): `/<pod>/<id>` for the cgroupfs driver, and
+/// `<pod>.slice/<prefix>-<id>.scope` under the slices' hierarchy for the systemd driver (`slice:prefix:id`). `None` for a path the runtime does not write.
+fn pod_cgroup_child_dir(base: &str, cgroups_path: &str) -> Option<PathBuf> {
+    if !valid_cgroups_path(cgroups_path) {
+        return None;
     }
-    let dir = format!("/sys/fs/cgroup/{}", cgroups_path.trim_start_matches('/'));
-    let _ = std::fs::remove_dir(&dir);
+    if cgroups_path.contains(':') {
+        let parts: Vec<&str> = cgroups_path.split(':').collect();
+        if parts.len() != 3 {
+            return None;
+        }
+        let hierarchy = build_systemd_cgroup_path(parts[0]);
+        return Some(PathBuf::from(format!(
+            "{base}/{hierarchy}/{}-{}.scope",
+            parts[1], parts[2]
+        )));
+    }
+    Some(PathBuf::from(format!(
+        "{base}/{}",
+        cgroups_path.trim_start_matches('/')
+    )))
+}
+
+/// Take away the child cgroup `place_in_pod_cgroup` made for the VM, once. `Ok(true)` when it is gone (or was never there), `Ok(false)` when it
+/// still has processes: a cgroup that is not empty cannot be removed, which is the kernel saying that the Cloud Hypervisor process is not gone yet.
+/// The kubelet cannot remove the pod's cgroup while the child is there.
+fn remove_cgroup_child_once(base: &str, cgroups_path: &str) -> std::io::Result<bool> {
+    let Some(dir) = pod_cgroup_child_dir(base, cgroups_path) else {
+        return Ok(true);
+    };
+    match std::fs::remove_dir(&dir) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) if e.raw_os_error() == Some(16) => Ok(false), // EBUSY
+        Err(e) => Err(e),
+    }
+}
+
+/// Take it away, and wait for the Cloud Hypervisor process to leave it: `release_sandbox` returns before the process is gone, and the single
+/// attempt this used to be found the cgroup busy and gave up, for good (a leaked, empty cgroup for every sandbox that ended this way: 1.6 an hour
+/// in the 24 hour soak test of 2026-10-18, which kills the VM and the daemon every half hour). About two seconds at most; then it is left to
+/// `sweep_stale_pod_cgroup_children`, which the next sandbox of the pod runs.
+async fn remove_pod_cgroup_child(cgroups_path: &str) {
+    for _ in 0..20 {
+        match remove_cgroup_child_once("/sys/fs/cgroup", cgroups_path) {
+            Ok(true) => return,
+            Ok(false) => tokio::time::sleep(Duration::from_millis(100)).await,
+            Err(e) => {
+                info!("could not remove the cgroup of {cgroups_path}: {e}");
+                return;
+            }
+        }
+    }
+    info!("the cgroup of {cgroups_path} still has processes after 2 s; left for the next sandbox of the pod to sweep");
+}
+
+/// Remove the empty cgroups an earlier sandbox of the same pod left behind (the shim was killed, the VM was killed, or the removal above gave up).
+/// Only directories whose name is a sandbox id (64 hexadecimal digits, or `<prefix>-<id>.scope`) and that are empty: the kernel refuses `rmdir` on
+/// anything with a process or a child, so a cgroup that is in use is never touched. `keep` is the directory this sandbox is about to use.
+fn sweep_stale_pod_cgroup_children(parent: &std::path::Path, keep: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == keep || !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let id = name
+            .strip_suffix(".scope")
+            .map(|n| n.rsplit('-').next().unwrap_or(n))
+            .unwrap_or(&name);
+        if id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            let _ = std::fs::remove_dir(&path);
+        }
+    }
 }
 
 /// Place a process in a pod cgroup. Supports cgroup v2 (unified) with both
@@ -1291,6 +1360,7 @@ fn place_in_pod_cgroup(pid: u32, cgroups_path: &str) -> Result<(), String> {
         let dir = format!("{cgroup_base}/{}", cgroups_path.trim_start_matches('/'));
         if let Some(parent) = std::path::Path::new(&dir).parent() {
             if parent.join("cgroup.procs").exists() {
+                sweep_stale_pod_cgroup_children(parent, std::path::Path::new(&dir));
                 match std::fs::create_dir(&dir) {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -1325,6 +1395,9 @@ fn place_in_pod_cgroup(pid: u32, cgroups_path: &str) -> Result<(), String> {
         // scopes for standard runtimes, but our shim manages CH externally
         // so we need to create the scope ourselves.
         if !std::path::Path::new(&procs_path).exists() {
+            if let Some(parent) = std::path::Path::new(&path).parent() {
+                sweep_stale_pod_cgroup_children(parent, std::path::Path::new(&path));
+            }
             std::fs::create_dir_all(&path).map_err(|e| format!("create cgroup {path}: {e}"))?;
         }
 
@@ -1397,5 +1470,98 @@ mod cgroup_path_tests {
         ] {
             assert!(!ok(bad), "{bad:?} must be refused");
         }
+    }
+}
+
+#[cfg(test)]
+mod cgroup_cleanup_tests {
+    use super::*;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("cloudhv-cg-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    const ID_A: &str = "03196a4e84f18bcd4ae1b266101a53903ef89756be6bd136cf0db4e0166412bc";
+    const ID_B: &str = "3916f48dfd759010b0dcd4e9c2e10746b291c1b6a1f0fec040b5af35683ffdbc";
+
+    #[test]
+    fn the_child_dir_of_a_cgroupfs_path() {
+        assert_eq!(
+            pod_cgroup_child_dir("/sys/fs/cgroup", "/kubepods/besteffort/podX/abc"),
+            Some(PathBuf::from("/sys/fs/cgroup/kubepods/besteffort/podX/abc"))
+        );
+    }
+
+    #[test]
+    fn the_child_dir_of_a_systemd_path() {
+        // the same place place_in_pod_cgroup makes: the pod's slice, and cri-containerd-<id>.scope in it
+        assert_eq!(
+            pod_cgroup_child_dir(
+                "/sys/fs/cgroup",
+                "kubepods-burstable-podabc.slice:cri-containerd:ID1"
+            ),
+            Some(PathBuf::from(
+                "/sys/fs/cgroup/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-podabc.slice/cri-containerd-ID1.scope"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_path_the_runtime_does_not_write_has_no_dir() {
+        assert_eq!(pod_cgroup_child_dir("/sys/fs/cgroup", "/a/../b"), None);
+        assert_eq!(pod_cgroup_child_dir("/sys/fs/cgroup", "a.slice:b"), None);
+    }
+
+    #[test]
+    fn an_empty_child_is_removed_and_a_missing_one_is_fine() {
+        let base = tmp("remove");
+        let b = base.to_str().unwrap();
+        std::fs::create_dir_all(base.join("pod1").join("c1")).unwrap();
+        assert!(remove_cgroup_child_once(b, "/pod1/c1").unwrap());
+        assert!(!base.join("pod1").join("c1").exists());
+        assert!(remove_cgroup_child_once(b, "/pod1/c1").unwrap()); // already gone
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_child_with_something_in_it_is_not_removed_and_is_not_an_error_for_the_caller_to_stop_on() {
+        let base = tmp("busy");
+        let b = base.to_str().unwrap();
+        std::fs::create_dir_all(base.join("pod1").join("c1").join("sub")).unwrap();
+        // a directory that is not empty: remove_dir says ENOTEMPTY (a real cgroup with processes says EBUSY)
+        assert!(remove_cgroup_child_once(b, "/pod1/c1").is_err());
+        assert!(base.join("pod1").join("c1").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn the_sweep_takes_away_the_empty_ids_of_the_pod_and_nothing_else() {
+        let pod = tmp("sweep");
+        let keep = pod.join(ID_B);
+        std::fs::create_dir_all(pod.join(ID_A)).unwrap(); // a stale one: empty, named by a sandbox id
+        std::fs::create_dir_all(&keep).unwrap(); // the one about to be used
+        std::fs::create_dir_all(pod.join("not-an-id")).unwrap(); // not named like a sandbox: left alone
+        let busy = pod.join("e".repeat(64));
+        std::fs::create_dir_all(busy.join("sub")).unwrap(); // not empty: left alone
+        std::fs::write(pod.join("cgroup.procs"), "").unwrap();
+        sweep_stale_pod_cgroup_children(&pod, &keep);
+        assert!(!pod.join(ID_A).exists());
+        assert!(keep.exists());
+        assert!(pod.join("not-an-id").exists());
+        assert!(busy.exists());
+        assert!(pod.join("cgroup.procs").exists());
+        let _ = std::fs::remove_dir_all(&pod);
+    }
+
+    #[test]
+    fn the_sweep_knows_the_systemd_scope_names() {
+        let pod = tmp("sweep-scope");
+        std::fs::create_dir_all(pod.join(format!("cri-containerd-{ID_A}.scope"))).unwrap();
+        sweep_stale_pod_cgroup_children(&pod, &pod.join("x"));
+        assert!(!pod.join(format!("cri-containerd-{ID_A}.scope")).exists());
+        let _ = std::fs::remove_dir_all(&pod);
     }
 }
