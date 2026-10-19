@@ -136,6 +136,13 @@ pub struct DaemonConfig {
     #[serde(default = "default_ch_memory_overhead_mib")]
     pub ch_memory_overhead_mib: u64,
 
+    /// Give each VM a balloon with free page reporting: the guest tells the host which pages it has freed (a database's page cache, a
+    /// finished build) and the host takes them back, so a VM's resident memory follows what the guest uses and not the most it ever
+    /// used. Needs `CONFIG_VIRTIO_BALLOON` and `CONFIG_PAGE_REPORTING` in the guest's kernel (the platform's kernel has both). Off by
+    /// default: the memory comes back in the host's time, and a snapshot of the VM has the device in it.
+    #[serde(default)]
+    pub vm_balloon: bool,
+
     /// Limit a VM's CPU time to its vCPUs plus one (`cpu.max`). Off by default: a pod's own limits already size the VM.
     #[serde(default)]
     pub ch_cpu_limit: bool,

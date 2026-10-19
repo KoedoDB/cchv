@@ -540,6 +540,16 @@ mod tests {
     }
 
     #[test]
+    fn a_snapshot_of_a_vm_with_the_balloon_passes() {
+        let mut c = good_config();
+        c["balloon"] = crate::vm_lifecycle::balloon_config();
+        assert!(
+            validate_snapshot_config(&c, "/k", "/r", Some("/cache/x.erofs"), SIZE).is_ok(),
+            "the VMs made with vm_balloon are the ones that are snapshotted"
+        );
+    }
+
+    #[test]
     fn a_snapshot_that_asks_for_more_than_the_pool_has_is_refused() {
         let cases: Vec<(&str, Box<dyn Fn(&mut serde_json::Value)>)> = vec![
             (
