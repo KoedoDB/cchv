@@ -126,7 +126,7 @@ pub async fn boot_vm_sized(
         } else {
             serde_json::json!({ "mode": "Off" })
         };
-        let vm_config = serde_json::json!({
+        let mut vm_config = serde_json::json!({
             "payload": {
                 "kernel": config.kernel_path,
                 "cmdline": config.kernel_args,
@@ -145,6 +145,9 @@ pub async fn boot_vm_sized(
             "console": { "mode": "Off" },
             "vsock": { "cid": cid, "socket": vsock_socket.to_string_lossy() },
         });
+        if config.vm_balloon {
+            vm_config["balloon"] = balloon_config();
+        }
 
         api_request(
             &api_socket,
@@ -166,6 +169,12 @@ pub async fn boot_vm_sized(
         vm_id, ch_pid, cid, memory_mb, vcpus
     );
     Ok(ch_pid)
+}
+
+/// The balloon of a VM (`vm_balloon`): not inflated (`size` 0, the host never asks for pages), free page reporting on (the guest offers
+/// the pages it has freed), and deflated when the guest runs out of memory, so the device cannot be the reason for an OOM in the guest.
+pub fn balloon_config() -> serde_json::Value {
+    serde_json::json!({ "size": 0, "free_page_reporting": true, "deflate_on_oom": true })
 }
 
 /// Spawn a Cloud Hypervisor process. Returns PID. Records it where only root can (`ctl.rs`). If rootless, the VM gets a user of its own
@@ -1070,5 +1079,18 @@ mod http_answer_tests {
             read_http_answer(&mut open(&long, 4096)).is_err(),
             "a head that is too long"
         );
+    }
+}
+
+#[cfg(test)]
+mod balloon_tests {
+    use super::balloon_config;
+
+    #[test]
+    fn the_balloon_is_empty_reports_free_pages_and_gives_back_on_oom() {
+        let b = balloon_config();
+        assert_eq!(b["size"], 0);
+        assert_eq!(b["free_page_reporting"], true);
+        assert_eq!(b["deflate_on_oom"], true);
     }
 }
