@@ -77,6 +77,27 @@ memory. Volumes are copied into the VM when the container starts. What the conta
 a volume as well. This is by design (the platform this was made for keeps nothing of a customer's VM on the host), and it is the biggest
 difference from runc.
 
+**Why some of this does not work, and what may change.** Most of the "not supported" rows come from one fact: the container is in a VM, with a network namespace
+of its own and no view of the host's files except what is copied in or attached as a disk.
+
+- **Names between containers (`docker compose`).** Docker's embedded DNS listens on `127.0.0.11` in the *container's network namespace* on the host; the VM has its
+  own loopback, so nothing answers there. Containers on a user-defined network can reach each other **by IP** (the veth is wired to the VM), so a Compose file that
+  uses addresses runs; one that uses service names does not. **Likely to be fixed, and small:** a DNS relay in the guest on `127.0.0.11:53` that sends each query
+  over vsock to the shim, which enters the container's network namespace and asks the real `127.0.0.11`. Not built yet.
+- **Bind mounts of host directories (`-v /host/dir:/data`), live.** Host and VM would have to see the same files at the same time. That takes a shared file
+  system (virtiofs or 9p), which means one more process on the host that parses requests from the guest. **This fork does not do that, on purpose**, and a bind
+  mount of a host directory stays out of scope: the directory is copied in at start (below `volume_source_roots`) and what the container writes is not
+  written back. Do not use this fork to develop against a source tree on the host.
+- **Named volumes (`-v vol:/data`) that keep what is written.** A disk does not need to be shared: a disk image kept on the host and attached to the VM as a
+  virtio-blk disk would hold the data between runs (the host cannot read it while the VM runs). **Possible, not built.** The disk-backed `emptyDir` of Kubernetes
+  is the same mechanism without keeping the file; keeping it means giving the confined Cloud Hypervisor a path that is known only after the VM exists
+  (`docs/persistent-block-volumes.md` on the branch `persistent-block-volumes` is a design note on it).
+- **`docker cp`, `diff`, `commit`, `export`** do not see what the container wrote, because the writable layer is in the VM's memory. Stays as it is.
+- **`-i` without `-t`** (standard input from a pipe): the shim forwards the input of a terminal only. Possible to add.
+- **`--network host`, `docker pause`, `docker top`, `docker stats`** (numbers): a VM has no host network and no process of its own on the host. Stays as it is.
+- **`kubectl port-forward`** (Kubernetes, not Docker): containerd connects to `localhost` inside the pod's network namespace, where the VM's network is not.
+  `docker run -p` is the Docker way and it works.
+
 ## How it fits Docker
 
 Docker and Kubernetes hand a container to the runtime differently, and the shim notices which it is by the annotations of the OCI spec
