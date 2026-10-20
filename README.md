@@ -42,7 +42,8 @@ Install: [docs/k3s.md](docs/k3s.md) (k3s, the setup we run), the [Quick Start](#
 ## Numbers (measured by us)
 
 On our machines (a 12-core AMD development machine, and a bare-metal Xeon E3-1270 v6 server with Debian 13 and k3s v1.36), with Cloud Hypervisor v54.0.
-They are not benchmarks of your hardware; the raw notes and the methods are in the [KoedoDB repository](https://github.com/banil246/koedodb/blob/main/doc/MICROVM.md) (in Japanese).
+They are not benchmarks of your hardware. The load is `pgbench` run inside the Pod, or an HTTP server in the Pod; memory is the resident size of the
+Cloud Hypervisor process (and of the Pod's cgroup, where a table says so).
 
 **What a VM costs** (Cloud Hypervisor process, resident; guest of 128 MiB):
 
@@ -55,8 +56,7 @@ They are not benchmarks of your hardware; the raw notes and the methods are in t
 
 Start: about **60 ms** to restore a pooled VM, **220–350 ms** to boot a VM of another size; a Pod is `Running` in about 2 seconds on the server above.
 For comparison, on the development machine Kata Containers with Cloud Hypervisor took 177 MiB for an empty Pod and 289 MiB for a small Deno HTTP server; runc took 48 MiB
-for the same server and gVisor 110–170 MiB (the processes' memory, outside Kubernetes). **The figures in the original README (about 6 MB idle, 24 MB per VM, 150 Pods in 11 s) came from other hardware
-and settings; we could not reproduce them.**
+for the same server and gVisor 110–170 MiB (the processes' memory, outside Kubernetes).
 
 **A database in a VM** — PostgreSQL 18, Pod of 2 CPU / 1 GiB, `pgbench`:
 
@@ -288,7 +288,6 @@ See the **[docs/](docs/)** folder for detailed documentation:
 - **[Releasing](docs/releasing.md)** — how we cut a release, published artifacts, verifying and installing them
 - **[Supply chain](docs/supply-chain.md)** — what is pinned and checked, how to update it
 - **[Security policy](SECURITY.md)** — how to report a vulnerability
-- The security review and its results: [doc/LAMBDA-SECURITY.md](https://github.com/banil246/koedodb/blob/main/doc/LAMBDA-SECURITY.md) in the KoedoDB repository
 
 ## Examples
 

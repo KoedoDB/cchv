@@ -1,5 +1,8 @@
 # Performance
 
+> **The figures in this file are the original author's, from runs on Azure Kubernetes Service with 128 MB guests. We have not reproduced them** (on our machines a VM
+> costs more, see the README), and they cover small guests only. Our own measurements are in the [README](../README.md#numbers-measured-by-us).
+
 ## Daemon Pool Acquire (single pod)
 
 With the sandbox daemon, VMs are pre-booted in a pool via CH v51 OnDemand

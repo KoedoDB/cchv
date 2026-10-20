@@ -2,6 +2,9 @@
 
 ## Status: Implemented
 
+> **The benchmark figures in this document (the 150-pod AKS run, about 24 MB per VM, node memory at 150 pods) are the original author's, with 128 MB guests. We have
+> not reproduced them**; our own measurements are in the [README](../README.md#numbers-measured-by-us).
+
 The sandbox daemon is fully implemented and tested. All four implementation
 stages are complete. Key results from the 150-pod AKS benchmark on
 3 × D8ds_v5 nodes (96 GiB total RAM):

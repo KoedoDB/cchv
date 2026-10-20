@@ -27,10 +27,9 @@ the project is and how far it has been checked: **it is experimental and has not
 
 ## Supported versions
 
-Only the latest tag (`v0.15.0-koedodb.N`) is supported.
+Only the latest tag (`v0.17.0-koedodb.N`) is supported.
 
 ## How we look for problems
 
 Everything is read and reviewed by us, with AI assistance; the input parsers are fuzzed (`fuzz/`); `cargo audit` and the advisories of
-Cloud Hypervisor, crun and the guest kernel are checked when we work on it (see `docs/supply-chain.md`). The review and what came out of
-it is written down in the KoedoDB repository: [doc/LAMBDA-SECURITY.md](https://github.com/banil246/koedodb/blob/main/doc/LAMBDA-SECURITY.md).
+Cloud Hypervisor, crun and the guest kernel are checked when we work on it (see `docs/supply-chain.md`). 
