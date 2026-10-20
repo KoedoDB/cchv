@@ -142,6 +142,15 @@ fn from_spec_with(config_json: &[u8], policy: &Policy) -> Result<Vec<serde_json:
         ) else {
             continue;
         };
+        // The image declares a VOLUME where a block volume is mounted (postgres: /var/lib/postgresql): containerd, which does not know of the block
+        // volume (it is not a mount of the pod), added an anonymous volume there. The block volume is the one the pod asked for.
+        if blocks
+            .iter()
+            .any(|b| b.get("destination").and_then(|d| d.as_str()) == Some(dest))
+            && is_implicit_image_volume(source)
+        {
+            continue;
+        }
         let readonly = m
             .get("options")
             .and_then(|o| o.as_array())
@@ -300,6 +309,19 @@ fn block_volumes(spec: &serde_json::Value) -> Result<Vec<serde_json::Value>, Str
         }));
     }
     Ok(out)
+}
+
+/// Whether `source` is one of the anonymous volumes containerd makes for a `VOLUME` of the image (`<root>/io.containerd.grpc.v1.cri/containers/<id>/volumes/<hash>`),
+/// which it adds when no mount of the pod has the destination.
+fn is_implicit_image_volume(source: &str) -> bool {
+    let parts: Vec<&str> = source.split('/').filter(|p| !p.is_empty()).collect();
+    parts
+        .windows(5)
+        .any(|w| w[0] == "io.containerd.grpc.v1.cri" && w[1] == "containers" && w[3] == "volumes")
+        && parts
+            .last()
+            .map(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+            .unwrap_or(false)
 }
 
 fn name_of(source: &str) -> String {
@@ -680,6 +702,44 @@ mod tests {
         );
         let other = from_spec_with(&other, &policy(&root.0, false)).unwrap();
         assert_ne!(other[0]["block"]["id"], id);
+    }
+
+    #[test]
+    fn the_anonymous_volume_of_the_image_where_a_block_volume_goes_is_left_out() {
+        let root = Tmp::new("blk-implicit");
+        let hash = "18d0d8e5897208925b08f4449259bf592acb37cab15b35f6129efed4aa6b4e9f";
+        let implicit = format!(
+            "/var/lib/rancher/k3s/agent/containerd/io.containerd.grpc.v1.cri/containers/pg/volumes/{hash}"
+        );
+        let spec = serde_json::json!({
+            "mounts": [
+                {"type": "bind", "destination": "/var/lib/postgresql", "source": implicit, "options": ["rbind"]},
+            ],
+            "annotations": { BLOCK_VOLUMES_ANNOTATION: serde_json::json!([{"device": "/dev/pgdata", "mount": "/var/lib/postgresql"}]).to_string() },
+            "linux": { "devices": [{"path": "/dev/pgdata", "type": "b", "major": 252, "minor": 7}] },
+        })
+        .to_string()
+        .into_bytes();
+        let got = from_spec_with(&spec, &policy(&root.0, false)).unwrap();
+        assert_eq!(got.len(), 1, "the block volume, and not the anonymous one");
+        assert!(got[0].get("block").is_some());
+        // Without a block volume at that destination the anonymous volume is still refused: it is not below a root the runtime makes volumes in.
+        let no_block = serde_json::json!({
+            "mounts": [{"type": "bind", "destination": "/var/lib/postgresql", "source": implicit, "options": ["rbind"]}],
+        })
+        .to_string()
+        .into_bytes();
+        assert!(from_spec_with(&no_block, &policy(&root.0, false)).is_err());
+        // A source that only looks like it is not left out.
+        assert!(!is_implicit_image_volume(
+            "/var/lib/rancher/k3s/storage/pvc-x"
+        ));
+        assert!(!is_implicit_image_volume(&format!(
+            "/containers/pg/volumes/{hash}"
+        )));
+        assert!(!is_implicit_image_volume(
+            "/x/io.containerd.grpc.v1.cri/containers/pg/volumes/short"
+        ));
     }
 
     #[test]
