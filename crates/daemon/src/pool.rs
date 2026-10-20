@@ -8,7 +8,8 @@ use tokio::sync::Mutex;
 
 use crate::config::DaemonConfig;
 
-/// The file that says the base snapshot is complete and handed over (see `Pool::base_snapshot_valid`).
+/// The file that says the base snapshot is complete and handed over (see `Pool::base_snapshot_valid`). It holds the fingerprint of what the snapshot was made from
+/// (`base_fingerprint`).
 const BASE_SNAPSHOT_DONE: &str = ".complete";
 
 /// A pre-booted VM in the pool, ready for acquisition.
@@ -258,17 +259,30 @@ impl Pool {
         self.next_cid()
     }
 
-    /// Check if the base snapshot is valid (exists and matches current kernel/rootfs).
+    /// Check if the base snapshot is valid: complete, and made from the kernel, the rootfs and the VM size that are in place now. A snapshot holds the guest's memory, so one made from an
+    /// older rootfs.erofs still runs the older agent in it: reusing it would leave a new agent (or kernel) unused until someone removes the directory by hand.
     fn base_snapshot_valid(&self, base_dir: &std::path::Path) -> bool {
         let config_path = base_dir.join("config.json");
         let memory_path = base_dir.join("memory-ranges");
         let state_path = base_dir.join("state.json");
         // The marker is written by the daemon after the VM that made the snapshot was destroyed and the snapshot handed over: a snapshot
         // without it was not finished by a daemon that vouches for it (it may be what a crash left).
-        config_path.exists()
-            && memory_path.exists()
-            && state_path.exists()
-            && base_dir.join(BASE_SNAPSHOT_DONE).exists()
+        if !(config_path.exists() && memory_path.exists() && state_path.exists()) {
+            return false;
+        }
+        match std::fs::read_to_string(base_dir.join(BASE_SNAPSHOT_DONE)) {
+            Ok(made_from) if made_from == base_fingerprint(&self.config) => true,
+            Ok(made_from) => {
+                // An empty one is a snapshot of a daemon that wrote no fingerprint.
+                info!(
+                    "the base snapshot was made from something else (made from {:?}, now {:?}): it is made again",
+                    made_from,
+                    base_fingerprint(&self.config)
+                );
+                false
+            }
+            Err(_) => false,
+        }
     }
 
     /// Create a base snapshot by cold-booting a VM, waiting for the agent,
@@ -339,7 +353,10 @@ impl Pool {
             let _ = std::fs::remove_dir_all(base_dir);
             return Err(e);
         }
-        if let Err(e) = std::fs::write(base_dir.join(BASE_SNAPSHOT_DONE), b"") {
+        if let Err(e) = std::fs::write(
+            base_dir.join(BASE_SNAPSHOT_DONE),
+            base_fingerprint(&self.config),
+        ) {
             let _ = std::fs::remove_dir_all(base_dir);
             return Err(e.into());
         }
@@ -582,6 +599,33 @@ impl Pool {
 }
 
 /// The pid an earlier version of the daemon kept in the VM's own directory (see `sweep_orphans`).
+/// What a base snapshot depends on: the kernel and the rootfs.erofs (size and modification time of each: reading tens of megabytes at every start to hash them is not worth it), the kernel
+/// arguments, and the size of the default VM. A file that cannot be read counts as "missing", which differs from any file that is there.
+fn base_fingerprint(config: &DaemonConfig) -> String {
+    fn file_part(path: &str) -> String {
+        match std::fs::metadata(path) {
+            Ok(m) => {
+                let nanos = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                format!("{path}:{}:{nanos}", m.len())
+            }
+            Err(_) => format!("{path}:missing"),
+        }
+    }
+    format!(
+        "kernel={};rootfs={};args={};vcpus={};memory_mb={}",
+        file_part(&config.kernel_path),
+        file_part(&config.rootfs_path),
+        config.kernel_args,
+        config.default_vcpus,
+        config.default_memory_mb
+    )
+}
+
 fn legacy_pid(dir: &Path) -> Option<u32> {
     std::fs::read_to_string(dir.join("ch.pid"))
         .ok()
@@ -621,5 +665,75 @@ mod tests {
         let ready = pool.ready.lock().await;
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].vm_id, "alive");
+    }
+    /// A directory of its own under the temp dir, with a kernel and a rootfs in it.
+    fn files_dir(name: &str) -> (PathBuf, DaemonConfig) {
+        let dir =
+            std::env::temp_dir().join(format!("cchv-fingerprint-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        std::fs::write(dir.join("vmlinux"), b"kernel").expect("kernel");
+        std::fs::write(dir.join("rootfs.erofs"), b"rootfs").expect("rootfs");
+        let config: DaemonConfig = serde_json::from_str(&format!(
+            r#"{{"kernel_path":"{0}/vmlinux","rootfs_path":"{0}/rootfs.erofs"}}"#,
+            dir.display()
+        ))
+        .expect("config");
+        (dir, config)
+    }
+
+    /// Put a complete-looking base snapshot made from the files as they are now.
+    fn snapshot_of(dir: &Path, marker: &str) -> PathBuf {
+        let base = dir.join("base-snapshot");
+        std::fs::create_dir_all(&base).expect("base");
+        for f in ["config.json", "memory-ranges", "state.json"] {
+            std::fs::write(base.join(f), b"{}").expect("file");
+        }
+        std::fs::write(base.join(BASE_SNAPSHOT_DONE), marker).expect("marker");
+        base
+    }
+
+    #[test]
+    fn a_snapshot_made_from_the_files_in_place_is_reused() {
+        let (dir, config) = files_dir("same");
+        let base = snapshot_of(&dir, &base_fingerprint(&config));
+        assert!(Pool::new(config).base_snapshot_valid(&base));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_new_rootfs_or_kernel_makes_the_snapshot_stale() {
+        let (dir, config) = files_dir("changed");
+        let base = snapshot_of(&dir, &base_fingerprint(&config));
+        // A different size, as a new agent in the rootfs makes.
+        std::fs::write(dir.join("rootfs.erofs"), b"rootfs with a new agent").expect("rootfs");
+        assert!(!Pool::new(config.clone()).base_snapshot_valid(&base));
+        let base = snapshot_of(&dir, &base_fingerprint(&config));
+        assert!(Pool::new(config.clone()).base_snapshot_valid(&base));
+        std::fs::write(dir.join("vmlinux"), b"kernel 2").expect("kernel");
+        assert!(!Pool::new(config).base_snapshot_valid(&base));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_snapshot_with_no_fingerprint_or_for_another_vm_size_is_stale() {
+        let (dir, config) = files_dir("old");
+        // What an earlier daemon wrote: an empty marker.
+        let base = snapshot_of(&dir, "");
+        assert!(!Pool::new(config.clone()).base_snapshot_valid(&base));
+        let base = snapshot_of(&dir, &base_fingerprint(&config));
+        let mut bigger = config.clone();
+        bigger.default_memory_mb += 64;
+        assert!(!Pool::new(bigger).base_snapshot_valid(&base));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_snapshot_without_its_marker_is_stale() {
+        let (dir, config) = files_dir("nomarker");
+        let base = snapshot_of(&dir, "x");
+        std::fs::remove_file(base.join(BASE_SNAPSHOT_DONE)).expect("remove");
+        assert!(!Pool::new(config).base_snapshot_valid(&base));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
