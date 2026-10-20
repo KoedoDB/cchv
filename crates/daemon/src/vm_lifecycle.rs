@@ -187,7 +187,7 @@ pub fn balloon_config() -> serde_json::Value {
 }
 
 /// Spawn a Cloud Hypervisor process. Returns PID. Records it where only root can (`ctl.rs`). If rootless, the VM gets a user of its own
-/// first, who owns the state directory (and `console.log`, if it is there already). A failure leaves no user and no record behind.
+/// first, who owns the state directory. A failure leaves no user and no record behind.
 pub async fn spawn_ch(
     config: &DaemonConfig,
     state_dir: &Path,
