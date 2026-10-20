@@ -831,6 +831,10 @@ The daemon is root and its socket is the one door:
 | `console_forward_max_lines_per_sec` | `200` | the most lines a VM may forward in a second (a burst of five times that); the rest are counted and told as one line ("N lines dropped") |
 | `console_forward_max_line_bytes` | `2048` | the longest line forwarded; a longer one is cut |
 | `console_forward_max_bytes_per_sec` | `2097152` | the most bytes the daemon reads from one VM's console in a second; the rest of the second it does not read, and the Cloud Hypervisor drops what the guest writes |
+| `volume_block_prefixes` | `[]` (off) | persistent block volumes: the device-mapper names a Pod may be given as a disk (an LVM volume `pv-x` of the group `vg` is `vg-pv--x`); a device whose name begins with none of them is refused. Needs `emptydir_dir` |
+| `volume_block_format_if_blank` | `false` | a volume that asks for `"format": "if-blank"` gets an ext4 made on it when its first MiB is zeros; off, the platform makes the file system before the Pod starts |
+| `disk_direct` | `true` | open the hot-plugged disks (emptyDirs on disk, persistent volumes) with O_DIRECT: the guest has its own page cache and the host does not cache every block a second time (about 260 MiB less charged to a database Pod of 1 GiB, no loss of write speed in our test) |
+| `vm_balloon` | `false` | give each VM a balloon with free page reporting, so its resident memory follows what the guest uses |
 | `erofs_cache_dir` | `/run/cloudhv/erofs-cache` | where the shim keeps the images; must be the shim's `EROFS_CACHE_DIR` |
 | `emptydir_dir` | `/var/lib/cloudhv/emptydir` | where the disks of emptyDirs are made (the host's disk, not `/run`); empty turns them off and a request for one is refused. See "emptyDir disks" |
 | `emptydir_max_mib`, `emptydir_reserve_mib` | `16384`, `2048` | the largest disk a request may ask for; a disk is refused when the free space of `emptydir_dir` is below `size/4 + reserve` |
@@ -876,3 +880,37 @@ hole instead, and the file still grew with whatever the guest wrote in between. 
 - A snapshot taken with the console in a file or on a socket is restored with it on a socket in the new VM's directory; the path the snapshot names is never used.
 - The first lines of the kernel (`Linux version …`, the memory map) are not in the log: the guest kernel gives the virtio-console only what it prints after the device is registered (about `virtio_blk virtio1`). The same with a file; it needs a serial port or `earlycon`, which the guest does not have.
 - Checked on a host (2026-10-20): the VMs of the pool, restored from the snapshot, and the VMs booted for a Pod are read from the start of the boot or the restore; no `console.log` is left.
+
+## Persistent block volumes (`blockvol.rs`)
+
+A database in a Pod's VM needs a disk that outlives the VM. A raw block device the platform made (an LVM logical volume, given to the Pod as a `volumeDevices`
+entry of a PersistentVolumeClaim with `volumeMode: Block`) is hot-plugged into the VM as a virtio-blk disk with direct I/O, and the guest agent mounts the ext4 on it.
+The Pod says what the device is for in an annotation:
+
+```yaml
+metadata:
+  annotations:
+    cloudhv.koedodb.com/block-volumes: '[{"device":"/dev/pgdata","mount":"/var/lib/postgresql","format":"if-blank"}]'
+spec:
+  runtimeClassName: cloudhv
+  containers:
+  - name: pg
+    image: postgres:18.6-trixie
+    volumeDevices:
+    - {name: data, devicePath: /dev/pgdata}
+```
+
+- **Which device**: the shim sends the device numbers from the OCI spec (`linux.devices`), no path. The daemon accepts a device-mapper device whose name begins with one of
+  `volume_block_prefixes` and whose UUID is an LVM one; a Pod cannot be given the host's own disks.
+- **One VM at a time**: root holds an exclusive `flock` on the device while its VM lives; a second VM that asks for it is refused. The kernel drops the lock if the daemon dies.
+- **Node**: root makes a node of the device in the VM's directory (`mknod`, 0600), gives it to the VM's user and hot-plugs it. That directory is the one bind of the confined root
+  that is not `nodev`; the VM's user cannot make a node there.
+- **File system**: only ext4 (the guest kernel has no other). It is made only for `"format": "if-blank"` with `volume_block_format_if_blank` on, and only on a device whose
+  first MiB is zeros. ext4 can be grown while mounted, not shrunk.
+- **Set up on the host**: the containerd runtime needs `pod_annotations = ['cloudhv.koedodb.com/*']`, or the annotation does not reach the shim; the daemon's unit needs
+  `CAP_MKNOD` and `DeviceAllow=block-device-mapper rwm`. **LVM does not zero a new logical volume**: whatever the disk held before is still there, so zero a new volume
+  (`blkdiscard --zeroout`) before a Pod is given it.
+- Tested on a host (Debian 13, a PostgreSQL 18 Pod in a VM of 1 GiB on a logical volume of 8 GiB): the data survives the Pod being made again; a second Pod on the same volume,
+  and a volume that is not allowed, are refused; `kill -9` of the Cloud Hypervisor under `pgbench`, several times, with no broken invariant (`pg_amcheck` clean); a full disk gives
+  `ERROR`, not `PANIC`; and after a hard reset of the host in the middle of writes every acknowledged insert was there (a software reset: it does not show what the drive's
+  cache does in a power cut).

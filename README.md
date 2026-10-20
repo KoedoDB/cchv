@@ -42,6 +42,15 @@ both directions. We are not affiliated with the Cloud Hypervisor, containerd or 
   cut-down and extended copy of the one in [containerd/runwasi](https://github.com/containerd/runwasi).
 - **Supply chain**: pinned actions and base images, checked downloads, signed installer image, `cargo audit` clean. See
   [docs/supply-chain.md](docs/supply-chain.md).
+- **Persistent block volumes**: a raw block device the platform made (an LVM logical volume, a Pod's `volumeDevices`) is hot-plugged into the VM with direct I/O and
+  mounted as ext4, for a database that has to outlive the VM. Only a device the daemon is told to allow (by name and LVM uuid), one VM at a time. See
+  [docs/sandbox-daemon.md](docs/sandbox-daemon.md#persistent-block-volumes-blockvolrs).
+- **Disk and memory options**: `disk_direct` (on by default: the guest has its own page cache and the host does not keep a second copy) and `vm_balloon` (off by default:
+  a VM's resident memory follows what its guest uses).
+- **The guest's console reaches the log**: the kernel's messages and the agent's log are read from a Unix socket (not a file, so nothing grows on the host's disk) and logged
+  as `console[vm=<name>] <line>`, cleaned and with a budget for each VM.
+- **More fixes**: the loopback interface of the guest was never brought up (a netlink reply was read one behind), and a base snapshot was reused after the kernel or the
+  root file system had changed (it is now checked).
 - **Windows** code is gone (Cloud Hypervisor runs on Linux hosts), and so are the Wasm-oriented parts of shimkit.
 
 ## Status
@@ -68,6 +77,17 @@ the figures below and in [docs/performance.md](docs/performance.md) are from aft
 24 MB per VM, 150 pods in 11 s) came from other hardware and settings; we could not reproduce them**, and the fixed cost of a VM here is
 the table above. Kata Containers with Cloud Hypervisor, in our setup, took 177 MiB for an empty Pod. A comparison of runc, gVisor,
 Kata and this shim under the same load is in [docs/performance.md](docs/performance.md) when we have it. The restore mode (`Copy` by default, `OnDemand` opt-in) is in [docs/memory-restore.md](docs/memory-restore.md).
+
+A database Pod (PostgreSQL 18, a VM of 1 GiB, a persistent volume on an LVM logical volume, `pgbench` scale 100, 1.5 GB: more than the VM's memory), the same test three times,
+with direct I/O on, off and on again (2026-10-20):
+
+| | direct I/O on | off | on again |
+|---|---|---|---|
+| `tpcb-like` (5 min, 8 clients) | 3,032 tps | 3,070 tps | 2,965 tps |
+| `select-only` (3 min) | 19,334 tps | 18,038 tps | 19,302 tps |
+| page cache charged to the Pod's cgroup | 0 MiB | 259–264 MiB | 0 MiB |
+
+After a hard reset of the host in the middle of writes (a software reset, not a power cut), all 11,416 acknowledged inserts were there and `pg_amcheck` was clean.
 
 ## When to Use
 
