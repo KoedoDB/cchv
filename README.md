@@ -85,6 +85,7 @@ VM of 1 GiB), direct I/O on, off and on again:
 **Does it hold up** (persistent volume, PostgreSQL under `pgbench`):
 - `kill -9` of the VM's Cloud Hypervisor in the middle of writes, several times: the Pod came back, the totals of the `pgbench` tables agreed and `pg_amcheck` was clean.
 - A full disk: PostgreSQL returned `ERROR: could not extend file … No space left on device`, with no `PANIC` and no restart; writes resumed within a second of freeing space.
+- Eight database Pods at once on one host of 8 threads (`pgbench`, 1 CPU each, data on an emptyDir with direct I/O): no failures, each got 562–581 tps (within 3% of each other) against 2,044 for one alone; the disk was not the limit (`iowait` 0.0%), the CPUs were.
 - A hard reset of the host in the middle of writes (a software reset, not a power cut): all 11,416 acknowledged inserts were there.
 - With the memory balloon on, memory the guest freed went back to the host within seconds (350 MB of anonymous memory in a Pod booted for its size; 120 MB of tmpfs in a Pod restored from the pool, whose guest memory is shared memory: the host's `Shmem` fell back within 5 seconds); page cache that is still in use does not.
 
