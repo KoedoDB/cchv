@@ -37,6 +37,8 @@ struct Settings {
     max_mib: u64,
     reserve_mib: u64,
     mke2fs: PathBuf,
+    /// Whether the disks are opened with O_DIRECT (`disk_direct`).
+    direct: bool,
 }
 
 static SETTINGS: OnceLock<Option<Settings>> = OnceLock::new();
@@ -57,6 +59,7 @@ pub fn init(config: &DaemonConfig) {
                 root,
                 max_mib: config.emptydir_max_mib,
                 reserve_mib: config.emptydir_reserve_mib,
+                direct: config.disk_direct,
                 mke2fs: find_mke2fs(&config.mke2fs_path),
             }),
             Err(e) => {
@@ -368,14 +371,14 @@ pub async fn attach(api_socket: &Path, disks: &[DiskRequest]) -> Result<()> {
 }
 
 /// The body of the `vm.add-disk` request of an emptyDir's disk.
-fn disk_body(path: &Path, d: &DiskRequest) -> serde_json::Value {
+fn disk_body(path: &Path, d: &DiskRequest, direct: bool) -> serde_json::Value {
     serde_json::json!({
         "path": path,
         "readonly": false,
         "image_type": "Raw",
         // O_DIRECT: the guest has its own page cache; without this the host caches every block a second time, and that is charged to the
         // pod's cgroup (a database pod of 1 GiB had 320 MB of the host's cache of its emptyDir in it).
-        "direct": true,
+        "direct": direct,
         "id": format!("ed-{}", d.id.chars().take(16).collect::<String>()),
         "serial": serial_of(&d.id),
     })
@@ -391,7 +394,7 @@ async fn make_and_plug(
     make_image(s, path, d.size_mb).await?;
     // Only now the VM's user owns it: the file system was made by root, and the VM could not have touched the file before.
     crate::rootless::give(path, state_dir).context("give the disk to the VM")?;
-    let body = disk_body(path, d);
+    let body = disk_body(path, d, s.direct);
     crate::vm_lifecycle::api_request_with_body(
         api_socket,
         "PUT",
@@ -409,9 +412,17 @@ mod tests {
 
     #[test]
     fn the_disk_of_an_emptydir_is_read_and_written_around_the_hosts_page_cache() {
-        let d = DiskRequest { id: "0123456789abcdef0123456789abcdef".into(), size_mb: 64 };
-        let b = disk_body(Path::new("/data/x.img"), &d);
+        let d = DiskRequest {
+            id: "0123456789abcdef0123456789abcdef".into(),
+            size_mb: 64,
+        };
+        let b = disk_body(Path::new("/data/x.img"), &d, true);
         assert_eq!(b["direct"], json!(true));
+        // `disk_direct: false` leaves the host's page cache in between.
+        assert_eq!(
+            disk_body(Path::new("/data/x.img"), &d, false)["direct"],
+            json!(false)
+        );
         assert_eq!(b["readonly"], json!(false));
         assert_eq!(b["image_type"], json!("Raw"));
     }
@@ -547,6 +558,7 @@ mod tests {
             max_mib: 1024,
             reserve_mib: 0,
             mke2fs,
+            direct: true,
         };
         let path = root.join(format!("{ID}.img"));
         make_image(&s, &path, 64).await.unwrap();

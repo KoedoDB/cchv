@@ -107,6 +107,12 @@ pub struct DaemonConfig {
     #[serde(default)]
     pub volume_block_format_if_blank: bool,
 
+    /// Whether the disks hot-plugged into a VM (the disk-backed emptyDirs and the persistent block volumes) are opened with O_DIRECT. On (the default): the guest has its own
+    /// page cache, and the host does not cache every block a second time (that was charged to the pod's cgroup: 320 MB for a database pod of 1 GiB); the guest's `fsync`
+    /// goes to the device. Off: the host's page cache is in between (for a file system that cannot do O_DIRECT, or to compare).
+    #[serde(default = "default_true")]
+    pub disk_direct: bool,
+
     /// The most shadow VMs (the ones that make warm snapshots) that may run at once; each takes a pool VM for its warm-up.
     #[serde(default = "default_max_shadow_vms")]
     pub max_shadow_vms: usize,

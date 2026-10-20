@@ -56,6 +56,8 @@ struct Settings {
     format_if_blank: bool,
     locks: PathBuf,
     mke2fs: PathBuf,
+    /// Whether the disks are opened with O_DIRECT (`disk_direct`).
+    direct: bool,
 }
 
 static SETTINGS: OnceLock<Option<Settings>> = OnceLock::new();
@@ -88,6 +90,7 @@ pub fn init(config: &DaemonConfig) {
                 format_if_blank: config.volume_block_format_if_blank,
                 locks,
                 mke2fs: crate::emptydir::find_mke2fs(&config.mke2fs_path),
+                direct: config.disk_direct,
             }),
             Err(e) => {
                 warn!("persistent block volumes are off: {e:#}");
@@ -365,11 +368,11 @@ fn make_node(path: &Path, major: u32, minor: u32) -> Result<()> {
 }
 
 /// The body of `vm.add-disk` for a node: raw, writable, with direct I/O (the host's page cache is not in the way of the guest's `fsync`).
-fn disk_body(node: &Path, b: &BlockRequest) -> serde_json::Value {
+fn disk_body(node: &Path, b: &BlockRequest, direct: bool) -> serde_json::Value {
     serde_json::json!({
         "path": node,
         "readonly": false,
-        "direct": true,
+        "direct": direct,
         "image_type": "Raw",
         "id": format!("pv-{}", b.id.chars().take(16).collect::<String>()),
         "serial": serial_of(&b.id),
@@ -437,7 +440,7 @@ async fn plug(
         api_socket,
         "PUT",
         "/api/v1/vm.add-disk",
-        &disk_body(node, b).to_string(),
+        &disk_body(node, b, s.direct).to_string(),
     )
     .await
     .context("hot-plug the device")
@@ -645,11 +648,15 @@ mod tests {
         let body = disk_body(
             Path::new("/var/lib/cloudhv/emptydir/vm/pv-0123456789abcdef"),
             &b,
+            true,
         );
         assert_eq!(body["image_type"], "Raw");
         assert_eq!(body["direct"], true);
         assert_eq!(body["readonly"], false);
         assert_eq!(body["serial"], "pv0123456789abcdef");
         assert_eq!(body["id"], "pv-0123456789abcdef");
+        // `disk_direct: false` leaves the host's page cache in between.
+        let cached = disk_body(Path::new("/x/pv-0123456789abcdef"), &b, false);
+        assert_eq!(cached["direct"], false);
     }
 }
