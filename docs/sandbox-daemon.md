@@ -874,3 +874,5 @@ hole instead, and the file still grew with whatever the guest wrote in between. 
 - The socket is looked at first (a link is not followed), and the process that listens on it must have the VM's user (`SO_PEERCRED`; root without `ch_rootless`). The daemon
   only reads.
 - A snapshot taken with the console in a file or on a socket is restored with it on a socket in the new VM's directory; the path the snapshot names is never used.
+- The first lines of the kernel (`Linux version …`, the memory map) are not in the log: the guest kernel gives the virtio-console only what it prints after the device is registered (about `virtio_blk virtio1`). The same with a file; it needs a serial port or `earlycon`, which the guest does not have.
+- Checked on a host (2026-10-20): the VMs of the pool, restored from the snapshot, and the VMs booted for a Pod are read from the start of the boot or the restore; no `console.log` is left.
