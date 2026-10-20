@@ -541,6 +541,13 @@ pub fn configure_interface(
         }
     }
     nl.set_link_up(idx)?;
+    // The guest's loopback is down and nothing else brings it up (the agent is the init). With it down 127.0.0.1 does not answer: a database's readiness probe
+    // (`pg_isready -h 127.0.0.1`), a health check, a second container of the pod that talks to the first on localhost all fail, while the pod's own address works.
+    // Best effort: the pod is reachable without it, so a failure is told and the network goes on.
+    match nl.get_link_index("lo").and_then(|lo| nl.set_link_up(lo)) {
+        Ok(()) => {}
+        Err(e) => log::warn!("configure_interface: could not bring lo up: {e:#}"),
+    }
     if let Some(gw) = gateway {
         if let Err(e) = nl.add_default_route(gw, idx) {
             let msg = e.to_string();
