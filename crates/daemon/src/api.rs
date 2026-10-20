@@ -302,6 +302,10 @@ async fn handle_acquire(
         Ok(d) => d,
         Err(e) => return error("bad request (volumes)", e),
     };
+    let blocks = match crate::blockvol::parse(request) {
+        Ok(b) => b,
+        Err(e) => return error("bad request (volumes)", e),
+    };
     let terminal = terminal_from_request(request);
 
     // The key of the warm snapshot is made here, from the content of the image. The one the caller sends is not used: with it, a pod
@@ -335,6 +339,7 @@ async fn handle_acquire(
                 config_json_b64,
                 volumes: &volumes,
                 disks: &disks,
+                blocks: &blocks,
                 terminal,
             },
             want_memory,
@@ -373,6 +378,7 @@ async fn handle_acquire(
                     config_json_b64,
                     &volumes,
                     &disks,
+                    &blocks,
                     terminal,
                 )
                 .await
@@ -421,6 +427,7 @@ async fn handle_acquire(
                             config_json_b64,
                             volumes: &volumes,
                             disks: &disks,
+                            blocks: &blocks,
                             terminal,
                         },
                         agents,
@@ -473,6 +480,7 @@ async fn finish_warm_restore(
     config_json_b64: &str,
     volumes: &[cloudhv_proto::VolumeMount],
     disks: &[crate::emptydir::DiskRequest],
+    blocks: &[crate::blockvol::BlockRequest],
     terminal: bool,
 ) -> Result<serde_json::Value> {
     // Connect to the guest agent of the restored VM. It is needed for the network configuration
@@ -505,6 +513,9 @@ async fn finish_warm_restore(
     crate::emptydir::attach(api_socket, disks)
         .await
         .context("emptyDir disks")?;
+    crate::blockvol::attach(api_socket, blocks)
+        .await
+        .context("block volumes")?;
     let container_pid =
         run_container_in_warm_vm(&agent, container_id, config_json_b64, volumes, terminal)
             .await
@@ -657,6 +668,8 @@ struct RunContainerParams<'a> {
     volumes: &'a [cloudhv_proto::VolumeMount],
     /// The disks (emptyDirs) the volumes name: made and hot-plugged before the container runs.
     disks: &'a [crate::emptydir::DiskRequest],
+    /// The persistent block volumes the volumes name: locked, given a node and hot-plugged before the container runs.
+    blocks: &'a [crate::blockvol::BlockRequest],
     /// Whether the container's process has a terminal (`tty: true`).
     terminal: bool,
 }
@@ -707,6 +720,9 @@ async fn run_container_in_vm(
     crate::emptydir::attach(params.api_socket, params.disks)
         .await
         .context("emptyDir disks")?;
+    crate::blockvol::attach(params.api_socket, params.blocks)
+        .await
+        .context("block volumes")?;
 
     // Connect to agent (or reuse existing connection)
     let agent = {
@@ -788,6 +804,10 @@ async fn handle_add_container(
         Ok(d) => d,
         Err(e) => return error("bad request (volumes)", e),
     };
+    let blocks = match crate::blockvol::parse(request) {
+        Ok(b) => b,
+        Err(e) => return error("bad request (volumes)", e),
+    };
     let terminal = terminal_from_request(request);
 
     let vm = match pool.get_active(vm_id).await {
@@ -808,6 +828,7 @@ async fn handle_add_container(
             config_json_b64,
             volumes: &volumes,
             disks: &disks,
+            blocks: &blocks,
             terminal,
         },
         agents,
@@ -1201,6 +1222,13 @@ pub(crate) fn volumes_from_request(request: &serde_json::Value) -> Vec<cloudhv_p
                 m.serial = crate::emptydir::serial_of(id);
                 return m;
             }
+            // A persistent block volume: the guest agent mounts the device the daemon hot-plugs (`blockvol::attach`), found by its serial.
+            if let Some(id) = v["block"]["id"].as_str() {
+                m.volume_type = cloudhv_proto::VolumeType::BLOCK.into();
+                m.fs_type = v["block"]["fs"].as_str().unwrap_or("ext4").to_string();
+                m.serial = crate::blockvol::serial_of(id);
+                return m;
+            }
             for f in v["files"]
                 .as_array()
                 .into_iter()
@@ -1347,6 +1375,25 @@ mod request_tests {
         let v = volumes_from_request(&r);
         assert_eq!(v.len(), MAX_VOLUMES);
         assert_eq!(v[0].files[0].mode, 0o755, "the setuid bit is not passed");
+    }
+
+    #[test]
+    fn a_persistent_block_volume_becomes_a_block_volume_with_its_own_serial() {
+        let id = "fedcba9876543210fedcba9876543210";
+        let r = serde_json::json!({ "volumes": [
+            {"destination": "/var/lib/postgresql", "source": format!("/run/cloudhv-vols/{id}"), "readonly": false, "files": [],
+             "block": {"id": id, "major": 252, "minor": 3, "fs": "ext4"}},
+        ]});
+        let v = volumes_from_request(&r);
+        assert_eq!(v[0].volume_type, cloudhv_proto::VolumeType::BLOCK.into());
+        assert_eq!(v[0].fs_type, "ext4");
+        assert_eq!(v[0].serial, "pvfedcba9876543210");
+        assert_ne!(
+            v[0].serial,
+            crate::emptydir::serial_of(id),
+            "not the serial of an emptyDir disk"
+        );
+        assert!(v[0].files.is_empty());
     }
 
     #[test]

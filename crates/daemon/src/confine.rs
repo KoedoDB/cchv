@@ -309,12 +309,15 @@ pub fn build_spec(
     for p in extra_ro {
         binds.push(ro(p));
     }
-    // The directory of the VM's emptyDir disks: writable (the disk files are written), and not `exec`.
+    // The directory of the VM's disks: writable (the disk files are written), and not `exec`. It may carry devices (not `nodev`): a persistent
+    // block volume is a node of its device, made there by root when the pod asks for it (`blockvol.rs`), and a mount with `nodev` would let the
+    // Cloud Hypervisor see the node and not open it. The VM's user has no capability to make a node, and cannot make a name in the directory (root's, 0711);
+    // the nodes in it are the ones root made for this VM.
     if let Some(d) = disk_dir {
         binds.push(Bind {
             path: d.display().to_string(),
             rw: true,
-            dev: false,
+            dev: true,
             exec: false,
         });
     }
@@ -867,12 +870,14 @@ mod tests {
     fn only_a_vms_own_directories_are_writable_and_only_device_nodes_carry_devices() {
         let s = spec();
         for b in &s.binds {
+            let disks = b.path == "/var/lib/cloudhv/emptydir/pool-1-4";
             let own = b.path == "/run/cloudhv/d/pool-1-4"
                 || b.path == "/run/cloudhv/d/.out/pool-1-4"
-                || b.path == "/var/lib/cloudhv/emptydir/pool-1-4";
+                || disks;
             let dev = b.path.starts_with("/dev/");
             assert_eq!(b.rw, own || dev, "{} writable", b.path);
-            assert_eq!(b.dev, dev, "{} carries devices", b.path);
+            // The VM's directory of disks holds the node of a persistent block volume (`blockvol.rs`): the one directory of its own that carries devices.
+            assert_eq!(b.dev, dev || disks, "{} carries devices", b.path);
             assert_eq!(
                 b.exec,
                 b.path == "/usr/local/bin/cloud-hypervisor",
