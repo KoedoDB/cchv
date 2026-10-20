@@ -361,7 +361,7 @@ pub fn validate_snapshot_config(
     // consoles
     for (key, modes) in [
         ("serial", &["Off", "Null", "File"][..]),
-        ("console", &["Off", "Null"][..]),
+        ("console", &["Off", "Null", "File"][..]),
     ] {
         if let Some(c) = obj.get(key).filter(|c| !c.is_null()) {
             let mode = c.get("mode").and_then(|m| m.as_str()).unwrap_or("Off");
@@ -537,6 +537,15 @@ mod tests {
                 .is_err(),
             "another image"
         );
+    }
+
+    #[test]
+    fn a_snapshot_with_the_console_in_a_file_passes() {
+        // The guest's log goes through the virtio-console (the daemon sets the path before the restore, as it does for the serial one).
+        let mut c = good_config();
+        c["serial"] = json!({"mode": "Off"});
+        c["console"] = json!({"mode": "File", "file": "/x/console.log"});
+        assert!(validate_snapshot_config(&c, "/k", "/r", Some("/cache/x.erofs"), SIZE).is_ok());
     }
 
     #[test]

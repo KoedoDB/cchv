@@ -26,7 +26,7 @@ The shim loads its configuration from `/opt/cloudhv/config.json` at startup.
   "cloud_hypervisor_binary": "/usr/local/bin/cloud-hypervisor",
   "kernel_path": "/opt/cloudhv/vmlinux",
   "rootfs_path": "/opt/cloudhv/rootfs.erofs",
-  "kernel_args": "console=ttyS0 root=/dev/vda rw init=/init net.ifnames=0",
+  "kernel_args": "console=hvc0 root=/dev/vda rw init=/init net.ifnames=0",
   "default_vcpus": 1,
   "default_memory_mb": 320,
   "max_containers_per_vm": 5,
@@ -58,7 +58,7 @@ The sandbox daemon loads its configuration from `/opt/cloudhv/daemon.json`.
 | `cloud_hypervisor_binary` | `/usr/local/bin/cloud-hypervisor` | Path to CH binary (requires v51+) |
 | `kernel_path` | — | Path to guest vmlinux |
 | `rootfs_path` | — | Path to guest rootfs.erofs |
-| `kernel_args` | `console=ttyS0 root=/dev/vda rw init=/init net.ifnames=0` | Guest kernel cmdline |
+| `kernel_args` | `console=hvc0 root=/dev/vda rw init=/init net.ifnames=0` | Guest kernel cmdline |
 | `socket_path` | `/run/cloudhv/daemon.sock` | Unix socket for shim communication |
 | `state_dir` | `/run/cloudhv/daemon` | Base snapshot, pool state, warm snapshots |
 | `warmup_duration_secs` | `30` | Shadow VM warmup before snapshot |
@@ -74,7 +74,7 @@ The sandbox daemon loads its configuration from `/opt/cloudhv/daemon.json`.
   "default_memory_mb": 320,
   "kernel_path": "/opt/cloudhv/vmlinux",
   "rootfs_path": "/opt/cloudhv/rootfs.erofs",
-  "kernel_args": "console=ttyS0 root=/dev/vda rw init=/init net.ifnames=0",
+  "kernel_args": "console=hvc0 root=/dev/vda rw init=/init net.ifnames=0",
   "socket_path": "/run/cloudhv/daemon.sock",
   "state_dir": "/run/cloudhv/daemon",
   "warmup_duration_secs": 30,
@@ -123,13 +123,13 @@ memory including pool VMs.
 
 #### Architecture Notes
 
-- **Console device:** The example above uses `console=ttyS0`, which is correct for
-  Cloud Hypervisor's serial port output and is what the installer writes. The compile-time
-  default in code is `console=hvc0` for historical reasons (virtio-console mode), but
-  `ttyS0` is the recommended setting for production and is required for `cloud-hypervisor
-  --serial tty` output. On **ARM64 (aarch64)** use `console=ttyAMA0` (PL011 UART).
-  If you override `kernel_args` in the config file, use the correct console for your
-  architecture.
+- **Console device:** the guest kernel of this repository has the virtio-console and **no serial port**
+  (`guest/kernel/configs/microvm.config`), so the console is `console=hvc0`; the daemon puts the
+  virtio-console in `console.log` of the VM's directory when `serial_console` is on (the kernel's messages
+  and the agent's log: the agent is the init). With `console=ttyS0` the kernel has no console at all, the
+  agent has no stdout, and `console.log` stays empty. On **ARM64 (aarch64)** the installer still writes
+  `console=ttyAMA0` (PL011 UART); that kernel's console is not checked. If you override `kernel_args` in
+  the config file, use the console your kernel has.
 - The kernel config used to build the guest kernel also differs per architecture:
   `guest/kernel/configs/microvm.config` for x86_64 and
   `guest/kernel/configs/microvm-aarch64.config` for ARM64.

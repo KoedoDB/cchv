@@ -34,6 +34,20 @@ fn check_socket(path: &Path) -> Result<()> {
     }
 }
 
+/// The `serial` and `console` parts of a VM's configuration. The guest has no serial port (its kernel has the virtio-console only, and is told `console=hvc0`), so its log
+/// goes through `console`, to `log` when there is one; `serial` stays off, since two devices cannot share a file. The agent is the init: its log, the kernel's messages and
+/// what a container writes to the console are what this file holds.
+pub fn console_parts(log: Option<&Path>) -> (serde_json::Value, serde_json::Value) {
+    let off = serde_json::json!({ "mode": "Off" });
+    match log {
+        Some(path) => (
+            off,
+            serde_json::json!({ "mode": "File", "file": path.to_string_lossy() }),
+        ),
+        None => (off.clone(), off),
+    }
+}
+
 /// Boot a VM from scratch (cold boot) of the default size. Returns the CH process PID.
 pub async fn boot_vm(
     config: &DaemonConfig,
@@ -121,11 +135,8 @@ pub async fn boot_vm_sized(
         let memory_bytes = memory_mb
             .checked_mul(1024 * 1024)
             .context("the memory size does not fit")?;
-        let serial_config = if serial {
-            serde_json::json!({ "mode": "File", "file": console_log.to_string_lossy() })
-        } else {
-            serde_json::json!({ "mode": "Off" })
-        };
+        let (serial_config, console_config) =
+            console_parts(serial.then_some(console_log.as_path()));
         let vm_config = serde_json::json!({
             "payload": {
                 "kernel": config.kernel_path,
@@ -142,7 +153,7 @@ pub async fn boot_vm_sized(
             "disks": disks,
             "net": net,
             "serial": serial_config,
-            "console": { "mode": "Off" },
+            "console": console_config,
             "vsock": { "cid": cid, "socket": vsock_socket.to_string_lossy() },
         });
 
@@ -651,20 +662,21 @@ pub fn prepare_snapshot(
         }
     }
 
-    // Patch serial console path. The file is made here, before the Cloud Hypervisor exists (the directory is still root's); `spawn_ch`
-    // hands it to the VM's user. A snapshot taken with the console off is restored with it off.
+    // Patch the console path (the guest's log goes through `console`, the virtio-console; an older snapshot may have it in `serial`). The file is made here, before the
+    // Cloud Hypervisor exists (the directory is still root's); `spawn_ch` hands it to the VM's user. A snapshot taken with the console off is restored with it off.
     let console_path = vm_state_dir.join("console.log");
-    if let Some(serial) = cfg.pointer_mut("/serial") {
-        if let Some(obj) = serial.as_object_mut() {
-            if obj.get("mode").and_then(|v| v.as_str()) == Some("File") {
+    let mut console_made = false;
+    for key in ["serial", "console"] {
+        if let Some(part) = cfg.pointer_mut(&format!("/{key}")) {
+            if part.get("mode").and_then(|v| v.as_str()) == Some("File") {
                 if config.serial_console_enabled() {
-                    crate::fsutil::create_new(&console_path).context("create console.log")?;
-                    obj.insert(
-                        "file".to_string(),
-                        serde_json::json!(console_path.to_string_lossy()),
-                    );
+                    if !console_made {
+                        crate::fsutil::create_new(&console_path).context("create console.log")?;
+                        console_made = true;
+                    }
+                    part["file"] = serde_json::json!(console_path.to_string_lossy());
                 } else {
-                    *serial = serde_json::json!({ "mode": "Off" });
+                    *part = serde_json::json!({ "mode": "Off" });
                 }
             }
         }
@@ -1070,5 +1082,36 @@ mod http_answer_tests {
             read_http_answer(&mut open(&long, 4096)).is_err(),
             "a head that is too long"
         );
+    }
+}
+
+#[cfg(test)]
+mod console_tests {
+    use super::*;
+
+    #[test]
+    fn the_log_goes_through_the_virtio_console_and_the_serial_port_stays_off() {
+        let (serial, console) =
+            console_parts(Some(Path::new("/run/cloudhv/daemon/vm/console.log")));
+        assert_eq!(serial, serde_json::json!({ "mode": "Off" }));
+        assert_eq!(
+            console,
+            serde_json::json!({ "mode": "File", "file": "/run/cloudhv/daemon/vm/console.log" })
+        );
+    }
+
+    #[test]
+    fn with_no_log_both_are_off() {
+        let (serial, console) = console_parts(None);
+        assert_eq!(serial, serde_json::json!({ "mode": "Off" }));
+        assert_eq!(console, serde_json::json!({ "mode": "Off" }));
+    }
+
+    #[test]
+    fn the_kernel_is_told_to_use_the_virtio_console() {
+        // The guest kernel has no serial port; with console=ttyS0 it has no console, and the agent (the init) has no stdout.
+        let config: DaemonConfig =
+            serde_json::from_str(r#"{"kernel_path":"/k","rootfs_path":"/r"}"#).expect("config");
+        assert!(config.kernel_args.starts_with("console=hvc0 "));
     }
 }

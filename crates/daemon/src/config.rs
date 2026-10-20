@@ -107,8 +107,9 @@ pub struct DaemonConfig {
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
 
-    /// Whether a VM's serial console is written to `console.log` in its state directory. Off by default with `ch_rootless`: the file is
-    /// in memory (`/run`), has no size limit, and the guest writes to it. On by default otherwise.
+    /// Whether a VM's console (the virtio-console: the kernel's messages and the agent's log, the agent being the init) is written to `console.log` in its state
+    /// directory. The name is the old one, from the serial port the guest kernel does not have. Off by default with `ch_rootless`: the file is in memory (`/run`),
+    /// has no size limit, and the guest writes to it. On by default otherwise.
     #[serde(default)]
     pub serial_console: Option<bool>,
 
@@ -241,7 +242,7 @@ fn default_ch_binary() -> String {
     "/usr/local/bin/cloud-hypervisor".to_string()
 }
 fn default_kernel_args() -> String {
-    "console=ttyS0 root=/dev/vda rw init=/init net.ifnames=0".to_string()
+    "console=hvc0 root=/dev/vda rw init=/init net.ifnames=0".to_string()
 }
 fn default_socket_path() -> String {
     "/run/cloudhv/daemon.sock".to_string()
@@ -265,7 +266,7 @@ impl DaemonConfig {
         Ok(config)
     }
 
-    /// Whether the serial console of a VM is written to a file (see `serial_console`).
+    /// Whether the console of a VM is written to a file (see `serial_console`).
     pub fn serial_console_enabled(&self) -> bool {
         self.serial_console.unwrap_or(!self.ch_rootless)
     }

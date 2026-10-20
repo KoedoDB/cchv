@@ -23,7 +23,8 @@ host() { nsenter --target 1 --mount --uts --ipc --pid -- "$@"; }
 
 HOST_ARCH="$(uname -m)"
 case "${HOST_ARCH}" in
-    x86_64)  KERNEL_CONSOLE="console=ttyS0" ;;
+    # The guest kernel of this repository has the virtio-console and no serial port: the console is hvc0 (the daemon writes it to console.log when serial_console is on).
+    x86_64)  KERNEL_CONSOLE="console=hvc0" ;;
     aarch64) KERNEL_CONSOLE="console=ttyAMA0" ;;
     *) die "unsupported architecture: ${HOST_ARCH}" ;;
 esac

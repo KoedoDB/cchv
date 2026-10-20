@@ -826,7 +826,7 @@ The daemon is root and its socket is the one door:
 | `ch_memory_overhead_mib` | `256` | what a VM's cgroup allows beyond the guest's memory |
 | `ch_cpu_limit` | `false` | limit a VM's CPU time to its vCPUs plus one thread |
 | `ch_extra_ro_paths` | `[]` | paths shown read-only in every confined root |
-| `serial_console` | `true`, `false` with `ch_rootless` | write the guest's serial console to `console.log` in the VM's directory (in memory, no size limit) |
+| `serial_console` | `true`, `false` with `ch_rootless` | write the guest's console (the virtio-console: the kernel's messages and the agent's log; the kernel has no serial port, so `console=hvc0`) to `console.log` in the VM's directory (in memory, no size limit) |
 | `erofs_cache_dir` | `/run/cloudhv/erofs-cache` | where the shim keeps the images; must be the shim's `EROFS_CACHE_DIR` |
 | `emptydir_dir` | `/var/lib/cloudhv/emptydir` | where the disks of emptyDirs are made (the host's disk, not `/run`); empty turns them off and a request for one is refused. See "emptyDir disks" |
 | `emptydir_max_mib`, `emptydir_reserve_mib` | `16384`, `2048` | the largest disk a request may ask for; a disk is refused when the free space of `emptydir_dir` is below `size/4 + reserve` |
