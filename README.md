@@ -55,8 +55,16 @@ Cloud Hypervisor process (and of the Pod's cgroup, where a table says so).
 | The same, running a Node.js HTTP server | 171 MiB (the workload is most of it) |
 
 Start: about **60 ms** to restore a pooled VM, **220–350 ms** to boot a VM of another size; a Pod is `Running` in about 2 seconds on the server above.
-For comparison, on the development machine Kata Containers with Cloud Hypervisor took 177 MiB for an empty Pod and 289 MiB for a small Deno HTTP server; runc took 48 MiB
-for the same server and gVisor 110–170 MiB (the processes' memory, outside Kubernetes).
+For comparison (other runtimes, other machines; **we have not yet measured cchv with these loads, so the table has no cchv row**):
+
+| Runtime | A Next.js server (SSR), idle | after load | start until it answers (polled every 0.5 s) | measured on |
+|---|---|---|---|---|
+| runc | 49 MiB | 163–192 MiB | 0.9–1.7 s | a bare-metal server, Docker, 1 GiB |
+| gVisor | 70 MiB | 153–180 MiB | 2.1–6.1 s | the same |
+| Kata + Cloud Hypervisor | 284 MiB | 379–467 MiB | 2.5–3.4 s | the same |
+
+(An empty Alpine Pod on Kata + Cloud Hypervisor, VM of 1 GB: 177 MiB; the shim and the VMM's processes, as proportional set size. The start time depends on the CPU limit, 0.5 to 2 CPUs.)
+On a development machine, a small Deno HTTP server took 48 MiB with runc, 110–170 MiB with gVisor and 289 MiB with Kata + Cloud Hypervisor (the processes' memory, outside Kubernetes).
 
 **A database in a VM** — PostgreSQL 18, Pod of 2 CPU / 1 GiB, `pgbench`:
 
