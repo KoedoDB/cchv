@@ -130,7 +130,10 @@ impl Netlink {
         let attr = 4 + nb.len() + 1;
         let total = 16 + 16 + ((attr + 3) & !3);
         let mut m = vec![0u8; total];
-        nlhdr(&mut m, total, 18, 5, self.seq());
+        // NLM_F_REQUEST only. With NLM_F_ACK the kernel answers with the link and then an acknowledgement; this reads one message, so the acknowledgement stayed in the
+        // socket and the next request read it as its own reply, and so on one reply behind: the index of "lo" was read from the acknowledgement of the request before it
+        // (the length of that request, 32), and the errors of a request were told as those of the next.
+        nlhdr(&mut m, total, 18, 1, self.seq());
         let o = 32;
         put_nla(&mut m[o..], 3, nb.len() + 1);
         m[o + 4..o + 4 + nb.len()].copy_from_slice(nb);
@@ -762,4 +765,35 @@ pub fn create_tap(name: &str, vnet_hdr: bool) -> Result<OwnedFd> {
         return Err(std::io::Error::last_os_error()).context("TUNSETPERSIST");
     }
     Ok(fd)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lo_index() -> u32 {
+        let name = std::ffi::CString::new("lo").expect("name");
+        unsafe { libc::if_nametoindex(name.as_ptr()) }
+    }
+
+    #[test]
+    fn the_index_of_a_link_is_the_same_every_time_it_is_asked() {
+        let nl = Netlink::open().expect("netlink");
+        let lo = lo_index();
+        assert_ne!(lo, 0);
+        // A second ask used to read what the first left in the socket.
+        for _ in 0..3 {
+            assert_eq!(nl.get_link_index("lo").expect("lo"), lo);
+        }
+    }
+
+    #[test]
+    fn a_request_reads_its_own_reply_after_a_link_was_asked_for() {
+        let nl = Netlink::open().expect("netlink");
+        let lo = lo_index();
+        assert_eq!(nl.get_link_index("lo").expect("lo"), lo);
+        // The index of a link that is not there is an error of this request, not of an earlier one.
+        assert!(nl.get_link_index("cchv-no-such-link").is_err());
+        assert_eq!(nl.get_link_index("lo").expect("lo"), lo);
+    }
 }
