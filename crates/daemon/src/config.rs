@@ -113,6 +113,23 @@ pub struct DaemonConfig {
     #[serde(default)]
     pub serial_console: Option<bool>,
 
+    /// With the console written to a file (`serial_console`): forward each new line of it to the daemon's log as `console[vm=<name>] <line>` (`consolefwd.rs`), so
+    /// that a log collector has it and what a VM said before it died is kept. What was forwarded, except the last `console_keep_bytes`, is dropped from the file.
+    #[serde(default = "default_true")]
+    pub console_forward: bool,
+    /// How often the files are read (ms), the most lines a VM may forward a second (a burst of five times that; the rest are counted, not forwarded), the longest line
+    /// (bytes; a longer one is cut), the tail left in the file, and the least that is dropped at one time (a hole is not made for less).
+    #[serde(default = "default_console_forward_interval_ms")]
+    pub console_forward_interval_ms: u64,
+    #[serde(default = "default_console_forward_max_lines_per_sec")]
+    pub console_forward_max_lines_per_sec: u32,
+    #[serde(default = "default_console_forward_max_line_bytes")]
+    pub console_forward_max_line_bytes: usize,
+    #[serde(default = "default_console_keep_bytes")]
+    pub console_keep_bytes: u64,
+    #[serde(default = "default_console_min_punch_bytes")]
+    pub console_min_punch_bytes: u64,
+
     /// The most processes (threads count) the user of a rootless Cloud Hypervisor may have (`RLIMIT_NPROC`).
     #[serde(default = "default_ch_max_processes")]
     pub ch_max_processes: u64,
@@ -199,6 +216,21 @@ fn default_max_active_vms() -> usize {
 }
 fn default_max_shadow_vms() -> usize {
     2
+}
+fn default_console_forward_interval_ms() -> u64 {
+    1000
+}
+fn default_console_forward_max_lines_per_sec() -> u32 {
+    200
+}
+fn default_console_forward_max_line_bytes() -> usize {
+    2048
+}
+fn default_console_keep_bytes() -> u64 {
+    64 * 1024
+}
+fn default_console_min_punch_bytes() -> u64 {
+    256 * 1024
 }
 fn default_max_request_bytes() -> usize {
     8 * 1024 * 1024
