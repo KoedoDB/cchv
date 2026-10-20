@@ -203,6 +203,7 @@ pub async fn spawn_ch(
             crate::rootless::drop_outbox(state_dir);
             crate::ctl::remove(state_dir);
             crate::emptydir::remove_vm_dir(state_dir);
+            crate::blockvol::release(state_dir);
             Err(e)
         }
     }
@@ -746,6 +747,7 @@ pub async fn shutdown_and_destroy(_api_socket: &Path, ch_pid: u32, state_dir: &P
     crate::rootless::drop_outbox(state_dir);
     crate::ctl::remove(state_dir);
     crate::emptydir::remove_vm_dir(state_dir);
+    crate::blockvol::release(state_dir);
     let _ = std::fs::remove_dir_all(state_dir);
     info!("VM {} destroyed in {}ms", ch_pid, t0.elapsed().as_millis());
 }

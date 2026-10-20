@@ -5,6 +5,7 @@ use anyhow::Result;
 use log::info;
 
 mod api;
+mod blockvol;
 mod cgroup;
 mod config;
 mod confine;
@@ -92,6 +93,7 @@ async fn daemon_main() -> Result<()> {
         rootless::sweep_outboxes(std::path::Path::new(&config.state_dir));
         // The disks of the emptyDirs of the VMs just stopped go with them; the directory is made if it is not there.
         emptydir::init(&config);
+        blockvol::init(&config);
         // The workload snapshots of an earlier daemon are unknown to this one (its cache is empty) and were made by VMs it can no longer
         // vouch for: they go. The base snapshot is reused only if the daemon marked it complete (see `Pool::base_snapshot_valid`).
         if let Ok(entries) = std::fs::read_dir(config.snapshot_cache_dir()) {

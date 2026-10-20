@@ -73,7 +73,7 @@ pub fn init(config: &DaemonConfig) {
     let _ = SETTINGS.set(s);
 }
 
-fn find_mke2fs(configured: &str) -> PathBuf {
+pub(crate) fn find_mke2fs(configured: &str) -> PathBuf {
     let c = PathBuf::from(configured);
     if c.exists() {
         return c;

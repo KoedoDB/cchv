@@ -97,6 +97,16 @@ pub struct DaemonConfig {
     #[serde(default = "default_max_active_vms")]
     pub max_active_vms: usize,
 
+    /// Persistent block volumes (`blockvol.rs`): the device-mapper names (`/sys/dev/block/<major>:<minor>/dm/name`, which writes a `-` of an LVM
+    /// name twice: the logical volume `pv-x` of the volume group `vg` is `vg-pv--x`) that a pod may be given as a disk. A device whose name begins
+    /// with none of them is refused. Empty: the feature is off. Needs `emptydir_dir` (the nodes are made in the VM's directory there).
+    #[serde(default)]
+    pub volume_block_prefixes: Vec<String>,
+    /// Whether a volume that asks for `"format": "if-blank"` gets an ext4 made on it when the device is blank (its first MiB is zeros). Off: the
+    /// platform makes the file system before the pod starts.
+    #[serde(default)]
+    pub volume_block_format_if_blank: bool,
+
     /// The most shadow VMs (the ones that make warm snapshots) that may run at once; each takes a pool VM for its warm-up.
     #[serde(default = "default_max_shadow_vms")]
     pub max_shadow_vms: usize,
