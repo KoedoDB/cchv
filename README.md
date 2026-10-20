@@ -1,14 +1,88 @@
-# cchv — a containerd shim for Cloud Hypervisor
+# cchv — run Kubernetes Pods in Cloud Hypervisor microVMs (a containerd shim)
 
-A [containerd](https://containerd.io/) shim for [Cloud Hypervisor](https://www.cloudhypervisor.org/) that runs container workloads
-inside lightweight microVMs: one VM per Pod, a small purpose-built shim instead of a full Kata stack, and a pool of warm VMs
-restored from snapshots.
+**cchv** is a [containerd](https://containerd.io/) shim (runtime v2) that runs every [Kubernetes](https://kubernetes.io/) Pod in its own lightweight
+[Cloud Hypervisor](https://www.cloudhypervisor.org/) virtual machine. You use it like any other runtime: a `RuntimeClass` and `runtimeClassName: cloudhv`
+in the Pod. Containers stay ordinary OCI images; the isolation is a KVM virtual machine with its own guest kernel instead of a shared host kernel.
+Rust, MIT licence, for Linux hosts with `/dev/kvm`. A pool of warm VMs restored from snapshots keeps the start of a Pod short and the fixed memory
+cost of a VM small.
 
-> **This began as a fork** of [devigned/containerd-cloudhypervisor](https://github.com/devigned/containerd-cloudhypervisor) by David Justice
-> (MIT). The idea and the first implementation are his; we are grateful for them. The repository is independent of the original since 2026-10-20
-> (the original has had no commits since March 2026); the history is kept, and so is the licence. It was called `containerd-cloudhypervisor`; GitHub forwards the old address.
+It began as a fork of [devigned/containerd-cloudhypervisor](https://github.com/devigned/containerd-cloudhypervisor) by David Justice (MIT) and has been an
+independent repository since 2026-10-20 (the original has had no commits since March 2026; GitHub forwards the old address). The idea and the first
+implementation are his; we are grateful for them. [How it differs](#history-and-what-changed-from-the-original).
 
-## Why we forked
+## What you get
+
+- **A VM for each Pod**, on a stock Kubernetes + containerd node (we run it on k3s): `kubectl logs`, `exec`, `attach`, `cp`, probes and `tty: true` work.
+  `port-forward` does not.
+- **Cloud Hypervisor, unprivileged and confined**: its own user, no capabilities, its own mount, PID, network, IPC and UTS namespaces and a cgroup.
+- **Warm VM pool**: VMs wait in a pool, restored from a snapshot; a Pod gets one in about 60 ms.
+- **Persistent block volumes**: an LVM logical volume (a Pod's `volumeDevices`) is hot-plugged into the VM with direct I/O, for a database that has to outlive it.
+- **A hardened guest**: container specs rebuilt from an allow list, a default seccomp profile, a hardened guest kernel configuration.
+- **Everything the daemon takes as input is checked** and fuzzed; a supply chain that is pinned and signed ([docs/supply-chain.md](docs/supply-chain.md)).
+
+## Use it
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hello
+spec:
+  runtimeClassName: cloudhv
+  containers:
+  - name: app
+    image: alpine:3.22
+    command: ["sh", "-c", "echo hello from a microVM; sleep 3600"]
+    resources:
+      limits: {cpu: "1", memory: 256Mi}   # the VM is sized from these
+```
+
+Install: [docs/k3s.md](docs/k3s.md) (k3s, the setup we run), the [Quick Start](#quick-start) below, and [docs/configuration.md](docs/configuration.md).
+
+## Numbers (measured by us)
+
+On our machines (a 12-core AMD development machine, and a bare-metal Xeon E3-1270 v6 server with Debian 13 and k3s v1.36), with Cloud Hypervisor v54.0.
+They are not benchmarks of your hardware; the raw notes and the methods are in the [KoedoDB repository](https://github.com/banil246/koedodb/blob/main/doc/MICROVM.md) (in Japanese).
+
+**What a VM costs** (Cloud Hypervisor process, resident; guest of 128 MiB):
+
+| | |
+|---|---|
+| A VM waiting in the pool | **34 MiB** |
+| A Pod restored from a warm snapshot (an idle Alpine) | **47–50 MiB** |
+| A Pod sized by its limits (384 MiB; the VM is booted for it), idle Alpine | **63 MiB** |
+| The same, running a Node.js HTTP server | 171 MiB (the workload is most of it) |
+
+Start: about **60 ms** to restore a pooled VM, **220–350 ms** to boot a VM of another size; a Pod is `Running` in about 2 seconds on the server above.
+For comparison, on the development machine Kata Containers with Cloud Hypervisor took 177 MiB for an empty Pod and 289 MiB for a small Deno HTTP server; runc took 48 MiB
+for the same server and gVisor 110–170 MiB (the processes' memory, outside Kubernetes). **The figures in the original README (about 6 MB idle, 24 MB per VM, 150 Pods in 11 s) came from other hardware
+and settings; we could not reproduce them.**
+
+**A database in a VM** — PostgreSQL 18, Pod of 2 CPU / 1 GiB, `pgbench`:
+
+| | cchv (VM) | runc |
+|---|---|---|
+| `tpcb-like`, 8 clients, 30 s (scale 10, emptyDir) | 3,590 tps (2.23 ms) | 3,723 tps (2.15 ms) |
+| `pg_test_fsync` | 222–241 µs | 192–217 µs |
+
+Writes are about 0.96 times those of runc; `fsync` about 1.1 times slower. With a persistent volume and a database larger than the VM's memory (scale 100, 1.5 GB;
+VM of 1 GiB), direct I/O on, off and on again:
+
+| | direct I/O on | off | on again |
+|---|---|---|---|
+| `tpcb-like` (5 min, 8 clients) | 3,032 tps | 3,070 tps | 2,965 tps |
+| `select-only` (3 min) | 19,334 tps | 18,038 tps | 19,302 tps |
+| page cache charged to the Pod's cgroup | 0 MiB | 259–264 MiB | 0 MiB |
+
+**Does it hold up** (persistent volume, PostgreSQL under `pgbench`):
+- `kill -9` of the VM's Cloud Hypervisor in the middle of writes, several times: the Pod came back, the totals of the `pgbench` tables agreed and `pg_amcheck` was clean.
+- A full disk: PostgreSQL returned `ERROR: could not extend file … No space left on device`, with no `PANIC` and no restart; writes resumed within a second of freeing space.
+- A hard reset of the host in the middle of writes (a software reset, not a power cut): all 11,416 acknowledged inserts were there.
+- With the memory balloon on, memory the guest freed (an anonymous 350 MB) went back to the host within seconds; page cache does not.
+
+What we have **not** measured or done: other hardware, a power cut, many Pods at once, GPU or live migration (not supported), a run of days on this version.
+
+## History and what changed from the original
 
 We run a small hosting service ([KoedoDB](https://koedodb.com)) and were looking for a way to run customers' code that **starts
 fast, uses little memory, performs well, and is safe**: microVMs light enough to keep one per project. This project is exactly
@@ -24,7 +98,8 @@ This is not meant as criticism: the original is a good starting point, and findi
 does. If the original becomes active again, we would be glad to send our changes there (or to merge back); patches are welcome in
 both directions. We are not affiliated with the Cloud Hypervisor, containerd or Kata projects.
 
-## What is different from the original
+
+### What changed
 
 - **Fixed**: pods start from warm snapshots (#97), the VM is sized from the Pod's limits, per-container limits are enforced in the guest,
   logs reach `kubectl logs`, children of the daemon are stopped and cleaned up when it stops, volumes (ConfigMaps, Secrets,
@@ -60,35 +135,6 @@ both directions. We are not affiliated with the Cloud Hypervisor, containerd or 
 AI-assisted reviews) but **not by anyone outside the project**, and the guest kernel's hardening options are in the configuration but
 have not been exercised on a built kernel. Please read the code before you rely on it, and tell us what you find: see
 [SECURITY.md](SECURITY.md) for vulnerabilities (privately), and use issues or discussions for everything else.
-
-### What we measured
-
-On one 12-core development machine (KVM, k3s with Cilium, a guest with 128 MiB; numbers are not benchmarks of your hardware):
-
-| | Cloud Hypervisor process, resident |
-|---|---|
-| A VM waiting in the pool | **34 MiB** |
-| A Pod restored from a warm snapshot (an idle Alpine) | **47–50 MiB** |
-| A Pod sized by its limits (384 MiB; the VM is booted for it), idle Alpine | **63 MiB** |
-| The same, running a Node.js HTTP server | **171 MiB** (the workload is most of it) |
-
-VM boot: about 60 ms to restore a pooled VM, 220–350 ms to boot a VM of another size. (A Pod used to take 11–14 seconds to start with
-the unprivileged Cloud Hypervisor: the daemon waited for an answer that Cloud Hypervisor never closes, until a 10 second timeout. That is fixed;
-the figures below and in [docs/performance.md](docs/performance.md) are from after the fix.) **The figures in the original README (about 6 MB idle and
-24 MB per VM, 150 pods in 11 s) came from other hardware and settings; we could not reproduce them**, and the fixed cost of a VM here is
-the table above. Kata Containers with Cloud Hypervisor, in our setup, took 177 MiB for an empty Pod. A comparison of runc, gVisor,
-Kata and this shim under the same load is in [docs/performance.md](docs/performance.md) when we have it. The restore mode (`Copy` by default, `OnDemand` opt-in) is in [docs/memory-restore.md](docs/memory-restore.md).
-
-A database Pod (PostgreSQL 18, a VM of 1 GiB, a persistent volume on an LVM logical volume, `pgbench` scale 100, 1.5 GB: more than the VM's memory), the same test three times,
-with direct I/O on, off and on again (2026-10-20):
-
-| | direct I/O on | off | on again |
-|---|---|---|---|
-| `tpcb-like` (5 min, 8 clients) | 3,032 tps | 3,070 tps | 2,965 tps |
-| `select-only` (3 min) | 19,334 tps | 18,038 tps | 19,302 tps |
-| page cache charged to the Pod's cgroup | 0 MiB | 259–264 MiB | 0 MiB |
-
-After a hard reset of the host in the middle of writes (a software reset, not a power cut), all 11,416 acknowledged inserts were there and `pg_amcheck` was clean.
 
 ## When to Use
 
@@ -250,8 +296,8 @@ See the **[docs/](docs/)** folder for detailed documentation:
 - **[Azure Kubernetes Service](example/aks/)** — deploy on AKS with the DaemonSet installer. **This is the original's procedure and we
   have not run it**: our changes (unprivileged Cloud Hypervisor, ACLs, cgroup layout, the volume source allow list) are untested on AKS
   nodes, and the code assumes `/dev/kvm` (not `/dev/mshv`).
-- **k3s** — the setup we test on: containerd's config comes from a template (`config-v3.toml.tmpl`) that k3s regenerates on start, so the
-  installer, which edits `/etc/containerd/config.toml`, does not fit k3s as it is. A written-down k3s example is still to come.
+- **k3s** — the setup we test on: [docs/k3s.md](docs/k3s.md). containerd's config comes from a template (`config-v3.toml.tmpl`) that k3s regenerates on start, so the
+  installer, which edits `/etc/containerd/config.toml`, does not fit k3s as it is.
 - **Docker** — trying it with `docker run --runtime=cloudhv` (Docker 29 with the containerd image store) is being worked on; see
   [docs/try-with-docker.md](docs/try-with-docker.md) if it is there yet.
 
