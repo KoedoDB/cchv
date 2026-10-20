@@ -138,20 +138,40 @@ pub fn vm_dir(state_dir: &Path) -> Option<PathBuf> {
     vm_dir_in(&settings()?.root, state_dir)
 }
 
-/// Make the VM's directory, empty, root's, 0711. Called when its Cloud Hypervisor is spawned (it is bound into the confined root).
-/// `None` when the feature is off.
+/// Make the VM's directory, root's, 0711. Called before the VM's console file is made in it, and again when its Cloud Hypervisor is spawned (it is
+/// bound into the confined root), so it may be there already: a directory with nothing in it but `console.log` is kept, anything else in a directory
+/// of the same name is of an earlier VM and goes. `None` when the feature is off.
 pub fn prepare_vm_dir(state_dir: &Path) -> Result<Option<PathBuf>> {
     use std::os::unix::fs::PermissionsExt;
     let Some(dir) = vm_dir(state_dir) else {
         return Ok(None);
     };
-    // Nothing of an earlier VM of the same name.
     if std::fs::symlink_metadata(&dir).is_ok() {
-        remove_dir(&dir);
+        if !only_the_console_log(&dir) {
+            remove_dir(&dir);
+        }
     }
-    std::fs::create_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
+    match std::fs::create_dir(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e).with_context(|| format!("create {}", dir.display())),
+    }
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o711))?;
     Ok(Some(dir))
+}
+
+/// Whether `dir` is a real directory (not a link) that holds nothing but, at most, `console.log`.
+fn only_the_console_log(dir: &Path) -> bool {
+    let is_dir = std::fs::symlink_metadata(dir)
+        .map(|m| m.is_dir())
+        .unwrap_or(false);
+    is_dir
+        && std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.flatten()
+                    .all(|e| e.file_name() == std::ffi::OsStr::new("console.log"))
+            })
+            .unwrap_or(false)
 }
 
 /// Remove the VM's directory and the disks in it (a VM that never had one is not an error).

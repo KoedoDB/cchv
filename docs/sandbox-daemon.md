@@ -826,7 +826,13 @@ The daemon is root and its socket is the one door:
 | `ch_memory_overhead_mib` | `256` | what a VM's cgroup allows beyond the guest's memory |
 | `ch_cpu_limit` | `false` | limit a VM's CPU time to its vCPUs plus one thread |
 | `ch_extra_ro_paths` | `[]` | paths shown read-only in every confined root |
-| `serial_console` | `true`, `false` with `ch_rootless` | write the guest's console (the virtio-console: the kernel's messages and the agent's log; the kernel has no serial port, so `console=hvc0`) to `console.log` in the VM's directory (in memory, no size limit) |
+| `serial_console` | `true`, `false` with `ch_rootless` | write the guest's console (the virtio-console: the kernel's messages and the agent's log; the kernel has no serial port, so `console=hvc0`) to `console.log` in the VM's directory for disks (`<emptydir_dir>/<VM name>/`, on the disk; in `/run`, memory, when there is no `emptydir_dir`) |
+| `console_forward` | `true` | with `serial_console` on, forward each new line of the console to the daemon's log (journald) as `console[vm=<VM name>] <line>`; the lines are made printable, with a budget for each VM, and what was forwarded (except the last `console_keep_bytes`) is dropped from the file with a hole. A log collector (Vector) reads journald |
+| `console_forward_interval_ms` | `1000` | how often the console files are read |
+| `console_forward_max_lines_per_sec` | `200` | the most lines a VM may forward in a second (a burst of five times that); the rest are counted and told as one line ("N lines dropped") |
+| `console_forward_max_line_bytes` | `2048` | the longest line forwarded; a longer one is cut |
+| `console_keep_bytes` | `65536` | the tail of the console left in the file after what was forwarded is dropped |
+| `console_min_punch_bytes` | `262144` | the least that is dropped from the file at one time |
 | `erofs_cache_dir` | `/run/cloudhv/erofs-cache` | where the shim keeps the images; must be the shim's `EROFS_CACHE_DIR` |
 | `emptydir_dir` | `/var/lib/cloudhv/emptydir` | where the disks of emptyDirs are made (the host's disk, not `/run`); empty turns them off and a request for one is refused. See "emptyDir disks" |
 | `emptydir_max_mib`, `emptydir_reserve_mib` | `16384`, `2048` | the largest disk a request may ask for; a disk is refused when the free space of `emptydir_dir` is below `size/4 + reserve` |
@@ -848,3 +854,18 @@ The request's `volumes` may carry `"disk": {"id": "<32 hex>", "size_mb": N}` (th
 The directory is removed when the VM is destroyed (`shutdown_and_destroy`, and a failed spawn), and everything in `emptydir_dir` is removed when the daemon starts (the VMs of an earlier daemon are stopped by then). Limits to know: the space of disks already made is not reserved (a host whose disks are all written fills up; the guest then gets I/O errors on that disk, and the page cache of the file is charged to the VM's cgroup), the disk is not rate limited, and `emptydir_dir` should be on a disk of its own or at least not the one `/var/lib/kubelet` and the images are on if the pods are not trusted.
 
 The daemon keeps its records in `<state_dir>/.ctl/` (0700 root), the outboxes of confined VMs in `<state_dir>/.out/` (0700 root; each VM's own is its user's), and the state directory is made 0711.
+
+## The guests' consoles in the log (`consolefwd.rs`)
+
+With `serial_console` on, each VM's console (the kernel's messages and the agent's log; the agent is the init) is written by the Cloud Hypervisor to `console.log`
+in the VM's directory for disks. The file went with the VM, had no limit and, in `/run`, took memory. The daemon now reads what is new in each file every
+`console_forward_interval_ms` and logs it as `console[vm=<VM name>] <line>` (target `console`).
+
+- The lines are text from an untrusted guest: made printable (escape sequences, control characters and carriage returns taken out, invalid UTF-8 replaced, a line cut at
+  `console_forward_max_line_bytes`), and always under the VM's name, which the daemon gives.
+- Each VM has a budget of `console_forward_max_lines_per_sec` lines a second (a burst of five times that); the lines over it are counted and told as one line.
+- The Cloud Hypervisor does not open the file for append, so the file cannot be cut (`copytruncate` would leave a hole of the old size before the next write). What was
+  forwarded, except the last `console_keep_bytes`, is dropped with a hole (`fallocate(PUNCH_HOLE | KEEP_SIZE)`): nothing moves, nothing written is lost, and the memory or disk
+  comes back. The size `ls` shows only grows.
+- `shutdown_and_destroy` forwards what is left before the VM's directory is removed, so the last lines of a VM that died are in the log.
+- The files are opened by root with `O_NOFOLLOW`.

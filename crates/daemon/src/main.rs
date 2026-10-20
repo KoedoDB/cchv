@@ -9,6 +9,7 @@ mod blockvol;
 mod cgroup;
 mod config;
 mod confine;
+mod consolefwd;
 mod ctl;
 mod emptydir;
 mod exec;
@@ -94,6 +95,7 @@ async fn daemon_main() -> Result<()> {
         // The disks of the emptyDirs of the VMs just stopped go with them; the directory is made if it is not there.
         emptydir::init(&config);
         blockvol::init(&config);
+        consolefwd::init(&config);
         // The workload snapshots of an earlier daemon are unknown to this one (its cache is empty) and were made by VMs it can no longer
         // vouch for: they go. The base snapshot is reused only if the daemon marked it complete (see `Pool::base_snapshot_valid`).
         if let Ok(entries) = std::fs::read_dir(config.snapshot_cache_dir()) {
@@ -106,6 +108,8 @@ async fn daemon_main() -> Result<()> {
         pool.initialize().await?;
         // A pool VM whose process died on its own (OOM kill, crash) is replaced within a few seconds, not when a pod is given it.
         pool.spawn_reaper(std::time::Duration::from_secs(5));
+        // The guests' consoles go to the log (when the console is written to a file).
+        consolefwd::spawn();
 
         // Initialize snapshot manager (for warm workload snapshots)
         let snapshots = shadow::SnapshotManager::new(config.clone(), Arc::clone(&pool));

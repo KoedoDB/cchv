@@ -34,6 +34,15 @@ fn check_socket(path: &Path) -> Result<()> {
     }
 }
 
+/// Where the VM's console log is: `console.log` in the VM's directory for disks (`<emptydir_dir>/<VM name>/`, on the disk) when there is one, else in the VM's
+/// state directory (`/run`, memory).
+pub fn console_log_path(state_dir: &Path) -> PathBuf {
+    match crate::emptydir::vm_dir(state_dir) {
+        Some(dir) => dir.join("console.log"),
+        None => state_dir.join("console.log"),
+    }
+}
+
 /// The `serial` and `console` parts of a VM's configuration. The guest has no serial port (its kernel has the virtio-console only, and is told `console=hvc0`), so its log
 /// goes through `console`, to `log` when there is one; `serial` stays off, since two devices cannot share a file. The agent is the init: its log, the kernel's messages and
 /// what a container writes to the console are what this file holds.
@@ -93,9 +102,11 @@ pub async fn boot_vm_sized(
 ) -> Result<u32> {
     // The console log is made before the Cloud Hypervisor exists, while the directory is still root's: afterwards the directory is the
     // VM's, which could have put a link in the place of the file. `spawn_ch` hands the file to the VM's user.
-    let console_log = state_dir.join("console.log");
+    let console_log = console_log_path(state_dir);
     let serial = config.serial_console_enabled();
     if serial {
+        // On the disk, in the VM's directory for disks, when there is one (not in memory: `/run` is a tmpfs); that directory is made now.
+        crate::emptydir::prepare_vm_dir(state_dir)?;
         crate::fsutil::create_new(&console_log).context("create console.log")?;
     }
     let ch_pid = spawn_ch(config, state_dir, memory_mb, vcpus).await?;
@@ -202,6 +213,7 @@ pub async fn spawn_ch(
             crate::rootless::release(state_dir).await;
             crate::rootless::drop_outbox(state_dir);
             crate::ctl::remove(state_dir);
+            crate::consolefwd::flush(state_dir);
             crate::emptydir::remove_vm_dir(state_dir);
             crate::blockvol::release(state_dir);
             Err(e)
@@ -223,7 +235,7 @@ async fn spawn_ch_inner(
     let user = crate::rootless::alloc_for(state_dir)?;
     if user.is_some() {
         crate::rootless::give(state_dir, state_dir)?;
-        let console = state_dir.join("console.log");
+        let console = console_log_path(state_dir);
         if console.exists() {
             crate::rootless::give(&console, state_dir)?;
         }
@@ -674,13 +686,14 @@ pub fn prepare_snapshot(
 
     // Patch the console path (the guest's log goes through `console`, the virtio-console; an older snapshot may have it in `serial`). The file is made here, before the
     // Cloud Hypervisor exists (the directory is still root's); `spawn_ch` hands it to the VM's user. A snapshot taken with the console off is restored with it off.
-    let console_path = vm_state_dir.join("console.log");
+    let console_path = console_log_path(vm_state_dir);
     let mut console_made = false;
     for key in ["serial", "console"] {
         if let Some(part) = cfg.pointer_mut(&format!("/{key}")) {
             if part.get("mode").and_then(|v| v.as_str()) == Some("File") {
                 if config.serial_console_enabled() {
                     if !console_made {
+                        crate::emptydir::prepare_vm_dir(vm_state_dir)?;
                         crate::fsutil::create_new(&console_path).context("create console.log")?;
                         console_made = true;
                     }
@@ -746,6 +759,8 @@ pub async fn shutdown_and_destroy(_api_socket: &Path, ch_pid: u32, state_dir: &P
     crate::rootless::release(state_dir).await;
     crate::rootless::drop_outbox(state_dir);
     crate::ctl::remove(state_dir);
+    // What the guest said last is forwarded before its directory goes.
+    crate::consolefwd::flush(state_dir);
     crate::emptydir::remove_vm_dir(state_dir);
     crate::blockvol::release(state_dir);
     let _ = std::fs::remove_dir_all(state_dir);
