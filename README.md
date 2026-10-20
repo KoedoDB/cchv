@@ -86,7 +86,7 @@ VM of 1 GiB), direct I/O on, off and on again:
 - `kill -9` of the VM's Cloud Hypervisor in the middle of writes, several times: the Pod came back, the totals of the `pgbench` tables agreed and `pg_amcheck` was clean.
 - A full disk: PostgreSQL returned `ERROR: could not extend file … No space left on device`, with no `PANIC` and no restart; writes resumed within a second of freeing space.
 - A hard reset of the host in the middle of writes (a software reset, not a power cut): all 11,416 acknowledged inserts were there.
-- With the memory balloon on, memory the guest freed (an anonymous 350 MB) went back to the host within seconds; page cache does not.
+- With the memory balloon on, memory the guest freed went back to the host within seconds (350 MB of anonymous memory in a Pod booted for its size; 120 MB of tmpfs in a Pod restored from the pool, whose guest memory is shared memory: the host's `Shmem` fell back within 5 seconds); page cache that is still in use does not.
 
 What we have **not** measured or done: other hardware, a power cut, many Pods at once, GPU or live migration (not supported), a run of days on this version.
 
