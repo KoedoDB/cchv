@@ -141,6 +141,6 @@ you share with things you care about, and remove it with `--clean`.
 
 ## Report problems
 
-Issues: <https://github.com/KoedoDB/containerd-cloudhypervisor/issues>. A vulnerability: please use GitHub's private security advisory of
+Issues: <https://github.com/KoedoDB/cchv/issues>. A vulnerability: please use GitHub's private security advisory of
 that repository, not an issue. Questions about Cloud Hypervisor itself belong in its own community
 (<https://github.com/cloud-hypervisor/cloud-hypervisor>).

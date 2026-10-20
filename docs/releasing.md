@@ -82,10 +82,10 @@ Cloud Hypervisor's version is the one in `hacks/versions.env` (v54.0 at the time
 ## Verifying and installing a release
 
 ```bash
-TAG=v0.16.0-koedodb.1; BASE=https://github.com/KoedoDB/containerd-cloudhypervisor/releases/download/$TAG
+TAG=v0.17.0-koedodb.1; BASE=https://github.com/KoedoDB/cchv/releases/download/$TAG
 wget "$BASE/checksums-sha256.txt" "$BASE/checksums-sha256.txt.sigstore.json" "$BASE/containerd-shim-cloudhv-v1-linux-amd64"
 cosign verify-blob --bundle checksums-sha256.txt.sigstore.json \
-  --certificate-identity-regexp '^https://github.com/KoedoDB/containerd-cloudhypervisor/' \
+  --certificate-identity-regexp '^https://github.com/KoedoDB/cchv/' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums-sha256.txt
 sha256sum -c checksums-sha256.txt --ignore-missing
 chmod +x containerd-shim-cloudhv-v1-linux-amd64 && ./containerd-shim-cloudhv-v1-linux-amd64 --version
@@ -95,9 +95,12 @@ The installer image is signed; check it by its digest (the release notes give it
 
 ```bash
 cosign verify ghcr.io/koedodb/cloudhv-installer@sha256:<digest> \
-  --certificate-identity-regexp '^https://github.com/KoedoDB/containerd-cloudhypervisor/' \
+  --certificate-identity-regexp '^https://github.com/KoedoDB/cchv/' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
+
+**Releases up to `v0.16.0-koedodb.1` were signed when the repository was called `containerd-cloudhypervisor`**: for them the identity is
+`^https://github.com/KoedoDB/containerd-cloudhypervisor/` (the name is in the certificate).
 
 For the Helm chart, always pass the image digest (`--set image.digest=sha256:<digest>`); the chart refuses to render without a digest or a tag.
 Remember that the installer edits `/etc/containerd/config.toml`, which suits plain containerd hosts; k3s needs its template instead

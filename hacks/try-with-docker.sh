@@ -13,7 +13,7 @@
 #                     and optionally cloud-hypervisor (a static v54.0 binary), vmlinux, rootfs.erofs. Anything missing is downloaded
 #                     (see --tag). Docker support is in the shim and the daemon of a build from after 2026-10-16: the binaries of the
 #                     release v0.15.0-koedodb.1 do not have it, so build the two yourself (docs/try-with-docker.md says how).
-#   --tag TAG         the release of KoedoDB/containerd-cloudhypervisor to take missing files from (default: v0.15.0-koedodb.1)
+#   --tag TAG         the release of KoedoDB/cchv to take missing files from (default: v0.15.0-koedodb.1)
 #   --name NAME       the name of the container (default: cchv-docker)
 #   --feature-test    also run hacks/docker-feature-test.sh in it and print its output
 #   --clean           remove the container and stop
@@ -30,7 +30,7 @@ CLEAN=0
 CH_VERSION="v54.0"
 # sha256 of cloud-hypervisor-static of v54.0 (the same as hacks/checksums.txt)
 CH_SHA256="4f4f98a3d661a40f3e5272627cc895a1b2e525f2f6bedf5f895f9cd21ba5c65b"
-REPO="KoedoDB/containerd-cloudhypervisor"
+REPO="KoedoDB/cchv"
 
 while [ $# -gt 0 ]; do
   case "$1" in

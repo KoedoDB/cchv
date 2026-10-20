@@ -1,11 +1,12 @@
-# containerd-cloudhypervisor (KoedoDB's fork)
+# cchv — a containerd shim for Cloud Hypervisor
 
 A [containerd](https://containerd.io/) shim for [Cloud Hypervisor](https://www.cloudhypervisor.org/) that runs container workloads
 inside lightweight microVMs: one VM per Pod, a small purpose-built shim instead of a full Kata stack, and a pool of warm VMs
 restored from snapshots.
 
-> **This is a fork** of [devigned/containerd-cloudhypervisor](https://github.com/devigned/containerd-cloudhypervisor) by David Justice
-> (MIT). The idea and the first implementation are his; we are grateful for them.
+> **This began as a fork** of [devigned/containerd-cloudhypervisor](https://github.com/devigned/containerd-cloudhypervisor) by David Justice
+> (MIT). The idea and the first implementation are his; we are grateful for them. The repository is independent of the original since 2026-10-20
+> (the original has had no commits since March 2026); the history is kept, and so is the licence. It was called `containerd-cloudhypervisor`; GitHub forwards the old address.
 
 ## Why we forked
 
@@ -111,7 +112,7 @@ storage:
   - path: /etc/extensions/containerd-cloudhypervisor.raw
     mode: 0644
     contents:
-      source: https://github.com/KoedoDB/containerd-cloudhypervisor/releases/download/<release-version>/containerd-cloudhypervisor-<release-version>-x86-64.raw
+      source: https://github.com/KoedoDB/cchv/releases/download/<release-version>/containerd-cloudhypervisor-<release-version>-x86-64.raw
 ```
 
 The sysext includes a brief demo to verify if the system is working. Run
