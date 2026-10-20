@@ -8,10 +8,10 @@
                     │                                                             │
                     │  Base snapshot: kernel + agent (clean state)                │
                     │                                                             │
-                    │  Pool (OnDemand restore from base, ~25ms each):            │
-                    │    VM-1: agent ready, 6 MB idle RSS ✓                      │
-                    │    VM-2: agent ready, 6 MB idle RSS ✓                      │
-                    │    VM-3: agent ready, 6 MB idle RSS ✓                      │
+                    │  Pool (restore from the base snapshot):                     │
+                    │    VM-1: agent ready ✓                                      │
+                    │    VM-2: agent ready ✓                                      │
+                    │    VM-3: agent ready ✓                                      │
                     │                                                             │
                     │  Warm workload snapshots (via shadow VMs):                  │
                     │    python-runtime: warm ✓                                   │
@@ -97,7 +97,7 @@ sandbox creation and application containers:
 
 - **Sandbox** (`container-type=sandbox`): sets up TAP networking in the pod's
   network namespace. With the daemon, no VM is spawned yet — TAP info is stored
-  for the subsequent `AcquireSandbox` call. Returns in ~7ms.
+  for the subsequent `AcquireSandbox` call.
 - **App container** (`container-type=container`): calls `daemon.AcquireSandbox()`
   with the stored TAP info and image key. The daemon returns a pre-booted VM
   (from pool or warm snapshot). The shim converts the rootfs to erofs (cached),
@@ -107,19 +107,18 @@ sandbox creation and application containers:
 ### Boot Flow (Daemon Mode)
 
 ```
-start_sandbox (7ms):
+start_sandbox:
   TAP setup → store TAP info → return
 
-  ─── containerd gap (~90ms) ───
+  ─── containerd gap ───
 
 start_container:
-  erofs lookup (0ms cached / 8ms uncached)
-  → daemon.AcquireSandbox (0ms pool hit / 25ms sync restore)
+  erofs lookup (cached, or mkfs.erofs)
+  → daemon.AcquireSandbox (pool hit, or a restore on the spot)
   → hot-plug disk + RunContainer RPC
-  → total ~74ms cold path
 ```
 
-For warm snapshot paths (~168ms): the daemon restores from a workload snapshot,
+For warm snapshot paths: the daemon restores from a workload snapshot,
 the shim calls `ConfigureNetwork` to assign the pod IP, and the workload wakes
 up already running.
 
@@ -135,8 +134,8 @@ lock file. After acquiring the lock, the shim re-checks whether the
 cache file exists (double-checked locking). If `mkfs.erofs` fails
 (e.g. fork pressure under heavy pod creation load), it retries up to
 3 times with progressive backoff (100ms, 200ms, 300ms). In practice,
-only the very first pod per image per node runs `mkfs.erofs` (~8ms);
-all subsequent pods hit the cache (0ms).
+only the very first pod per image per node runs `mkfs.erofs`;
+all subsequent pods hit the cache.
 
 In both tiers, config.json and volume data (ConfigMaps, Secrets) are delivered
 inline via the RunContainer RPC — the agent writes them to the bundle

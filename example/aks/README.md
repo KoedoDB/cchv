@@ -143,7 +143,7 @@ curl http://$EXTERNAL_IP/
 ### Scale Up
 
 Each new replica boots a fresh microVM. With rootfs caching, subsequent pods
-of the same image start in ~300ms:
+of the same image start faster:
 
 ```bash
 # Scale to 150 replicas (150 VMs across 3 D8s_v5 nodes)

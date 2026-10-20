@@ -9,7 +9,7 @@ the Python SDK to execute Python code inside a VM-isolated sandbox pod.
 Agent Sandbox provides a Kubernetes-native API for managing isolated, stateful
 workloads — ideal for executing untrusted, LLM-generated code. By combining it
 with CloudHV's VM isolation, each sandbox runs inside its own lightweight
-microVM, providing hardware-level isolation with ~59 MB per-pod RSS overhead.
+microVM, providing hardware-level isolation.
 
 **Architecture:**
 

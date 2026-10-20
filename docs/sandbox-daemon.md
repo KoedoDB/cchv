@@ -2,26 +2,8 @@
 
 ## Status: Implemented
 
-> **The benchmark figures in this document (the 150-pod AKS run, about 24 MB per VM, node memory at 150 pods) are the original author's, with 128 MB guests. We have
-> not reproduced them**; our own measurements are in the [README](../README.md#numbers-measured-by-us).
-
-The sandbox daemon is fully implemented and tested. All four implementation
-stages are complete. Key results from the 150-pod AKS benchmark on
-3 × D8ds_v5 nodes (96 GiB total RAM):
-
-| Metric | Result |
-|--------|--------|
-| 150-pod scale-up | **150/150 in 11s** |
-| Per-VM RSS (128 MB allocated) | **~24 MB** (OnDemand userfaultfd) |
-| Node memory at 150 pods | **~10%** of 32 GB |
-| Cold path shim inner | **~74ms** |
-| Warm snapshot path | **~168ms** |
-| Pool VM idle RSS | **~6 MB** |
-| Daemon RSS | **~2.2 MB** |
-
-For comparison, the previous shim-only architecture (v0.11.0) achieved
-150/150 in 77s with ~5 MiB CoW / ~59 MiB cold per pod. Kata Containers
-OOMs at 130/150 pods with ~330 MB per pod on the same infrastructure.
+The sandbox daemon is fully implemented and tested. All four implementation stages are complete. Figures that we measured are in the
+[README](../README.md#numbers-measured-by-us); this document describes the design (the figures of the original project's runs are not repeated here: we did not reproduce them).
 
 ## Problem
 
@@ -458,16 +440,7 @@ The installer DaemonSet additionally:
 
 ### Measured Performance
 
-With CH v51+ OnDemand restore on AKS (3 × D8ds_v5):
-
-| Scenario | Previous (v0.11.0) | Daemon (measured) |
-|----------|-------------------:|------------------:|
-| Single pod (pool hit) | 120-200ms | **~74ms** (cold path shim inner) |
-| Single pod (warm restore) | ~344ms | **~168ms** |
-| 150-pod burst | 77s | **11s** |
-| Per-VM RSS | ~59 MiB cold / ~5 MiB CoW | **~24 MB** |
-| Pool VM idle RSS | N/A | **~6 MB** |
-| Node memory at 150 pods | ~43% | **~10%** |
+See the [README](../README.md#numbers-measured-by-us) and [performance.md](performance.md): what a VM costs, the start times, and the tests of a database.
 | Daemon RSS | N/A | **~2.2 MB** |
 | Shim RSS | ~5.5 MiB | **~6 MB** |
 | Base snapshot creation | N/A | **~1s** (cold boot + agent wait + snapshot) |
@@ -500,7 +473,7 @@ is unavailable.
 #### Stage 4: AKS Benchmark and Production Hardening ✅
 
 Installer updated with daemon binary, systemd unit, and daemon config.
-150-pod AKS benchmark completed (see Results above). Remaining work:
+The 150-pod benchmark of the original project is not repeated here. Remaining work:
 
 - **CH v51 release dependency** — currently building from source (main branch)
   until CH cuts a release containing OnDemand restore
@@ -624,17 +597,9 @@ Measure wall-clock time from AcquireSandbox call to workload serving HTTP:
 
 Run each scenario 20 times to reduce noise. Report p50, p95, p99.
 
-#### Scale Benchmark (AKS, 3 × D8ds_v5)
+#### Scale Benchmark (not run by us yet)
 
-Compare with v0.12.0 and Kata on identical infrastructure:
-
-| Test | CloudHV v0.12.0 | CloudHV + Daemon | Kata |
-|------|-----------------|------------------|------|
-| 150 pods → all Ready | 77s | Target: <30s | 130/150 (stuck) |
-| Scale-down 150 → 0 | 12s | Target: <10s | ~30s |
-| Per-pod memory (cold) | 57 MiB | ~5 MiB (CoW from base) | 312 MiB |
-| Per-pod memory (warm) | 5 MiB | ~5 MiB (CoW from workload) | N/A |
-| Node memory at 150 pods | 4.2 GiB | Target: <3 GiB | 40.5 GiB |
+Scale 150 Pods to Ready, scale down to 0, and the memory of the nodes, on identical nodes; not measured by us on this version.
 
 Protocol:
 1. Deploy daemon with `pool_size: 10` on each node
