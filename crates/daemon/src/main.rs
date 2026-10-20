@@ -108,7 +108,7 @@ async fn daemon_main() -> Result<()> {
         pool.initialize().await?;
         // A pool VM whose process died on its own (OOM kill, crash) is replaced within a few seconds, not when a pod is given it.
         pool.spawn_reaper(std::time::Duration::from_secs(5));
-        // The guests' consoles go to the log (when the console is written to a file).
+        // The guests' consoles go to the log (they are read from the sockets the Cloud Hypervisors make).
         consolefwd::spawn();
 
         // Initialize snapshot manager (for warm workload snapshots)

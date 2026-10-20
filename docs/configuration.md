@@ -125,9 +125,9 @@ memory including pool VMs.
 
 - **Console device:** the guest kernel of this repository has the virtio-console and **no serial port**
   (`guest/kernel/configs/microvm.config`), so the console is `console=hvc0`; the daemon puts the
-  virtio-console in `console.log` of the VM's directory when `serial_console` is on (the kernel's messages
+  virtio-console on a Unix socket in the VM's state directory when `serial_console` is on, and logs what it reads (the kernel's messages
   and the agent's log: the agent is the init). With `console=ttyS0` the kernel has no console at all, the
-  agent has no stdout, and `console.log` stays empty. On **ARM64 (aarch64)** the installer still writes
+  agent has no stdout, and the console stays empty. On **ARM64 (aarch64)** the installer still writes
   `console=ttyAMA0` (PL011 UART); that kernel's console is not checked. If you override `kernel_args` in
   the config file, use the console your kernel has.
 - The kernel config used to build the guest kernel also differs per architecture:

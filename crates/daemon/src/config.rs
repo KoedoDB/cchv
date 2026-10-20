@@ -123,28 +123,27 @@ pub struct DaemonConfig {
     #[serde(default = "default_max_connections")]
     pub max_connections: usize,
 
-    /// Whether a VM's console (the virtio-console: the kernel's messages and the agent's log, the agent being the init) is written to `console.log` in its state
-    /// directory. The name is the old one, from the serial port the guest kernel does not have. Off by default with `ch_rootless`: the file is in memory (`/run`),
-    /// has no size limit, and the guest writes to it. On by default otherwise.
+    /// Whether a VM's console (the virtio-console: the kernel's messages and the agent's log, the agent being the init) is made, as a Unix socket in the VM's
+    /// state directory that the daemon reads (`console_forward`). The name is the old one, from the serial port the guest kernel does not have. On by default: the
+    /// console takes no disk and no memory of the host (see `consolefwd.rs`).
     #[serde(default)]
     pub serial_console: Option<bool>,
 
-    /// With the console written to a file (`serial_console`): forward each new line of it to the daemon's log as `console[vm=<name>] <line>` (`consolefwd.rs`), so
-    /// that a log collector has it and what a VM said before it died is kept. What was forwarded, except the last `console_keep_bytes`, is dropped from the file.
+    /// With the console on (`serial_console`): read it and log each line as `console[vm=<name>] <line>` (`consolefwd.rs`), so that a log collector has it and what a
+    /// VM said before it died is kept. Off, the console is off too (a socket nobody reads only makes the Cloud Hypervisor drop what the guest writes).
     #[serde(default = "default_true")]
     pub console_forward: bool,
-    /// How often the files are read (ms), the most lines a VM may forward a second (a burst of five times that; the rest are counted, not forwarded), the longest line
-    /// (bytes; a longer one is cut), the tail left in the file, and the least that is dropped at one time (a hole is not made for less).
+    /// How often the daemon looks for a console it does not read (ms; after it restarted), the most lines a VM may forward a second (a burst of five times that; the
+    /// rest are counted, not forwarded), the longest line (bytes; a longer one is cut), and the most bytes the daemon reads from a VM a second (the rest of the second
+    /// it does not read, and the Cloud Hypervisor drops what the guest writes).
     #[serde(default = "default_console_forward_interval_ms")]
     pub console_forward_interval_ms: u64,
     #[serde(default = "default_console_forward_max_lines_per_sec")]
     pub console_forward_max_lines_per_sec: u32,
     #[serde(default = "default_console_forward_max_line_bytes")]
     pub console_forward_max_line_bytes: usize,
-    #[serde(default = "default_console_keep_bytes")]
-    pub console_keep_bytes: u64,
-    #[serde(default = "default_console_min_punch_bytes")]
-    pub console_min_punch_bytes: u64,
+    #[serde(default = "default_console_forward_max_bytes_per_sec")]
+    pub console_forward_max_bytes_per_sec: u64,
 
     /// The most processes (threads count) the user of a rootless Cloud Hypervisor may have (`RLIMIT_NPROC`).
     #[serde(default = "default_ch_max_processes")]
@@ -249,11 +248,8 @@ fn default_console_forward_max_lines_per_sec() -> u32 {
 fn default_console_forward_max_line_bytes() -> usize {
     2048
 }
-fn default_console_keep_bytes() -> u64 {
-    64 * 1024
-}
-fn default_console_min_punch_bytes() -> u64 {
-    256 * 1024
+fn default_console_forward_max_bytes_per_sec() -> u64 {
+    2 * 1024 * 1024
 }
 fn default_max_request_bytes() -> usize {
     8 * 1024 * 1024
@@ -321,9 +317,9 @@ impl DaemonConfig {
         Ok(config)
     }
 
-    /// Whether the console of a VM is written to a file (see `serial_console`).
-    pub fn serial_console_enabled(&self) -> bool {
-        self.serial_console.unwrap_or(!self.ch_rootless)
+    /// Whether the console of a VM is made, and read by the daemon (see `serial_console`, `console_forward`).
+    pub fn console_enabled(&self) -> bool {
+        self.serial_console.unwrap_or(true) && self.console_forward
     }
 
     /// Path to the base snapshot directory.

@@ -1,67 +1,68 @@
 //! The guest's console, forwarded to the daemon's log.
 //!
-//! With `serial_console` on, the Cloud Hypervisor writes each VM's console (the kernel's messages and the agent's log, the agent being the init)
-//! to `console.log` in the VM's directory. That file goes with the VM, so what the guest said just before it died was lost, and it has no limit
-//! on its size. This module reads what is new in each file every `console_forward_interval_ms`, and writes it to the daemon's log (journald, when
-//! the daemon is a service) as `console[vm=<name>] <line>`, where a log collector (Vector) picks it up.
+//! With `serial_console` and `console_forward` on, each VM's console (the kernel's messages and the agent's log, the agent being the init) goes
+//! through a Unix socket the Cloud Hypervisor makes in the VM's state directory (`console.sock`, `console` mode `Socket`). The daemon connects to it
+//! and logs what it reads as `console[vm=<name>] <line>` (journald, when the daemon is a service), where a log collector (Vector) picks it up.
+//!
+//! There is no file: what the guest says takes no disk and no memory of the host, and nothing has to be rotated or cut. (Written to a file, the
+//! console grew with whatever the guest wrote until the daemon dropped the forwarded part, and the Cloud Hypervisor does not open the file for
+//! append, so it could not be rotated: tried and dropped, 2026-10-20.) The price: **while nobody reads the socket, the Cloud Hypervisor drops what
+//! the guest writes** (the guest is never held up). The daemon connects before the guest boots (`attach`, between `vm.create` and `vm.boot`, or
+//! after `vm.restore`), and again from a scan every `console_forward_interval_ms` (after the daemon restarted), so only what a VM says while the
+//! daemon is down, and the few lines between a lost connection and the next scan, are lost.
 //!
 //! - **What the guest says is the guest's**: the lines are text from an untrusted guest. They are made printable (escape sequences and control
 //!   characters taken out, a line cut at `console_forward_max_line_bytes`) and always carry the VM's name, which the daemon gives and the guest
 //!   cannot choose. They are never read as the daemon's own.
 //! - **A guest that writes without end cannot flood the log**: each VM has a budget of `console_forward_max_lines_per_sec` lines a second (a burst
-//!   of five times that); the lines over it are counted and told as one line ("N lines dropped").
-//! - **The file does not grow in memory**: what was forwarded, except the last `console_keep_bytes`, is dropped from the file with a hole
-//!   (`fallocate(PUNCH_HOLE | KEEP_SIZE)`). The Cloud Hypervisor does not open the file for append, so cutting the file (copytruncate) would leave
-//!   a hole of the old size in front of the next write; a hole punched in the old part moves nothing, and nothing written is lost. The
-//!   file's size, as `ls` shows it, only grows; the memory or disk it takes is the kept tail.
-//! - **The last lines are kept**: `flush` forwards what is left when a VM is destroyed, before its directory goes.
-//! - The files are opened by root with `O_NOFOLLOW`; a link in the place of the file is refused.
+//!   of five times that); the lines over it are counted and told as one line ("N lines dropped"). It cannot flood the daemon either: past
+//!   `console_forward_max_bytes_per_sec` the daemon stops reading until the second is over, and the Cloud Hypervisor drops the rest.
+//! - **The other end is checked**: the socket must be a socket (not a link), and the process that listens on it must have the user of the VM's
+//!   Cloud Hypervisor (root, without `ch_rootless`). The daemon only reads; it writes nothing to the socket.
+//! - **The last lines are kept**: a connection is read to its end, so what a VM said just before it died is in the log.
 
-use std::collections::HashMap;
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::{FileExt, OpenOptionsExt};
+use std::collections::HashSet;
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use log::{info, warn};
+use log::{debug, info, warn};
+use tokio::io::AsyncReadExt;
+use tokio::net::UnixStream;
 
 use crate::config::DaemonConfig;
 
-/// How much one pass reads of one file (a guest that writes faster is caught up with at the next pass, or dropped by the budget).
-const READ_CHUNK: u64 = 256 * 1024;
 /// The burst a VM may have, in seconds of its rate.
 const BURST_SECONDS: f64 = 5.0;
+/// How long `attach` waits for the Cloud Hypervisor to make the socket.
+const ATTACH_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 struct Settings {
     interval: Duration,
     max_lines_per_sec: u32,
     max_line_bytes: usize,
-    keep_bytes: u64,
-    min_punch_bytes: u64,
-    /// The directories whose subdirectories (one for each VM) may hold a `console.log`.
+    max_bytes_per_sec: u64,
+    /// The directories whose subdirectories (one for each VM) may hold a `console.sock`.
     roots: Vec<PathBuf>,
 }
 
 static SETTINGS: OnceLock<Option<Settings>> = OnceLock::new();
-static TRACKERS: OnceLock<Mutex<HashMap<PathBuf, Tracker>>> = OnceLock::new();
+/// The state directories whose console is being read.
+static ACTIVE: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
 fn settings() -> Option<&'static Settings> {
     SETTINGS.get().and_then(|s| s.as_ref())
 }
 
-fn trackers() -> &'static Mutex<HashMap<PathBuf, Tracker>> {
-    TRACKERS.get_or_init(|| Mutex::new(HashMap::new()))
+fn active() -> &'static Mutex<HashSet<PathBuf>> {
+    ACTIVE.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-/// What is known of one file between two passes.
+/// What is known of one console between two reads.
 #[derive(Debug, Default)]
 struct Tracker {
-    /// How far the file was read.
-    offset: u64,
-    /// How far the file was dropped with a hole.
-    punched: u64,
     /// The start of a line whose end was not written yet.
     pending: Vec<u8>,
     /// The budget of lines.
@@ -70,20 +71,19 @@ struct Tracker {
     dropped: u64,
 }
 
-/// Read the configuration. Off unless the console is written to a file (`serial_console`) and `console_forward` is on.
+/// Where the Cloud Hypervisor makes the console socket of the VM whose state directory this is.
+pub fn socket_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("console.sock")
+}
+
+/// Read the configuration. Off unless the console is on (`serial_console`) and `console_forward` is on.
 pub fn init(config: &DaemonConfig) {
-    let mut roots = Vec::new();
-    if !config.emptydir_dir.is_empty() {
-        roots.push(PathBuf::from(&config.emptydir_dir));
-    }
-    roots.push(PathBuf::from(&config.state_dir));
-    let s = (config.serial_console_enabled() && config.console_forward).then(|| Settings {
+    let s = config.console_enabled().then(|| Settings {
         interval: Duration::from_millis(config.console_forward_interval_ms.max(100)),
         max_lines_per_sec: config.console_forward_max_lines_per_sec.max(1),
         max_line_bytes: config.console_forward_max_line_bytes.max(64),
-        keep_bytes: config.console_keep_bytes,
-        min_punch_bytes: config.console_min_punch_bytes,
-        roots,
+        max_bytes_per_sec: config.console_forward_max_bytes_per_sec.max(1024),
+        roots: vec![PathBuf::from(&config.state_dir)],
     });
     if s.is_some() {
         info!("the guests' consoles are forwarded to the log (console[vm=...])");
@@ -91,7 +91,7 @@ pub fn init(config: &DaemonConfig) {
     let _ = SETTINGS.set(s);
 }
 
-/// Forward the consoles every interval, until the daemon stops. A no-op when the feature is off.
+/// Look for consoles nobody reads (after the daemon restarted) every interval, until the daemon stops. A no-op when the feature is off.
 pub fn spawn() {
     let Some(s) = settings() else {
         return;
@@ -100,18 +100,18 @@ pub fn spawn() {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(interval).await;
-            let _ = tokio::task::spawn_blocking(forward_all).await;
+            scan().await;
         }
     });
 }
 
-/// The name of the VM a console file belongs to: its directory's name, when that is a name the daemon gives.
-fn vm_of(path: &Path) -> Option<String> {
-    let name = path.parent()?.file_name()?.to_str()?;
+/// The name of the VM a state directory belongs to: its name, when that is a name the daemon gives.
+fn vm_of(state_dir: &Path) -> Option<String> {
+    let name = state_dir.file_name()?.to_str()?;
     crate::validate::is_id(name).then(|| name.to_string())
 }
 
-fn forward_all() {
+async fn scan() {
     let Some(s) = settings() else {
         return;
     };
@@ -120,102 +120,154 @@ fn forward_all() {
             continue;
         };
         for e in entries.flatten() {
-            let log = e.path().join("console.log");
-            if vm_of(&log).is_some() && std::fs::symlink_metadata(&log).is_ok() {
-                forward_file(s, &log, false);
+            let dir = e.path();
+            if vm_of(&dir).is_none() || !is_socket(&socket_path(&dir)) {
+                continue;
+            }
+            let known = active().lock().map(|a| a.contains(&dir)).unwrap_or(true);
+            if !known {
+                connect(s, &dir, false).await;
             }
         }
     }
 }
 
-/// Forward what is left of the console of the VM whose state directory is `state_dir`, before the directory goes. A VM with no console is not
-/// an error.
-pub fn flush(state_dir: &Path) {
+/// Read the console of the VM whose state directory is `state_dir`: call it after the Cloud Hypervisor made the VM's devices (`vm.create`,
+/// `vm.restore`) and before the guest runs, so that nothing it says is lost. Failing is logged, not an error: the scan tries again.
+pub async fn attach(state_dir: &Path) {
     let Some(s) = settings() else {
         return;
     };
-    let log = crate::vm_lifecycle::console_log_path(state_dir);
-    if std::fs::symlink_metadata(&log).is_ok() {
-        forward_file(s, &log, true);
-    }
-    if let Ok(mut t) = trackers().lock() {
-        t.remove(&log);
-    }
+    connect(s, state_dir, true).await;
 }
 
-fn forward_file(s: &Settings, path: &Path, last: bool) {
-    let Some(vm) = vm_of(path) else {
+fn is_socket(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_socket())
+        .unwrap_or(false)
+}
+
+/// Connect to the console socket of a VM and read it in a task. `wait`: the socket may not be there yet.
+async fn connect(s: &'static Settings, state_dir: &Path, wait: bool) {
+    let Some(vm) = vm_of(state_dir) else {
         return;
     };
-    let mut map = trackers().lock().unwrap_or_else(|p| p.into_inner());
-    let tracker = map.entry(path.to_path_buf()).or_default();
-    let mut emit = |line: &str| info!(target: "console", "console[vm={vm}] {line}");
-    if let Err(e) = forward_from(s, path, tracker, Instant::now(), last, &mut emit) {
+    {
+        let Ok(mut a) = active().lock() else {
+            return;
+        };
+        if !a.insert(state_dir.to_path_buf()) {
+            return; // read already
+        }
+    }
+    let path = socket_path(state_dir);
+    let started = Instant::now();
+    let stream = loop {
+        // A link is not followed by anything the daemon does here: it is looked at first (what the user of the VM can swap between this and
+        // the connect is caught by the check of the other end).
+        let attempt = if is_socket(&path) {
+            UnixStream::connect(&path).await
+        } else {
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+        };
+        match attempt {
+            Ok(st) => break Some(st),
+            Err(e) if wait && started.elapsed() < ATTACH_WAIT => {
+                debug!("console of VM {vm}: not yet ({e})");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(e) => {
+                if wait {
+                    warn!("console of VM {vm}: cannot connect: {e}");
+                }
+                break None;
+            }
+        }
+    };
+    let Some(stream) = stream else {
+        forget(state_dir);
+        return;
+    };
+    let want = crate::rootless::uid_of(state_dir).unwrap_or(0);
+    if let Err(e) = check_peer(&stream, want) {
         warn!("console of VM {vm}: {e}");
+        forget(state_dir);
+        return;
+    }
+    let dir = state_dir.to_path_buf();
+    tokio::spawn(async move {
+        let emit_vm = vm.clone();
+        let mut emit = move |line: &str| info!(target: "console", "console[vm={emit_vm}] {line}");
+        if let Err(e) = read_console(stream, s, &mut emit).await {
+            debug!("console of VM {vm}: {e}");
+        }
+        forget(&dir);
+    });
+}
+
+fn forget(state_dir: &Path) {
+    if let Ok(mut a) = active().lock() {
+        a.remove(state_dir);
     }
 }
 
-/// One pass over one file. `emit` gets each line to forward. `last` is the final pass of a VM: the line that has no end yet is forwarded too and
-/// the budget is full.
-fn forward_from(
-    s: &Settings,
-    path: &Path,
-    t: &mut Tracker,
-    now: Instant,
-    last: bool,
-    emit: &mut dyn FnMut(&str),
-) -> std::io::Result<()> {
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NOCTTY)
-        .open(path)?;
-    let meta = file.metadata()?;
-    if !meta.is_file() {
-        return Ok(());
+/// The process that listens on the socket has the user `want`: the VM's Cloud Hypervisor, not something else the VM's user put in its place.
+fn check_peer(stream: &UnixStream, want: u32) -> Result<(), String> {
+    match stream.peer_cred() {
+        Ok(c) if c.uid() == want => Ok(()),
+        Ok(c) => Err(format!(
+            "the socket is listened on by user {}, not {want}: not read",
+            c.uid()
+        )),
+        Err(e) => Err(format!("the other end of the socket is unknown: {e}")),
     }
-    let len = meta.len();
-    if len < t.offset {
-        // The file was cut: begin again.
-        *t = Tracker::default();
-    }
-    // The budget: it grows with the time since the last pass, up to the burst.
-    let cap = s.max_lines_per_sec as f64 * BURST_SECONDS;
-    let elapsed = t
-        .last_pass
-        .map(|p| now.saturating_duration_since(p).as_secs_f64())
-        .unwrap_or(BURST_SECONDS);
-    t.tokens = if last {
-        cap
-    } else {
-        (t.tokens + elapsed * s.max_lines_per_sec as f64).min(cap)
-    };
-    t.last_pass = Some(now);
+}
 
-    let mut taken = 0;
-    while t.offset < len && taken < READ_CHUNK {
-        // Skip a hole (what was dropped): there is nothing to read in it.
-        let data =
-            unsafe { libc::lseek(file.as_raw_fd(), t.offset as libc::off_t, libc::SEEK_DATA) };
-        if data < 0 {
-            // No data after the offset: the rest is a hole.
-            t.offset = len;
-            break;
-        }
-        t.offset = data as u64;
-        let want = (len - t.offset).min(READ_CHUNK - taken) as usize;
-        let mut buf = vec![0u8; want];
-        let n = file.read_at(&mut buf, t.offset)?;
+/// Read a console to its end. `emit` gets each line to forward.
+async fn read_console(
+    mut stream: UnixStream,
+    s: &Settings,
+    emit: &mut (dyn FnMut(&str) + Send),
+) -> std::io::Result<()> {
+    let mut t = Tracker::default();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut window = Instant::now();
+    let mut window_bytes: u64 = 0;
+    let mut told = Instant::now();
+    loop {
+        let n = stream.read(&mut buf).await?;
+        let now = Instant::now();
         if n == 0 {
-            break;
+            // The end: the line that has no end is forwarded too, and the count of what was dropped.
+            t.tokens = s.max_lines_per_sec as f64 * BURST_SECONDS;
+            if !t.pending.is_empty() {
+                let line = std::mem::take(&mut t.pending);
+                take_line(&mut t, &line, s.max_line_bytes, emit);
+            }
+            tell_dropped(&mut t, s, emit);
+            return Ok(());
         }
-        t.offset += n as u64;
-        taken += n as u64;
-        lines_of(t, &buf[..n], s.max_line_bytes, emit);
+        feed(&mut t, s, &buf[..n], now, emit);
+        if t.dropped > 0 && now.saturating_duration_since(told) >= Duration::from_secs(1) {
+            tell_dropped(&mut t, s, emit);
+            told = now;
+        }
+        // A guest that writes faster than the daemon is willing to read is not read for the rest of the second (the Cloud Hypervisor drops it).
+        if now.saturating_duration_since(window) >= Duration::from_secs(1) {
+            window = now;
+            window_bytes = 0;
+        }
+        window_bytes += n as u64;
+        if window_bytes > s.max_bytes_per_sec {
+            let left = Duration::from_secs(1).saturating_sub(now.saturating_duration_since(window));
+            tokio::time::sleep(left).await;
+            window = Instant::now();
+            window_bytes = 0;
+        }
     }
-    if last && !t.pending.is_empty() {
-        let line = std::mem::take(&mut t.pending);
-        take_line(t, &line, s.max_line_bytes, emit);
-    }
+}
+
+fn tell_dropped(t: &mut Tracker, s: &Settings, emit: &mut dyn FnMut(&str)) {
     if t.dropped > 0 {
         emit(&format!(
             "{} lines dropped (more than {} a second)",
@@ -223,14 +275,18 @@ fn forward_from(
         ));
         t.dropped = 0;
     }
-    // Drop what was forwarded, except the tail.
-    let target = t.offset.saturating_sub(s.keep_bytes);
-    if target > t.punched && target - t.punched >= s.min_punch_bytes {
-        if punch(path, t.punched, target - t.punched) {
-            t.punched = target;
-        }
-    }
-    Ok(())
+}
+
+/// Take in what was read: the budget grows with the time since the last read (up to the burst), then each whole line is handed to it.
+fn feed(t: &mut Tracker, s: &Settings, bytes: &[u8], now: Instant, emit: &mut dyn FnMut(&str)) {
+    let cap = s.max_lines_per_sec as f64 * BURST_SECONDS;
+    let elapsed = t
+        .last_pass
+        .map(|p| now.saturating_duration_since(p).as_secs_f64())
+        .unwrap_or(BURST_SECONDS);
+    t.tokens = (t.tokens + elapsed * s.max_lines_per_sec as f64).min(cap);
+    t.last_pass = Some(now);
+    lines_of(t, bytes, s.max_line_bytes, emit);
 }
 
 /// Split `bytes` (the pending start of a line, then these) into lines and hand each to the budget; the end that has no newline stays pending.
@@ -251,16 +307,17 @@ fn lines_of(t: &mut Tracker, bytes: &[u8], max: usize, emit: &mut dyn FnMut(&str
 }
 
 fn take_line(t: &mut Tracker, line: &[u8], max: usize, emit: &mut dyn FnMut(&str)) {
+    if t.tokens < 1.0 {
+        // Over the budget: not even made printable.
+        t.dropped += 1;
+        return;
+    }
     let text = printable(line, max);
     if text.is_empty() {
         return;
     }
-    if t.tokens >= 1.0 {
-        t.tokens -= 1.0;
-        emit(&text);
-    } else {
-        t.dropped += 1;
-    }
+    t.tokens -= 1.0;
+    emit(&text);
 }
 
 /// A line the guest wrote, made safe to put in a log: UTF-8 (what is not is replaced), no escape sequences (colours of the agent's log), no
@@ -299,53 +356,24 @@ fn printable(line: &[u8], max: usize) -> String {
     format!("{}…", &out[..end])
 }
 
-/// Drop `len` bytes of the file from `offset` with a hole, keeping its size. `false` if the file system cannot (the file then keeps its size).
-fn punch(path: &Path, offset: u64, len: u64) -> bool {
-    let Ok(file) = std::fs::OpenOptions::new()
-        .write(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NOCTTY)
-        .open(path)
-    else {
-        return false;
-    };
-    unsafe {
-        libc::fallocate(
-            file.as_raw_fd(),
-            libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
-            offset as libc::off_t,
-            len as libc::off_t,
-        ) == 0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::net::UnixListener as StdListener;
 
-    fn settings_for(root: &Path) -> Settings {
+    fn settings() -> Settings {
         Settings {
             interval: Duration::from_secs(1),
             max_lines_per_sec: 100,
             max_line_bytes: 200,
-            keep_bytes: 1024,
-            min_punch_bytes: 0,
-            roots: vec![root.to_path_buf()],
+            max_bytes_per_sec: 1 << 20,
+            roots: vec![],
         }
     }
 
-    fn vm_dir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("cloudhv-console-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        let vm = d.join("sized-1-0");
-        std::fs::create_dir_all(&vm).unwrap();
-        vm
-    }
-
-    fn pass(s: &Settings, path: &Path, t: &mut Tracker, now: Instant, last: bool) -> Vec<String> {
+    fn feed_all(s: &Settings, t: &mut Tracker, bytes: &[u8], now: Instant) -> Vec<String> {
         let mut out = Vec::new();
-        forward_from(s, path, t, now, last, &mut |l| out.push(l.to_string())).unwrap();
+        feed(t, s, bytes, now, &mut |l| out.push(l.to_string()));
         out
     }
 
@@ -382,150 +410,139 @@ mod tests {
 
     #[test]
     fn only_whole_lines_are_forwarded_and_the_start_of_a_line_waits() {
-        let vm = vm_dir("lines");
-        let log = vm.join("console.log");
-        let s = settings_for(vm.parent().unwrap());
+        let s = settings();
         let mut t = Tracker::default();
         let now = Instant::now();
-        std::fs::write(&log, "first\nsecond\nthi").unwrap();
-        assert_eq!(pass(&s, &log, &mut t, now, false), ["first", "second"]);
-        let mut f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
-        f.write_all(b"rd\nfourth").unwrap();
-        assert_eq!(pass(&s, &log, &mut t, now, false), ["third"]);
-        assert!(pass(&s, &log, &mut t, now, false).is_empty(), "nothing new");
-        // The last pass of a VM forwards the line that has no end.
-        assert_eq!(pass(&s, &log, &mut t, now, true), ["fourth"]);
-        let _ = std::fs::remove_dir_all(vm.parent().unwrap());
+        assert_eq!(
+            feed_all(&s, &mut t, b"first\nsecond\nthi", now),
+            ["first", "second"]
+        );
+        assert_eq!(feed_all(&s, &mut t, b"rd\nfourth", now), ["third"]);
+        assert!(feed_all(&s, &mut t, b"", now).is_empty(), "nothing new");
+        assert_eq!(t.pending, b"fourth");
+    }
+
+    #[test]
+    fn a_line_that_never_ends_is_cut_and_does_not_grow_without_end() {
+        let s = settings(); // lines of 200 bytes at most: 800 are held
+        let mut t = Tracker::default();
+        let out = feed_all(&s, &mut t, &vec![b'x'; 5000], Instant::now());
+        assert_eq!(out.len(), 1);
+        assert!(t.pending.len() <= 800);
     }
 
     #[test]
     fn a_guest_that_writes_without_end_gets_a_budget_and_a_count_of_what_was_dropped() {
-        let vm = vm_dir("budget");
-        let log = vm.join("console.log");
-        let s = settings_for(vm.parent().unwrap()); // 100 lines a second, a burst of 500
+        let s = settings(); // 100 lines a second, a burst of 500
         let mut t = Tracker::default();
         let now = Instant::now();
         let text: String = (0..2000).map(|i| format!("line {i}\n")).collect();
-        std::fs::write(&log, text).unwrap();
-        let out = pass(&s, &log, &mut t, now, false);
-        let lines = out.iter().filter(|l| l.starts_with("line ")).count();
-        assert_eq!(lines, 500, "the burst");
-        assert!(
-            out.last().unwrap().contains("1500 lines dropped"),
-            "{:?}",
-            out.last()
+        let out = feed_all(&s, &mut t, text.as_bytes(), now);
+        assert_eq!(out.len(), 500, "the burst");
+        assert_eq!(t.dropped, 1500);
+        let mut told = Vec::new();
+        tell_dropped(&mut t, &s, &mut |l| told.push(l.to_string()));
+        assert!(told[0].contains("1500 lines dropped"), "{told:?}");
+        assert_eq!(t.dropped, 0);
+        // A second later the budget has grown by 100 lines.
+        let out = feed_all(
+            &s,
+            &mut t,
+            "more\n".repeat(1000).as_bytes(),
+            now + Duration::from_secs(1),
         );
-        // Later the budget has grown a little: one second, 100 lines.
-        let mut f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
-        f.write_all(("more\n".repeat(1000)).as_bytes()).unwrap();
-        let out = pass(&s, &log, &mut t, now + Duration::from_secs(1), false);
-        assert_eq!(out.iter().filter(|l| *l == "more").count(), 100);
-        let _ = std::fs::remove_dir_all(vm.parent().unwrap());
-    }
-
-    #[test]
-    fn what_was_forwarded_is_dropped_with_a_hole_and_nothing_is_forwarded_twice() {
-        let vm = vm_dir("punch");
-        let log = vm.join("console.log");
-        let mut s = settings_for(vm.parent().unwrap());
-        s.max_lines_per_sec = 1_000_000;
-        s.keep_bytes = 4096;
-        let mut t = Tracker::default();
-        let now = Instant::now();
-        let text: String = (0..20000)
-            .map(|i| format!("a line of the console, number {i}\n"))
-            .collect();
-        std::fs::write(&log, &text).unwrap();
-        let len = std::fs::metadata(&log).unwrap().len();
-        // One pass reads READ_CHUNK; go on until it is all read.
-        let mut all = Vec::new();
-        while t.offset < len {
-            all.extend(pass(&s, &log, &mut t, now, false));
-        }
-        assert_eq!(all.len(), 20000);
-        assert_eq!(all[19999], "a line of the console, number 19999");
-        let meta = std::fs::metadata(&log).unwrap();
-        assert_eq!(
-            meta.len(),
-            len,
-            "the size is kept, so that nothing the guest writes next lands in the wrong place"
-        );
-        if t.punched == 0 {
-            eprintln!("this file system cannot punch holes: the rest of the test is skipped");
-            let _ = std::fs::remove_dir_all(vm.parent().unwrap());
-            return;
-        }
-        assert!(
-            meta.blocks() * 512 < len / 2,
-            "the old part took its blocks back: {} of {}",
-            meta.blocks() * 512,
-            len
-        );
-        // The guest writes more, at the end: it is forwarded, and what was forwarded is not again.
-        let mut f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
-        f.write_all(b"after the hole\n").unwrap();
-        assert_eq!(pass(&s, &log, &mut t, now, false), ["after the hole"]);
-        // A reader that starts over (a new daemon) finds only the kept tail, with no zeros.
-        let mut fresh = Tracker::default();
-        let out = pass(&s, &log, &mut fresh, now, false);
-        assert!(!out.is_empty() && out.len() < 200, "{}", out.len());
-        // (the first line may be a part of one: the hole ends inside a line)
-        assert!(
-            out.iter()
-                .skip(1)
-                .all(|l| l.starts_with("a line of the console") || l == "after the hole"),
-            "{:?}",
-            &out[..3]
-        );
-        let _ = std::fs::remove_dir_all(vm.parent().unwrap());
-    }
-
-    #[test]
-    fn a_file_that_was_cut_is_read_from_the_start_again() {
-        let vm = vm_dir("cut");
-        let log = vm.join("console.log");
-        let mut s = settings_for(vm.parent().unwrap());
-        s.keep_bytes = u64::MAX; // no hole in this test
-        let mut t = Tracker::default();
-        let now = Instant::now();
-        std::fs::write(&log, "one\ntwo\n").unwrap();
-        assert_eq!(pass(&s, &log, &mut t, now, false), ["one", "two"]);
-        std::fs::write(&log, "three\n").unwrap();
-        assert_eq!(pass(&s, &log, &mut t, now, false), ["three"]);
-        let _ = std::fs::remove_dir_all(vm.parent().unwrap());
-    }
-
-    #[test]
-    fn a_link_in_the_place_of_the_file_is_refused() {
-        let vm = vm_dir("link");
-        let secret = vm.parent().unwrap().join("secret");
-        std::fs::write(&secret, "do not forward this\n").unwrap();
-        let log = vm.join("console.log");
-        std::os::unix::fs::symlink(&secret, &log).unwrap();
-        let s = settings_for(vm.parent().unwrap());
-        let mut t = Tracker::default();
-        let mut out = Vec::new();
-        let r = forward_from(&s, &log, &mut t, Instant::now(), false, &mut |l| {
-            out.push(l.to_string())
-        });
-        assert!(r.is_err() && out.is_empty());
-        let _ = std::fs::remove_dir_all(vm.parent().unwrap());
+        assert_eq!(out.len(), 100);
     }
 
     #[test]
     fn the_vm_is_named_by_its_directory_and_only_when_the_daemon_could_have_named_it() {
         assert_eq!(
-            vm_of(Path::new("/data/emptydir/sized-12-3/console.log")).as_deref(),
+            vm_of(Path::new("/run/cloudhv/daemon/sized-12-3")).as_deref(),
             Some("sized-12-3")
         );
         assert_eq!(
-            vm_of(Path::new("/data/emptydir/pool-9-1/console.log")).as_deref(),
+            vm_of(Path::new("/run/cloudhv/daemon/pool-9-1")).as_deref(),
             Some("pool-9-1")
         );
-        assert_eq!(
-            vm_of(Path::new("/data/emptydir/not a vm/console.log")),
-            None
+        assert_eq!(vm_of(Path::new("/run/cloudhv/daemon/not a vm")), None);
+        assert_eq!(vm_of(Path::new("/run/cloudhv/daemon/..")), None);
+    }
+
+    fn dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("cloudhv-console-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[tokio::test]
+    async fn a_console_is_read_to_its_end_with_the_last_line_that_has_no_end() {
+        let d = dir("read");
+        let path = d.join("console.sock");
+        let l = StdListener::bind(&path).unwrap();
+        let writer = std::thread::spawn(move || {
+            use std::io::Write;
+            let (mut c, _) = l.accept().unwrap();
+            c.write_all(b"kernel: booting\nagent: started\n\x1b[31mred\x1b[0m\nno end")
+                .unwrap();
+        });
+        let st = UnixStream::connect(&path).await.unwrap();
+        assert!(check_peer(&st, unsafe { libc::geteuid() }).is_ok());
+        assert!(
+            check_peer(&st, unsafe { libc::geteuid() } + 1).is_err(),
+            "another user"
         );
-        assert_eq!(vm_of(Path::new("/data/emptydir/../console.log")), None);
+        let mut out = Vec::new();
+        read_console(st, &settings(), &mut |l| out.push(l.to_string()))
+            .await
+            .unwrap();
+        writer.join().unwrap();
+        assert_eq!(out, ["kernel: booting", "agent: started", "red", "no end"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn a_guest_that_writes_faster_than_the_daemon_reads_is_not_read_for_the_rest_of_the_second(
+    ) {
+        let d = dir("rate");
+        let path = d.join("console.sock");
+        let l = StdListener::bind(&path).unwrap();
+        let writer = std::thread::spawn(move || {
+            use std::io::Write;
+            let (mut c, _) = l.accept().unwrap();
+            // 3 chunks of 40 KiB with a limit of 50 KiB a second: the third has to wait for the next second.
+            for _ in 0..3 {
+                c.write_all(&vec![b'a'; 40 * 1024]).unwrap();
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let mut s = settings();
+        s.max_bytes_per_sec = 50 * 1024;
+        let st = UnixStream::connect(&path).await.unwrap();
+        let t0 = Instant::now();
+        let mut out = Vec::new();
+        read_console(st, &s, &mut |l| out.push(l.to_string()))
+            .await
+            .unwrap();
+        writer.join().unwrap();
+        assert!(
+            t0.elapsed() >= Duration::from_millis(800),
+            "{:?}",
+            t0.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_link_is_not_a_socket() {
+        let d = dir("link");
+        let sock = d.join("real.sock");
+        let _l = StdListener::bind(&sock).unwrap();
+        let link = d.join("console.sock");
+        std::os::unix::fs::symlink(&sock, &link).unwrap();
+        assert!(is_socket(&sock));
+        assert!(!is_socket(&link), "a link is looked at, not followed");
+        assert!(!is_socket(&d.join("none")));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

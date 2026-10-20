@@ -34,24 +34,15 @@ fn check_socket(path: &Path) -> Result<()> {
     }
 }
 
-/// Where the VM's console log is: `console.log` in the VM's directory for disks (`<emptydir_dir>/<VM name>/`, on the disk) when there is one, else in the VM's
-/// state directory (`/run`, memory).
-pub fn console_log_path(state_dir: &Path) -> PathBuf {
-    match crate::emptydir::vm_dir(state_dir) {
-        Some(dir) => dir.join("console.log"),
-        None => state_dir.join("console.log"),
-    }
-}
-
 /// The `serial` and `console` parts of a VM's configuration. The guest has no serial port (its kernel has the virtio-console only, and is told `console=hvc0`), so its log
-/// goes through `console`, to `log` when there is one; `serial` stays off, since two devices cannot share a file. The agent is the init: its log, the kernel's messages and
-/// what a container writes to the console are what this file holds.
-pub fn console_parts(log: Option<&Path>) -> (serde_json::Value, serde_json::Value) {
+/// goes through `console`, to a Unix socket the Cloud Hypervisor makes at `socket` when there is one (`consolefwd.rs` reads it); `serial` stays off. The agent is the
+/// init: its log, the kernel's messages and what a container writes to the console are what the socket carries.
+pub fn console_parts(socket: Option<&Path>) -> (serde_json::Value, serde_json::Value) {
     let off = serde_json::json!({ "mode": "Off" });
-    match log {
+    match socket {
         Some(path) => (
             off,
-            serde_json::json!({ "mode": "File", "file": path.to_string_lossy() }),
+            serde_json::json!({ "mode": "Socket", "socket": path.to_string_lossy() }),
         ),
         None => (off.clone(), off),
     }
@@ -100,15 +91,9 @@ pub async fn boot_vm_sized(
     vcpus: u32,
     shared: bool,
 ) -> Result<u32> {
-    // The console log is made before the Cloud Hypervisor exists, while the directory is still root's: afterwards the directory is the
-    // VM's, which could have put a link in the place of the file. `spawn_ch` hands the file to the VM's user.
-    let console_log = console_log_path(state_dir);
-    let serial = config.serial_console_enabled();
-    if serial {
-        // On the disk, in the VM's directory for disks, when there is one (not in memory: `/run` is a tmpfs); that directory is made now.
-        crate::emptydir::prepare_vm_dir(state_dir)?;
-        crate::fsutil::create_new(&console_log).context("create console.log")?;
-    }
+    // The console is a socket the Cloud Hypervisor makes in the VM's state directory; the daemon connects to it before the guest boots.
+    let console_socket = crate::consolefwd::socket_path(state_dir);
+    let console = config.console_enabled();
     let ch_pid = spawn_ch(config, state_dir, memory_mb, vcpus).await?;
     let api_socket = state_dir.join("api.sock");
 
@@ -147,7 +132,7 @@ pub async fn boot_vm_sized(
             .checked_mul(1024 * 1024)
             .context("the memory size does not fit")?;
         let (serial_config, console_config) =
-            console_parts(serial.then_some(console_log.as_path()));
+            console_parts(console.then_some(console_socket.as_path()));
         let mut vm_config = serde_json::json!({
             "payload": {
                 "kernel": config.kernel_path,
@@ -178,6 +163,8 @@ pub async fn boot_vm_sized(
             Some(&vm_config.to_string()),
         )
         .await?;
+        // The console is read from the start: what the Cloud Hypervisor is not read by, it drops.
+        crate::consolefwd::attach(state_dir).await;
         api_request(&api_socket, "PUT", "/api/v1/vm.boot", None).await
     }
     .await;
@@ -213,7 +200,6 @@ pub async fn spawn_ch(
             crate::rootless::release(state_dir).await;
             crate::rootless::drop_outbox(state_dir);
             crate::ctl::remove(state_dir);
-            crate::consolefwd::flush(state_dir);
             crate::emptydir::remove_vm_dir(state_dir);
             crate::blockvol::release(state_dir);
             Err(e)
@@ -235,10 +221,6 @@ async fn spawn_ch_inner(
     let user = crate::rootless::alloc_for(state_dir)?;
     if user.is_some() {
         crate::rootless::give(state_dir, state_dir)?;
-        let console = console_log_path(state_dir);
-        if console.exists() {
-            crate::rootless::give(&console, state_dir)?;
-        }
     }
     if let (Some(ids), true) = (user, crate::rootless::confined()) {
         return spawn_confined(
@@ -607,7 +589,12 @@ pub async fn restore_vm(api_socket: &Path, source_dir: &Path) -> Result<()> {
         Some(&body.to_string()),
         API_TIMEOUT_SLOW,
     )
-    .await
+    .await?;
+    // The VM waits for `vm.resume`: the console is read before it runs.
+    if let Some(state_dir) = api_socket.parent() {
+        crate::consolefwd::attach(state_dir).await;
+    }
+    Ok(())
 }
 
 /// Prepare a snapshot directory for a specific VM: patch CID, vsock socket,
@@ -684,23 +671,18 @@ pub fn prepare_snapshot(
         }
     }
 
-    // Patch the console path (the guest's log goes through `console`, the virtio-console; an older snapshot may have it in `serial`). The file is made here, before the
-    // Cloud Hypervisor exists (the directory is still root's); `spawn_ch` hands it to the VM's user. A snapshot taken with the console off is restored with it off.
-    let console_path = console_log_path(vm_state_dir);
-    let mut console_made = false;
+    // Patch the console (the guest's log goes through `console`, the virtio-console): a snapshot taken with it in a file or a socket is restored with it on a socket in
+    // this VM's state directory (the path the snapshot names is never used), or off when the console is off. The guest has no serial port: that part is off.
+    let console_socket = crate::consolefwd::socket_path(vm_state_dir);
     for key in ["serial", "console"] {
         if let Some(part) = cfg.pointer_mut(&format!("/{key}")) {
-            if part.get("mode").and_then(|v| v.as_str()) == Some("File") {
-                if config.serial_console_enabled() {
-                    if !console_made {
-                        crate::emptydir::prepare_vm_dir(vm_state_dir)?;
-                        crate::fsutil::create_new(&console_path).context("create console.log")?;
-                        console_made = true;
-                    }
-                    part["file"] = serde_json::json!(console_path.to_string_lossy());
+            let mode = part.get("mode").and_then(|v| v.as_str());
+            if matches!(mode, Some("File") | Some("Socket")) {
+                *part = if key == "console" && config.console_enabled() {
+                    serde_json::json!({ "mode": "Socket", "socket": console_socket.to_string_lossy() })
                 } else {
-                    *part = serde_json::json!({ "mode": "Off" });
-                }
+                    serde_json::json!({ "mode": "Off" })
+                };
             }
         }
     }
@@ -759,8 +741,6 @@ pub async fn shutdown_and_destroy(_api_socket: &Path, ch_pid: u32, state_dir: &P
     crate::rootless::release(state_dir).await;
     crate::rootless::drop_outbox(state_dir);
     crate::ctl::remove(state_dir);
-    // What the guest said last is forwarded before its directory goes.
-    crate::consolefwd::flush(state_dir);
     crate::emptydir::remove_vm_dir(state_dir);
     crate::blockvol::release(state_dir);
     let _ = std::fs::remove_dir_all(state_dir);
@@ -1131,16 +1111,16 @@ mod console_tests {
     #[test]
     fn the_log_goes_through_the_virtio_console_and_the_serial_port_stays_off() {
         let (serial, console) =
-            console_parts(Some(Path::new("/run/cloudhv/daemon/vm/console.log")));
+            console_parts(Some(Path::new("/run/cloudhv/daemon/vm/console.sock")));
         assert_eq!(serial, serde_json::json!({ "mode": "Off" }));
         assert_eq!(
             console,
-            serde_json::json!({ "mode": "File", "file": "/run/cloudhv/daemon/vm/console.log" })
+            serde_json::json!({ "mode": "Socket", "socket": "/run/cloudhv/daemon/vm/console.sock" })
         );
     }
 
     #[test]
-    fn with_no_log_both_are_off() {
+    fn with_no_socket_both_are_off() {
         let (serial, console) = console_parts(None);
         assert_eq!(serial, serde_json::json!({ "mode": "Off" }));
         assert_eq!(console, serde_json::json!({ "mode": "Off" }));

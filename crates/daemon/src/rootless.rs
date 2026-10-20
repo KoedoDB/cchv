@@ -9,7 +9,7 @@
 //! out of reach (`ctl.rs`).
 //!
 //! What a VM's own user needs, and how it gets it:
-//! - its state directory (`api.sock`, `vsock.sock`, `console.log`): owned by it, mode 0700;
+//! - its state directory (`api.sock`, `vsock.sock`, `console.sock`): owned by it, mode 0700;
 //! - the TAP device: not opened by it. Enabling a TAP needs `CAP_NET_ADMIN`, which would let it change the host's network, so the
 //!   daemon opens the device and hands the descriptor over the API socket (SCM_RIGHTS);
 //! - the container's erofs image: read access for it alone, by an ACL (the images are the customers', and one VM must not read

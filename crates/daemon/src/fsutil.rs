@@ -189,17 +189,6 @@ pub fn list(fd: RawFd) -> io::Result<Vec<String>> {
     Ok(names)
 }
 
-/// Create a file that must not exist yet, without following a link at its name (mode 0600), and return it.
-pub fn create_new(path: &Path) -> io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)
-}
-
 /// `fgetxattr` / `fsetxattr` / `fremovexattr` on a descriptor.
 pub fn fgetxattr(fd: RawFd, name: &[u8], buf: &mut [u8]) -> io::Result<usize> {
     let n = unsafe { libc::fgetxattr(fd, name.as_ptr() as _, buf.as_mut_ptr() as _, buf.len()) };
