@@ -118,9 +118,10 @@ fn from_spec_with(config_json: &[u8], policy: &Policy) -> Result<Vec<serde_json:
         Ok(v) => v,
         Err(_) => return Ok(Vec::new()),
     };
+    let blocks = block_volumes(&spec)?;
     let mounts = match spec.get("mounts").and_then(|m| m.as_array()) {
         Some(m) => m,
-        None => return Ok(Vec::new()),
+        None => return Ok(blocks),
     };
     // The roots as they really are (the kubelet's directory may be a link to another disk).
     let roots: Vec<PathBuf> = policy
@@ -181,6 +182,7 @@ fn from_spec_with(config_json: &[u8], policy: &Policy) -> Result<Vec<serde_json:
             Err(e) => return Err(format!("volume {dest} (from {source}): {e}")),
         }
     }
+    volumes.extend(blocks);
     Ok(volumes)
 }
 
@@ -230,6 +232,76 @@ fn is_disk_emptydir(source: &str, policy: &Policy) -> bool {
 }
 
 /// The name of a volume in the guest: the same host directory (an emptyDir mounted by two containers) is the same directory.
+/// The annotation of a pod that says what its raw block devices (`volumeDevices`) are for: a JSON list of
+/// `{"device": "<devicePath in the container>", "mount": "<where the guest mounts it>", "fs": "ext4", "format": "if-blank"}` (`fs` and `format`
+/// optional). The platform (the Regional Agent) writes it with the pod; a raw block device without it is not given to the VM.
+const BLOCK_VOLUMES_ANNOTATION: &str = "cloudhv.koedodb.com/block-volumes";
+const MAX_BLOCK_VOLUMES: usize = 4;
+
+/// The persistent block volumes of a spec, as the daemon's API takes them: `"block": {"id", "major", "minor", "fs", "format"}`. The device is
+/// named by its numbers in `linux.devices` (the runtime resolved the kubelet's path to them); the daemon checks that it is a logical volume of the
+/// platform's, so nothing here is trusted. The host's file is not read or opened.
+fn block_volumes(spec: &serde_json::Value) -> Result<Vec<serde_json::Value>, String> {
+    let Some(raw) = spec
+        .pointer("/annotations")
+        .and_then(|a| a.get(BLOCK_VOLUMES_ANNOTATION))
+        .and_then(|v| v.as_str())
+    else {
+        return Ok(Vec::new());
+    };
+    let entries: Vec<serde_json::Value> = serde_json::from_str(raw)
+        .map_err(|e| format!("{BLOCK_VOLUMES_ANNOTATION} is not a JSON list: {e}"))?;
+    if entries.len() > MAX_BLOCK_VOLUMES {
+        return Err(format!(
+            "{BLOCK_VOLUMES_ANNOTATION} has more than {MAX_BLOCK_VOLUMES} volumes"
+        ));
+    }
+    let devices = spec
+        .pointer("/linux/devices")
+        .and_then(|d| d.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for e in &entries {
+        let device = e.get("device").and_then(|d| d.as_str()).unwrap_or("");
+        let mount = e.get("mount").and_then(|m| m.as_str()).unwrap_or("");
+        if !mount.starts_with('/') || mount.split('/').any(|c| c == "..") {
+            return Err(format!(
+                "block volume of {device:?}: the mount {mount:?} is not an absolute path"
+            ));
+        }
+        let found = devices.iter().find(|d| {
+            d.get("path").and_then(|p| p.as_str()) == Some(device)
+                && d.get("type").and_then(|t| t.as_str()) == Some("b")
+        });
+        let (Some(major), Some(minor)) = (
+            found.and_then(|d| d.get("major")).and_then(|n| n.as_u64()),
+            found.and_then(|d| d.get("minor")).and_then(|n| n.as_u64()),
+        ) else {
+            return Err(format!(
+                "block volume {device:?}: the container has no such block device (volumeDevices)"
+            ));
+        };
+        let digest = Sha256::digest(format!("pv:{major}:{minor}").as_bytes());
+        let id: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
+        let mut block = serde_json::json!({"id": id, "major": major, "minor": minor});
+        if let Some(fs) = e.get("fs").and_then(|f| f.as_str()) {
+            block["fs"] = serde_json::json!(fs);
+        }
+        if let Some(format) = e.get("format").and_then(|f| f.as_str()) {
+            block["format"] = serde_json::json!(format);
+        }
+        out.push(serde_json::json!({
+            "destination": mount,
+            "source": format!("{VOLUME_ROOT}/{id}"),
+            "readonly": false,
+            "files": [],
+            "block": block,
+        }));
+    }
+    Ok(out)
+}
+
 fn name_of(source: &str) -> String {
     let digest = Sha256::digest(source.as_bytes());
     digest[..16].iter().map(|b| format!("{b:02x}")).collect()
@@ -567,6 +639,100 @@ mod tests {
         serde_json::json!({ "mounts": mounts })
             .to_string()
             .into_bytes()
+    }
+
+    fn block_spec(annotation: serde_json::Value, devices: serde_json::Value) -> Vec<u8> {
+        serde_json::json!({
+            "mounts": [],
+            "annotations": { BLOCK_VOLUMES_ANNOTATION: annotation.to_string() },
+            "linux": { "devices": devices },
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    #[test]
+    fn a_raw_block_device_named_by_the_annotation_becomes_a_block_volume() {
+        let root = Tmp::new("blk");
+        let spec = block_spec(
+            serde_json::json!([{"device": "/dev/pgdata", "mount": "/var/lib/postgresql", "format": "if-blank"}]),
+            serde_json::json!([{"path": "/dev/pgdata", "type": "b", "major": 252, "minor": 7, "fileMode": 432}]),
+        );
+        let got = from_spec_with(&spec, &policy(&root.0, false)).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0]["destination"], "/var/lib/postgresql");
+        assert_eq!(got[0]["block"]["major"], 252);
+        assert_eq!(got[0]["block"]["minor"], 7);
+        assert_eq!(got[0]["block"]["format"], "if-blank");
+        assert!(
+            got[0]["block"].get("fs").is_none(),
+            "the daemon's default is ext4"
+        );
+        let id = got[0]["block"]["id"].as_str().unwrap();
+        assert_eq!(id.len(), 32);
+        assert_eq!(got[0]["source"], format!("{VOLUME_ROOT}/{id}"));
+        // The same device is the same volume; another device is another.
+        let again = from_spec_with(&spec, &policy(&root.0, false)).unwrap();
+        assert_eq!(again[0]["block"]["id"], id);
+        let other = block_spec(
+            serde_json::json!([{"device": "/dev/pgdata", "mount": "/data"}]),
+            serde_json::json!([{"path": "/dev/pgdata", "type": "b", "major": 252, "minor": 8}]),
+        );
+        let other = from_spec_with(&other, &policy(&root.0, false)).unwrap();
+        assert_ne!(other[0]["block"]["id"], id);
+    }
+
+    #[test]
+    fn a_block_device_without_the_annotation_is_not_given_to_the_vm() {
+        let root = Tmp::new("blk-none");
+        let spec = serde_json::json!({
+            "mounts": [],
+            "linux": { "devices": [{"path": "/dev/pgdata", "type": "b", "major": 252, "minor": 7}] },
+        })
+        .to_string()
+        .into_bytes();
+        assert!(from_spec_with(&spec, &policy(&root.0, false))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_block_volume_the_container_does_not_have_is_an_error() {
+        let root = Tmp::new("blk-bad");
+        for (annotation, devices) in [
+            // the device is not in the container
+            (
+                serde_json::json!([{"device": "/dev/pgdata", "mount": "/data"}]),
+                serde_json::json!([]),
+            ),
+            // a character device is not a block device
+            (
+                serde_json::json!([{"device": "/dev/pgdata", "mount": "/data"}]),
+                serde_json::json!([{"path": "/dev/pgdata", "type": "c", "major": 1, "minor": 3}]),
+            ),
+            // the mount is not an absolute path, or leaves it
+            (
+                serde_json::json!([{"device": "/dev/pgdata", "mount": "data"}]),
+                serde_json::json!([{"path": "/dev/pgdata", "type": "b", "major": 252, "minor": 7}]),
+            ),
+            (
+                serde_json::json!([{"device": "/dev/pgdata", "mount": "/a/../etc"}]),
+                serde_json::json!([{"path": "/dev/pgdata", "type": "b", "major": 252, "minor": 7}]),
+            ),
+            // too many
+            (
+                serde_json::json!((0..5).map(|i| serde_json::json!({"device": format!("/dev/d{i}"), "mount": format!("/m{i}")})).collect::<Vec<_>>()),
+                serde_json::json!([]),
+            ),
+        ] {
+            let spec = block_spec(annotation, devices);
+            assert!(from_spec_with(&spec, &policy(&root.0, false)).is_err());
+        }
+        // an annotation that is not a list
+        let spec = serde_json::json!({"annotations": {BLOCK_VOLUMES_ANNOTATION: "{}"}})
+            .to_string()
+            .into_bytes();
+        assert!(from_spec_with(&spec, &policy(&root.0, false)).is_err());
     }
 
     fn names(v: &serde_json::Value) -> Vec<String> {
