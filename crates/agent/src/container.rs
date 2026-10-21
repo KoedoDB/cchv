@@ -50,6 +50,10 @@ const MAX_EROFS_LAYERS: u32 = 120;
 
 /// How long a container's disks and device nodes have, all together, to appear. A container whose disks do not come fails to start.
 const DISK_WAIT: Duration = Duration::from_secs(20);
+/// How long `crun kill` and `crun delete` may take. They run with the container manager's lock held, so one that hangs (a process
+/// in an uninterruptible state, a stuck mount) would stop every other call for the VM, `delete` included; a hung one is killed.
+const CRUN_KILL_TIMEOUT: Duration = Duration::from_secs(10);
+const CRUN_DELETE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// File systems a block volume may have.
 const BLOCK_FS_TYPES: &[&str] = &["ext4", "xfs"];
@@ -670,16 +674,21 @@ impl ContainerManager {
             }
         }
 
-        let output = Command::new("/bin/crun")
-            .arg("kill")
-            .arg(container_id)
-            .arg(signal.to_string())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await
-            .context("failed to execute crun kill")?;
+        let output = tokio::time::timeout(
+            CRUN_KILL_TIMEOUT,
+            Command::new("/bin/crun")
+                .arg("kill")
+                .arg(container_id)
+                .arg(signal.to_string())
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("crun kill took more than {CRUN_KILL_TIMEOUT:?}"))?
+        .context("failed to execute crun kill")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -730,20 +739,29 @@ impl ContainerManager {
             anyhow::bail!("invalid container id");
         }
 
-        let output = Command::new("/bin/crun")
-            .arg("delete")
-            .arg("--force")
-            .arg(container_id)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await
-            .context("failed to execute crun delete")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            error!("crun delete failed (may be ok): {}", stderr);
+        // A `crun delete` that hangs is given up on (and killed): the bundle and the mounts are torn down below all the same.
+        match tokio::time::timeout(
+            CRUN_DELETE_TIMEOUT,
+            Command::new("/bin/crun")
+                .arg("delete")
+                .arg("--force")
+                .arg(container_id)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        {
+            Ok(output) => {
+                let output = output.context("failed to execute crun delete")?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    error!("crun delete failed (may be ok): {}", stderr);
+                }
+            }
+            Err(_) => error!("crun delete of {container_id} took more than {CRUN_DELETE_TIMEOUT:?}: given up"),
         }
 
         let removed = self.containers.remove(container_id);
