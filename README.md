@@ -316,12 +316,12 @@ See the **[docs/](docs/)** folder for detailed documentation:
 
 ## License
 
-**PolyForm Noncommercial License 1.0.0** ([LICENSE-POLYFORM-NC.md](LICENSE-POLYFORM-NC.md)), except for the original work it started from, which stays under MIT.
+**PolyForm Noncommercial License 1.0.0** ([LICENSE](LICENSE)), except for the original work it started from, which stays under MIT.
 
-- The **original work** (devigned/containerd-cloudhypervisor by David Justice, up to its commit `be79d285c0f8`) stays under the **MIT** licence: [LICENSE](LICENSE).
+- The **original work** (devigned/containerd-cloudhypervisor by David Justice, up to its commit `be79d285c0f8`) stays under the **MIT** licence (the second part of [LICENSE](LICENSE)).
   You can take it from upstream under those terms.
 - **Our changes and new files** (everything after that commit: the daemon, the shim and agent changes, the installer, the guest, the docs) are copyright
-  (c) 2026 RadarWorks LLC (KoedoDB) and under the **PolyForm Noncommercial License 1.0.0**: [LICENSE-POLYFORM-NC.md](LICENSE-POLYFORM-NC.md).
+  (c) 2026 RadarWorks LLC (KoedoDB) and under the **PolyForm Noncommercial License 1.0.0**: [LICENSE](LICENSE).
   Personal, research, hobby and similar noncommercial use is allowed; commercial use needs a licence from us (license@koedodb.com).
   Running it as part of a service you sell or offer (a VPS or hosting provider, a PaaS, a BaaS, a cloud) is commercial use, and so is use inside a company for
   its business: it needs a licence from us.
