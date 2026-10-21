@@ -326,7 +326,7 @@ See the **[docs/](docs/)** folder for detailed documentation:
   Running it as part of a service you sell or offer (a VPS or hosting provider, a PaaS, a BaaS, a cloud) is commercial use, and so is use inside a company for
   its business: it needs a licence from us.
 - Where a file has both, the combined file is to be used under the terms of both, so for practical purposes the whole is noncommercial.
-- Releases up to and including `v0.17.0-koedodb.1` were published under MIT, and stay under it for those who got them. The new terms apply from the next release.
+- Our releases `v0.15.0-koedodb.1`, `v0.16.0-koedodb.1` and `v0.17.0-koedodb.1` were published under MIT (as were the original's own, up to `v0.14.0`), and stay under it for those who got them. The new terms apply from the next release.
 
 A release also carries software of others (Cloud Hypervisor, crun, the Linux
 kernel, the Rust crates): [THIRD-PARTY.md](THIRD-PARTY.md) lists it with the licenses and the source of the GPL parts, and each release
