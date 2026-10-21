@@ -6,5 +6,6 @@ pub mod erofs_cache;
 pub mod exec;
 pub mod instance;
 pub mod netns;
+pub mod pipeout;
 pub mod vmsize;
 pub mod volumes;

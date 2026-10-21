@@ -241,7 +241,7 @@ impl ExecProc {
                 .ok()
                 .and_then(|r| r.ok())
                 .and_then(|r| r.ok())
-                .map(tokio::fs::File::from_std)
+                .and_then(crate::pipeout::writer)
         };
         let mut out = open(self.cfg.clone(), false).await;
         // With a terminal everything is on stdout and there is no stderr pipe.
@@ -417,7 +417,7 @@ fn read_file(f: &std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
 }
 
 /// Write `data` to a pipe. A pipe whose reader has gone, or that does not take the data in time, is dropped.
-async fn write_to(pipe: &mut Option<tokio::fs::File>, data: &[u8]) {
+async fn write_to(pipe: &mut Option<crate::pipeout::PipeOut>, data: &[u8]) {
     if data.is_empty() {
         return;
     }

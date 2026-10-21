@@ -168,6 +168,9 @@ pub struct CloudHvInstance {
     execs: Mutex<HashMap<String, Arc<ExecProc>>>,
     /// The forwarding of the stdin pipe to the container's terminal, for a container that has both (`kubectl run -it`, `attach`).
     init_input: Mutex<Option<Arc<ExecProc>>>,
+    /// The task that copies the container's output to containerd's pipes. Delete stops it, which closes the pipes (containerd waits for
+    /// their end before it goes on, and the task keeps them open for as long as it runs).
+    pump_abort: Mutex<Option<tokio::task::AbortHandle>>,
     /// The spec has no CRI annotations: a client that is not Kubernetes (Docker, nerdctl). The one container is the whole "pod"
     /// (see `dockermode.rs`).
     docker: bool,
@@ -218,6 +221,7 @@ impl Instance for CloudHvInstance {
             cfg: cfg.clone(),
             execs: Mutex::default(),
             init_input: Mutex::default(),
+            pump_abort: Mutex::default(),
             docker,
             holder,
             counted: AtomicBool::new(false),
@@ -322,6 +326,10 @@ impl Instance for CloudHvInstance {
 
     async fn delete(&self) -> Result<(), Error> {
         info!("CloudHvInstance::delete id={}", self.id);
+        // Stop copying the output: this closes the pipes at once, so that containerd's wait for their end (EOF) can finish.
+        if let Some(h) = self.pump_abort.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            h.abort();
+        }
         if let Some(p) = self
             .init_input
             .lock()
@@ -877,6 +885,8 @@ impl CloudHvInstance {
             })
         };
 
+        *self.pump_abort.lock().unwrap_or_else(|e| e.into_inner()) = Some(pump.abort_handle());
+
         // Set up exit watcher — daemon proxies WaitContainer, CH PID as backup
         {
             let exit = self.exit.clone();
@@ -1001,7 +1011,7 @@ async fn pump_logs(
             .ok()
             .and_then(|r| r.ok())
             .and_then(|r| r.ok())
-            .map(tokio::fs::File::from_std)
+            .and_then(crate::pipeout::writer)
     };
     let mut out = open(cfg.clone(), false).await;
     let mut err = open(cfg, true).await;

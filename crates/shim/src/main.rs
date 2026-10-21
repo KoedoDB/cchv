@@ -11,6 +11,7 @@ mod exec;
 mod instance;
 mod journal;
 mod netns;
+mod pipeout;
 mod vmsize;
 mod volumes;
 
