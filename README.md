@@ -87,9 +87,11 @@ VM of 1 GiB), direct I/O on, off and on again:
 - A full disk: PostgreSQL returned `ERROR: could not extend file … No space left on device`, with no `PANIC` and no restart; writes resumed within a second of freeing space.
 - Eight database Pods at once on one host of 8 threads (`pgbench`, 1 CPU each, data on an emptyDir with direct I/O): no failures, each got 562–581 tps (within 3% of each other) against 2,044 for one alone; the disk was not the limit (`iowait` 0.0%), the CPUs were.
 - A hard reset of the host in the middle of writes (a software reset, not a power cut): all 11,416 acknowledged inserts were there.
+- Replacing the daemon (`systemctl restart`, and `kill -9`) with nine Pods running (PostgreSQL on a persistent volume, one on an emptyDir, a web server, six idle ones): the next daemon took over all nine VMs (same Cloud Hypervisor processes), no Pod restarted, the writes to the persistent volume did not stop for a moment, no acknowledged insert was lost and `pg_amcheck` was clean. The shim of each Pod waits for the daemon to come back (up to five minutes) instead of giving up. A VM nobody asks about for ten minutes after the takeover (its Pod was deleted while the daemon was away) is released. The first replacement, from a daemon that does not leave the records for a takeover, still stops every VM.
+- Restarting k3s (containerd) with Pods running: they keep running. (containerd asks every shim for the process ids of its task when it starts, and deletes a shim that answers "not supported" as a leaked one; the shim answers now.)
 - With the memory balloon on, memory the guest freed went back to the host within seconds (350 MB of anonymous memory in a Pod booted for its size; 120 MB of tmpfs in a Pod restored from the pool, whose guest memory is shared memory: the host's `Shmem` fell back within 5 seconds); page cache that is still in use does not.
 
-What we have **not** measured or done: other hardware, a power cut, many Pods at once, GPU or live migration (not supported), a run of days on this version.
+What we have **not** measured or done: other hardware, a power cut, a hard reset with the Pods of this version (every VM is lost with the host; the Pods start again, a persistent volume keeps its data), many Pods at once, GPU or live migration (not supported), a run of days on this version.
 
 ## History and what changed from the original
 
@@ -274,6 +276,9 @@ ExecStartPre=/bin/mkdir -p /run/cloudhv/daemon
 ExecStart=/usr/local/bin/cloudhv-sandbox-daemon /opt/cloudhv/daemon.json
 Restart=always
 RestartSec=5
+# Only the daemon is stopped, not the Cloud Hypervisors it started: the VMs handed to pods run on while the daemon is replaced, and the next one takes
+# them over (keep_vms_on_stop in daemon.json). With the default (control-group) systemd would end every process of the unit, VMs included.
+KillMode=process
 Environment=RUST_LOG=info
 MemoryMax=4G
 
