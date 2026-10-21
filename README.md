@@ -316,7 +316,7 @@ See the **[docs/](docs/)** folder for detailed documentation:
 
 ## License
 
-This is **not open source**: the source is public so that it can be read and checked.
+**PolyForm Noncommercial License 1.0.0** ([LICENSE-POLYFORM-NC.md](LICENSE-POLYFORM-NC.md)), except for the original work it started from, which stays under MIT.
 
 - The **original work** (devigned/containerd-cloudhypervisor by David Justice, up to its commit `be79d285c0f8`) stays under the **MIT** licence: [LICENSE](LICENSE).
   You can take it from upstream under those terms.
