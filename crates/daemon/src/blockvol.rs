@@ -299,12 +299,18 @@ pub fn adopt(state_dir: &Path) -> bool {
             .split_once(':')
             .and_then(|(a, b)| Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?)));
         let Some((major, minor)) = dev else {
-            warn!("{}: a device of the VM is not understood: {line:?}", state_dir.display());
+            warn!(
+                "{}: a device of the VM is not understood: {line:?}",
+                state_dir.display()
+            );
             all = false;
             continue;
         };
         if let Err(e) = lock_device(&s.locks, state_dir, major, minor) {
-            warn!("{}: block device {major}:{minor} cannot be locked again: {e:#}", state_dir.display());
+            warn!(
+                "{}: block device {major}:{minor} cannot be locked again: {e:#}",
+                state_dir.display()
+            );
             all = false;
         }
     }

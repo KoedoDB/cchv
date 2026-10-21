@@ -110,7 +110,11 @@ impl DaemonClient {
 
     /// Send a request that is safe to repeat, again and again while the daemon cannot be reached, for up to the grace. An answer (of any
     /// kind) ends it. `call` makes one try.
-    async fn rpc_patiently(&self, request: &serde_json::Value, long: bool) -> Result<serde_json::Value> {
+    async fn rpc_patiently(
+        &self,
+        request: &serde_json::Value,
+        long: bool,
+    ) -> Result<serde_json::Value> {
         let mut down_since: Option<std::time::Instant> = None;
         let mut tries = 0u32;
         loop {
@@ -129,11 +133,17 @@ impl DaemonClient {
                     }
                     let since = *down_since.get_or_insert_with(std::time::Instant::now);
                     if since.elapsed() >= self.reconnect_grace {
-                        log::warn!("the daemon is still away after {:?}: giving up ({e:#})", since.elapsed());
+                        log::warn!(
+                            "the daemon is still away after {:?}: giving up ({e:#})",
+                            since.elapsed()
+                        );
                         return Err(e);
                     }
                     if tries == 0 {
-                        log::info!("the daemon cannot be reached, trying again for up to {:?}: {e:#}", self.reconnect_grace);
+                        log::info!(
+                            "the daemon cannot be reached, trying again for up to {:?}: {e:#}",
+                            self.reconnect_grace
+                        );
                     }
                     tries += 1;
                     tokio::time::sleep(RECONNECT_PAUSE).await;
@@ -624,7 +634,9 @@ mod tests {
                 let (rd, mut wr) = stream.into_split();
                 let mut line = String::new();
                 BufReader::new(rd).read_line(&mut line).await.unwrap();
-                wr.write_all(format!("{answer}\n").as_bytes()).await.unwrap();
+                wr.write_all(format!("{answer}\n").as_bytes())
+                    .await
+                    .unwrap();
             }
         });
         (DaemonClient::new(sock.to_str().unwrap()), h, dir)
@@ -658,10 +670,15 @@ mod tests {
             let (rd, mut wr) = stream.into_split();
             let mut line = String::new();
             BufReader::new(rd).read_line(&mut line).await.unwrap();
-            wr.write_all(b"{\"exit_status\": 5, \"exited_at\": \"t\"}\n").await.unwrap();
+            wr.write_all(b"{\"exit_status\": 5, \"exited_at\": \"t\"}\n")
+                .await
+                .unwrap();
         });
         let c = DaemonClient::new(sock.to_str().unwrap());
-        let (code, _) = c.wait_container("v1", "c1").await.expect("the wait is repeated");
+        let (code, _) = c
+            .wait_container("v1", "c1")
+            .await
+            .expect("the wait is repeated");
         assert_eq!(code, 5);
         h.await.unwrap();
     }
@@ -690,12 +707,17 @@ mod tests {
             let (rd, mut wr) = stream.into_split();
             let mut line = String::new();
             BufReader::new(rd).read_line(&mut line).await.unwrap();
-            wr.write_all(b"{\"exit_status\": 9, \"exited_at\": \"t\"}\n").await.unwrap();
+            wr.write_all(b"{\"exit_status\": 9, \"exited_at\": \"t\"}\n")
+                .await
+                .unwrap();
         });
         let c = DaemonClient::new(sock.to_str().unwrap())
             .with_reconnect_grace(Duration::from_millis(1000))
             .with_healthy_after(Duration::from_millis(300));
-        let (code, _) = c.wait_container("v1", "c1").await.expect("the second absence is short");
+        let (code, _) = c
+            .wait_container("v1", "c1")
+            .await
+            .expect("the second absence is short");
         assert_eq!(code, 9);
         h.await.unwrap();
     }

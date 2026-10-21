@@ -106,7 +106,10 @@ async fn daemon_main() -> Result<()> {
         for vm in &adopted {
             let dir = std::path::Path::new(&config.state_dir).join(&vm.vm_id);
             if !blockvol::adopt(&dir) {
-                log::warn!("VM {} cannot be taken over (its block devices), stopping it", vm.vm_id);
+                log::warn!(
+                    "VM {} cannot be taken over (its block devices), stopping it",
+                    vm.vm_id
+                );
                 let _ = pool.release(&vm.vm_id).await;
             }
         }

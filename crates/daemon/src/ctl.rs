@@ -372,7 +372,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(read_active_cid(&dir), None, "not handed out");
         write(&dir, "cid", "7").unwrap();
-        assert_eq!(read_active_cid(&dir), None, "a CID alone is a VM in the pool");
+        assert_eq!(
+            read_active_cid(&dir),
+            None,
+            "a CID alone is a VM in the pool"
+        );
         mark_active(&dir, 9).unwrap();
         assert_eq!(read_active_cid(&dir), Some(9));
         clear_active(&dir);
@@ -385,7 +389,10 @@ mod tests {
     #[test]
     fn a_process_that_is_not_the_vms_cloud_hypervisor_is_not_taken_for_it() {
         // This test process has no `--api-socket` argument.
-        assert!(!is_ch_of(std::process::id(), Path::new("/run/cloudhv/daemon/pool-1-4")));
+        assert!(!is_ch_of(
+            std::process::id(),
+            Path::new("/run/cloudhv/daemon/pool-1-4")
+        ));
         assert!(!is_ch_of(0, Path::new("/run/cloudhv/daemon/pool-1-4")));
         assert!(!is_ch_of(1, Path::new("/run/cloudhv/daemon/pool-1-4")));
     }

@@ -235,7 +235,8 @@ pub fn alloc_for(state_dir: &Path) -> Result<Option<(u32, u32)>> {
 /// daemon's memory knows it again. The user comes from the registry (`ch.uid`, root's). Rootless off: nothing.
 pub fn adopt(state_dir: &Path) {
     let Some(m) = state() else { return };
-    let Some(uid) = crate::ctl::read(state_dir, "ch.uid").and_then(|s| s.trim().parse::<u32>().ok())
+    let Some(uid) =
+        crate::ctl::read(state_dir, "ch.uid").and_then(|s| s.trim().parse::<u32>().ok())
     else {
         return;
     };
@@ -685,7 +686,11 @@ pub fn sweep_acls(config: &DaemonConfig, keep: &HashSet<u32>) {
 
 /// `[lo, hi)` without the users in `keep`, as the stretches that remain, in order.
 fn ranges_without(lo: u32, hi: u32, keep: &HashSet<u32>) -> Vec<(u32, u32)> {
-    let mut kept: Vec<u32> = keep.iter().copied().filter(|u| *u >= lo && *u < hi).collect();
+    let mut kept: Vec<u32> = keep
+        .iter()
+        .copied()
+        .filter(|u| *u >= lo && *u < hi)
+        .collect();
     kept.sort_unstable();
     let mut out = Vec::new();
     let mut from = lo;
@@ -1060,15 +1065,24 @@ mod adopt_tests {
     #[test]
     fn the_users_taken_over_are_left_out_of_the_range() {
         let none = HashSet::new();
-        assert_eq!(ranges_without(200_000, 200_010, &none), vec![(200_000, 200_010)]);
+        assert_eq!(
+            ranges_without(200_000, 200_010, &none),
+            vec![(200_000, 200_010)]
+        );
         let keep: HashSet<u32> = [200_003, 200_004, 200_009].into();
         assert_eq!(
             ranges_without(200_000, 200_010, &keep),
             vec![(200_000, 200_003), (200_005, 200_009)]
         );
         let ends: HashSet<u32> = [200_000, 200_009].into();
-        assert_eq!(ranges_without(200_000, 200_010, &ends), vec![(200_001, 200_009)]);
+        assert_eq!(
+            ranges_without(200_000, 200_010, &ends),
+            vec![(200_001, 200_009)]
+        );
         let outside: HashSet<u32> = [5, 999_999].into();
-        assert_eq!(ranges_without(200_000, 200_010, &outside), vec![(200_000, 200_010)]);
+        assert_eq!(
+            ranges_without(200_000, 200_010, &outside),
+            vec![(200_000, 200_010)]
+        );
     }
 }

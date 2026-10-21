@@ -36,7 +36,11 @@ mod tests {
     fn fifo_rdwr(dir: &std::path::Path) -> File {
         let p = dir.join("f");
         nix::unistd::mkfifo(&p, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
-        std::fs::OpenOptions::new().read(true).write(true).open(&p).unwrap()
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&p)
+            .unwrap()
     }
 
     /// The number of descriptors this process has open on the FIFO's inode.
@@ -69,7 +73,11 @@ mod tests {
     async fn a_regular_file_is_written() {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("out");
-        let file = std::fs::OpenOptions::new().create(true).write(true).open(&p).unwrap();
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&p)
+            .unwrap();
         let mut w = writer(file).unwrap();
         w.write_all(b"abc").await.unwrap();
         w.flush().await.unwrap();

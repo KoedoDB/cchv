@@ -865,7 +865,12 @@ mod tests {
         }
         dying.kill().expect("kill");
         dying.wait().expect("wait");
-        let mut dead: Vec<String> = pool.dead_active().await.into_iter().map(|v| v.vm_id).collect();
+        let mut dead: Vec<String> = pool
+            .dead_active()
+            .await
+            .into_iter()
+            .map(|v| v.vm_id)
+            .collect();
         dead.sort();
         let _ = alive.kill();
         let _ = alive.wait();
@@ -875,7 +880,11 @@ mod tests {
 
     /// A VM an earlier daemon handed to a pod: a process with `--api-socket <dir>/api.sock` in its command line (a shell that starts a sleep), an
     /// API socket that answers the ping, and the registry's record.
-    fn running_vm_dir(state: &Path, name: &str, handed_out: bool) -> (PathBuf, std::process::Child) {
+    fn running_vm_dir(
+        state: &Path,
+        name: &str,
+        handed_out: bool,
+    ) -> (PathBuf, std::process::Child) {
         use std::os::unix::process::CommandExt;
         let dir = state.join(name);
         std::fs::create_dir_all(&dir).expect("vm dir");
@@ -917,9 +926,19 @@ mod tests {
             u.insert("sized-1-2".into(), now);
         }
         pool.claim("sized-1-1"); // its shim came back
-        assert!(pool.take_unclaimed(std::time::Duration::from_secs(600)).is_empty(), "not yet");
-        assert_eq!(pool.take_unclaimed(std::time::Duration::ZERO), vec!["sized-1-2".to_string()]);
-        assert!(pool.take_unclaimed(std::time::Duration::ZERO).is_empty(), "only once");
+        assert!(
+            pool.take_unclaimed(std::time::Duration::from_secs(600))
+                .is_empty(),
+            "not yet"
+        );
+        assert_eq!(
+            pool.take_unclaimed(std::time::Duration::ZERO),
+            vec!["sized-1-2".to_string()]
+        );
+        assert!(
+            pool.take_unclaimed(std::time::Duration::ZERO).is_empty(),
+            "only once"
+        );
     }
 
     #[tokio::test]

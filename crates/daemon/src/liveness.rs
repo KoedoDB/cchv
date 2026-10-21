@@ -47,7 +47,11 @@ pub struct Settings {
 pub fn is_running(vm_info: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(vm_info)
         .ok()
-        .and_then(|v| v.get("state").and_then(|s| s.as_str()).map(|s| s == "Running"))
+        .and_then(|v| {
+            v.get("state")
+                .and_then(|s| s.as_str())
+                .map(|s| s == "Running")
+        })
         .unwrap_or(false)
 }
 

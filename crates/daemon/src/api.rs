@@ -103,14 +103,20 @@ impl ApiServer {
                     self.agents.lock().await.insert(vm.vm_id.clone(), agent);
                     // The TAP of the VM (if it has one) is in its pod's network namespace and keeps its name.
                     reserve_tap_name(&tap_name_for(&vm.vm_id));
-                    info!("took over VM {} (cid {}, pid {})", vm.vm_id, vm.cid, vm.ch_pid);
+                    info!(
+                        "took over VM {} (cid {}, pid {})",
+                        vm.vm_id, vm.cid, vm.ch_pid
+                    );
                 }
                 other => {
                     let why = match other {
                         Ok(Err(e)) => format!("{e:#}"),
                         _ => "no answer in 10 s".to_string(),
                     };
-                    warn!("VM {} is not taken over, its agent does not answer ({why}): stopping it", vm.vm_id);
+                    warn!(
+                        "VM {} is not taken over, its agent does not answer ({why}): stopping it",
+                        vm.vm_id
+                    );
                     let _ = self.pool.release(&vm.vm_id).await;
                 }
             }

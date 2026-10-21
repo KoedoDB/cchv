@@ -32,10 +32,16 @@ pub fn init(shim_id: &str, debug: bool) {
     } else {
         LevelFilter::Info
     };
-    let socket = UnixDatagram::unbound().ok().filter(|s| s.connect(SOCKET).is_ok());
+    let socket = UnixDatagram::unbound()
+        .ok()
+        .filter(|s| s.connect(SOCKET).is_ok());
     let logger = JournalLogger {
         socket: Mutex::new(socket),
-        shim_id: shim_id.chars().filter(|c| !c.is_control()).take(128).collect(),
+        shim_id: shim_id
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(128)
+            .collect(),
         level,
     };
     if log::set_boxed_logger(Box::new(logger)).is_ok() {
@@ -93,7 +99,11 @@ fn encode(shim_id: &str, record: &Record) -> Vec<u8> {
     let message = record.args().to_string();
     let mut buf = Vec::with_capacity(message.len().min(MAX_MESSAGE) + 160);
     push_field(&mut buf, "SYSLOG_IDENTIFIER", b"cloudhv-shim");
-    push_field(&mut buf, "PRIORITY", priority(record.level()).to_string().as_bytes());
+    push_field(
+        &mut buf,
+        "PRIORITY",
+        priority(record.level()).to_string().as_bytes(),
+    );
     push_field(&mut buf, "CODE_MODULE", record.target().as_bytes());
     if !shim_id.is_empty() {
         push_field(&mut buf, "CLOUDHV_SHIM_ID", shim_id.as_bytes());
@@ -171,7 +181,9 @@ mod tests {
 
     #[test]
     fn the_flag_is_found_in_either_form() {
-        let a: Vec<String> = ["x", "-namespace", "k8s.io", "-id", "abc"].map(String::from).to_vec();
+        let a: Vec<String> = ["x", "-namespace", "k8s.io", "-id", "abc"]
+            .map(String::from)
+            .to_vec();
         assert_eq!(flag_value(&a, "id"), "abc");
         assert_eq!(flag_value(&a, "namespace"), "k8s.io");
         assert_eq!(flag_value(&a, "missing"), "");

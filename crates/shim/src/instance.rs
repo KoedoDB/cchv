@@ -365,7 +365,12 @@ impl Instance for CloudHvInstance {
     async fn delete(&self) -> Result<(), Error> {
         info!("CloudHvInstance::delete id={}", self.id);
         // Stop copying the output: this closes the pipes at once, so that containerd's wait for their end (EOF) can finish.
-        if let Some(h) = self.pump_abort.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        if let Some(h) = self
+            .pump_abort
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
             h.abort();
         }
         if let Some(p) = self
@@ -1167,22 +1172,34 @@ mod pid_exit_tests {
 
     #[tokio::test]
     async fn waits_for_a_running_process_and_returns_when_it_ends() {
-        let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
         let pid = child.id();
         let waiter = tokio::spawn(wait_for_pid_exit(pid));
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(!waiter.is_finished(), "it must wait while the process runs");
         let t = Instant::now();
         child.kill().unwrap();
-        tokio::time::timeout(Duration::from_secs(5), waiter).await.unwrap().unwrap();
-        assert!(t.elapsed() < Duration::from_millis(80), "an event, not a poll every 100 ms: {:?}", t.elapsed());
+        tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            t.elapsed() < Duration::from_millis(80),
+            "an event, not a poll every 100 ms: {:?}",
+            t.elapsed()
+        );
         let _ = child.wait();
     }
 
     #[tokio::test]
     async fn returns_at_once_for_a_process_that_is_not_there() {
         let t = Instant::now();
-        tokio::time::timeout(Duration::from_secs(2), wait_for_pid_exit(4_194_300)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), wait_for_pid_exit(4_194_300))
+            .await
+            .unwrap();
         assert!(t.elapsed() < Duration::from_millis(50));
     }
 }

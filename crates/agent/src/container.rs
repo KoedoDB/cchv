@@ -761,7 +761,9 @@ impl ContainerManager {
                     error!("crun delete failed (may be ok): {}", stderr);
                 }
             }
-            Err(_) => error!("crun delete of {container_id} took more than {CRUN_DELETE_TIMEOUT:?}: given up"),
+            Err(_) => error!(
+                "crun delete of {container_id} took more than {CRUN_DELETE_TIMEOUT:?}: given up"
+            ),
         }
 
         let removed = self.containers.remove(container_id);
