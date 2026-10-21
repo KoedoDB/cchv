@@ -1131,12 +1131,59 @@ struct SandboxSpec {
 
 /// Poll /proc/{pid} until the process exits.
 async fn wait_for_pid_exit(pid: u32) {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    // A pidfd is readable when the process ends: no polling, and a pid that is reused afterwards is not mistaken for the process (the descriptor
+    // names the process it was opened for). The pid is the one the daemon reported moments ago, so it is that VM's.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+    if fd >= 0 {
+        let owned = unsafe { OwnedFd::from_raw_fd(fd as std::os::fd::RawFd) };
+        // SAFETY: `owned` is a pidfd that nothing else uses, and the AsyncFd owns it for as long as it is registered.
+        let registered = unsafe {
+            tokio::io::unix::AsyncFd::register_with_interest(owned, tokio::io::Interest::READABLE)
+        };
+        if let Ok(afd) = registered {
+            if afd.readable().await.is_ok() {
+                return;
+            }
+        }
+    } else if std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+        // No such process: it is gone already.
+        return;
+    }
+    // No pidfd (an old kernel, or a limit): look at /proc.
     let proc_path = format!("/proc/{pid}");
     loop {
         if !std::path::Path::new(&proc_path).exists() {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+#[cfg(test)]
+mod pid_exit_tests {
+    use super::wait_for_pid_exit;
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn waits_for_a_running_process_and_returns_when_it_ends() {
+        let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        let waiter = tokio::spawn(wait_for_pid_exit(pid));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!waiter.is_finished(), "it must wait while the process runs");
+        let t = Instant::now();
+        child.kill().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), waiter).await.unwrap().unwrap();
+        assert!(t.elapsed() < Duration::from_millis(80), "an event, not a poll every 100 ms: {:?}", t.elapsed());
+        let _ = child.wait();
+    }
+
+    #[tokio::test]
+    async fn returns_at_once_for_a_process_that_is_not_there() {
+        let t = Instant::now();
+        tokio::time::timeout(Duration::from_secs(2), wait_for_pid_exit(4_194_300)).await.unwrap();
+        assert!(t.elapsed() < Duration::from_millis(50));
     }
 }
 
