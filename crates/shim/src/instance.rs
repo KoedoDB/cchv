@@ -148,6 +148,9 @@ fn vm_lost(vm: &SharedVmState, why: &str) {
     }
 }
 
+/// Pauses before the tries of a signal to a container (the first is at once): 4 tries in about 4.5 s, then the error goes to containerd.
+const KILL_RETRY_PAUSES_MS: [u64; 4] = [0, 300, 1000, 3000];
+
 /// Whether the process the daemon named for the VM (the launcher of Cloud Hypervisor) is still there. 0 means no VM yet.
 fn vm_process_alive(ch_pid: u32) -> bool {
     ch_pid == 0 || std::path::Path::new(&format!("/proc/{ch_pid}")).exists()
@@ -297,12 +300,47 @@ impl Instance for CloudHvInstance {
                 );
                 let _ = self.exit.set((0, Utc::now()));
             } else {
-                // App container signal — proxy through daemon
+                // App container signal — proxy through daemon. A failure is not dropped: a signal that did not arrive leaves the container
+                // running, and containerd (the kubelet's stop) has to hear that, to ask again. It is tried a few times first (the daemon may
+                // be restarting); a VM that is gone has nothing to signal, and neither has a daemon that has no agent for it.
                 let t_rpc = std::time::Instant::now();
                 let client = DaemonClient::new(&vm_state.daemon_socket);
-                let _ = client
-                    .kill_container(&vm_state.daemon_vm_id, &self.id, signal)
-                    .await;
+                let mut failed: Option<anyhow::Error> = None;
+                for (n, pause_ms) in KILL_RETRY_PAUSES_MS.iter().enumerate() {
+                    if *pause_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(*pause_ms)).await;
+                    }
+                    match client
+                        .kill_container(&vm_state.daemon_vm_id, &self.id, signal)
+                        .await
+                    {
+                        Ok(()) => {
+                            failed = None;
+                            break;
+                        }
+                        Err(e) => {
+                            let gone = vm_state.lost.load(Ordering::SeqCst)
+                                || !vm_process_alive(vm_state.ch_pid)
+                                || format!("{e:#}").contains("no agent for VM");
+                            log::warn!(
+                                "kill {signal} of {} failed (try {}{}): {e:#}",
+                                self.id,
+                                n + 1,
+                                if gone { ", the VM is gone" } else { "" }
+                            );
+                            failed = if gone { None } else { Some(e) };
+                            if gone {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if let Some(e) = failed {
+                    return Err(Error::Any(anyhow::anyhow!(
+                        "kill {signal} of {}: {e:#}",
+                        self.id
+                    )));
+                }
                 info!(
                     "TIMING kill_container {} @{}: rpc={}ms total={}ms",
                     self.id,
