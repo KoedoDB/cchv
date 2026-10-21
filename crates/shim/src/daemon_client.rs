@@ -14,6 +14,34 @@ use tokio::net::UnixStream;
 /// or something in its place, that sends more is not read on until the shim's memory is gone.
 const MAX_RESPONSE: u64 = 16 * 1024 * 1024;
 
+/// How long a call that must not be lost (waiting for a container, reading its output) goes on trying while the daemon cannot be reached.
+/// The daemon is replaced without stopping the pods' VMs; the new one is listening again after it has taken them over and filled its pool
+/// (some tens of seconds). A pod's container runs on meanwhile, and its exit must not be taken for the daemon's absence.
+const RECONNECT_GRACE: Duration = Duration::from_secs(300);
+const RECONNECT_PAUSE: Duration = Duration::from_secs(1);
+/// A wait that was under way this long had a connection to the daemon: the daemon was there until the connection broke, so what follows is a
+/// new absence, with its own grace (not the end of an earlier one, which a pod that has seen the daemon replaced once would otherwise give up
+/// at on the second).
+const HEALTHY_AFTER: Duration = Duration::from_secs(5);
+
+/// The daemon could not be spoken to (no connection, or the connection broke before an answer): not "the daemon answered with an error".
+#[derive(Debug)]
+struct Unreachable;
+
+impl std::fmt::Display for Unreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the daemon cannot be reached")
+    }
+}
+
+impl std::error::Error for Unreachable {}
+
+/// Whether the error is that the daemon could not be spoken to (it may be restarting), as opposed to an error it answered with.
+pub fn is_unreachable(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<Unreachable>().is_some()
+        || e.chain().any(|c| c.downcast_ref::<Unreachable>().is_some())
+}
+
 /// Parameters for acquiring a sandbox VM from the daemon.
 pub struct AcquireRequest<'a> {
     pub netns: &'a str,
@@ -49,6 +77,10 @@ pub struct DaemonClient {
     /// What an ordinary request may take, and what one that boots or hot-plugs a VM may take.
     rpc_timeout: Duration,
     acquire_timeout: Duration,
+    /// See `RECONNECT_GRACE`.
+    reconnect_grace: Duration,
+    /// See `HEALTHY_AFTER`.
+    healthy_after: Duration,
 }
 
 impl DaemonClient {
@@ -57,6 +89,62 @@ impl DaemonClient {
             socket_path: socket_path.to_string(),
             rpc_timeout: Duration::from_secs(30),
             acquire_timeout: Duration::from_secs(120),
+            reconnect_grace: RECONNECT_GRACE,
+            healthy_after: HEALTHY_AFTER,
+        }
+    }
+
+    /// How long `wait_container` and `read_logs` keep trying while the daemon cannot be reached (the tests shorten it).
+    #[cfg(test)]
+    pub fn with_reconnect_grace(mut self, grace: Duration) -> Self {
+        self.reconnect_grace = grace;
+        self
+    }
+
+    /// How long a wait must have been under way for the failure that ends it to start a new absence (the tests shorten it).
+    #[cfg(test)]
+    pub fn with_healthy_after(mut self, after: Duration) -> Self {
+        self.healthy_after = after;
+        self
+    }
+
+    /// Send a request that is safe to repeat, again and again while the daemon cannot be reached, for up to the grace. An answer (of any
+    /// kind) ends it. `call` makes one try.
+    async fn rpc_patiently(&self, request: &serde_json::Value, long: bool) -> Result<serde_json::Value> {
+        let mut down_since: Option<std::time::Instant> = None;
+        let mut tries = 0u32;
+        loop {
+            let try_started = std::time::Instant::now();
+            let tried = if long {
+                self.rpc_no_timeout(request).await
+            } else {
+                self.rpc(request).await
+            };
+            match tried {
+                Err(e) if is_unreachable(&e) => {
+                    // A wait that had been under way for a while had its connection: this is a new absence, not the old one going on.
+                    if long && try_started.elapsed() >= self.healthy_after {
+                        down_since = None;
+                        tries = 0;
+                    }
+                    let since = *down_since.get_or_insert_with(std::time::Instant::now);
+                    if since.elapsed() >= self.reconnect_grace {
+                        log::warn!("the daemon is still away after {:?}: giving up ({e:#})", since.elapsed());
+                        return Err(e);
+                    }
+                    if tries == 0 {
+                        log::info!("the daemon cannot be reached, trying again for up to {:?}: {e:#}", self.reconnect_grace);
+                    }
+                    tries += 1;
+                    tokio::time::sleep(RECONNECT_PAUSE).await;
+                }
+                other => {
+                    if tries > 0 {
+                        log::info!("the daemon answered again after {tries} tries");
+                    }
+                    return other;
+                }
+            }
         }
     }
 
@@ -159,12 +247,17 @@ impl DaemonClient {
         // WaitContainer is long-lived — no timeout on the read since the
         // container may run for hours. The daemon holds the connection open
         // and responds only when the container exits.
+        // A daemon that is replaced closes this connection and, a little later, listens again, with the VM and the container still there:
+        // ask again (the guest's agent answers a second wait as it does the first).
         let resp = self
-            .rpc_no_timeout(&serde_json::json!({
-                "method": "WaitContainer",
-                "vm_id": vm_id,
-                "container_id": container_id,
-            }))
+            .rpc_patiently(
+                &serde_json::json!({
+                    "method": "WaitContainer",
+                    "vm_id": vm_id,
+                    "container_id": container_id,
+                }),
+                true,
+            )
             .await?;
         Self::check_error(&resp, "WaitContainer")?;
         let exit_code = resp["exit_status"].as_u64().unwrap_or(137) as u32;
@@ -182,14 +275,18 @@ impl DaemonClient {
         stderr_offset: u64,
     ) -> Result<LogChunk> {
         use base64::Engine;
+        // The offsets are the caller's, so a call that is repeated returns what the first would have.
         let resp = self
-            .rpc(&serde_json::json!({
-                "method": "ReadLogs",
-                "vm_id": vm_id,
-                "container_id": container_id,
-                "stdout_offset": stdout_offset,
-                "stderr_offset": stderr_offset,
-            }))
+            .rpc_patiently(
+                &serde_json::json!({
+                    "method": "ReadLogs",
+                    "vm_id": vm_id,
+                    "container_id": container_id,
+                    "stdout_offset": stdout_offset,
+                    "stderr_offset": stderr_offset,
+                }),
+                false,
+            )
             .await?;
         Self::check_error(&resp, "ReadLogs")?;
         let b64 = base64::engine::general_purpose::STANDARD;
@@ -434,12 +531,15 @@ impl DaemonClient {
             }
             serde_json::from_str(line.trim()).context("parse daemon response")
         };
-        match timeout {
+        let done = match timeout {
             Some(t) => tokio::time::timeout(t, exchange)
                 .await
-                .map_err(|_| anyhow::anyhow!("daemon RPC timed out after {}s", t.as_secs()))?,
+                .map_err(|_| anyhow::anyhow!("daemon RPC timed out after {}s", t.as_secs()))
+                .and_then(|r| r),
             None => exchange.await,
-        }
+        };
+        // Whatever went wrong here, the daemon gave no answer.
+        done.map_err(|e| e.context(Unreachable))
     }
 
     fn check_error(resp: &serde_json::Value, method: &str) -> Result<()> {
@@ -506,6 +606,117 @@ mod tests {
             serde_json::from_str(line.trim()).unwrap()
         });
         (DaemonClient::new(sock.to_str().unwrap()), h, dir)
+    }
+
+    /// A daemon that is not there for `down`, then answers every request with `answer`.
+    async fn comes_back(
+        down: Duration,
+        answer: Value,
+    ) -> (DaemonClient, tokio::task::JoinHandle<()>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("d.sock");
+        let path = sock.clone();
+        let h = tokio::spawn(async move {
+            tokio::time::sleep(down).await;
+            let listener = UnixListener::bind(&path).unwrap();
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (rd, mut wr) = stream.into_split();
+                let mut line = String::new();
+                BufReader::new(rd).read_line(&mut line).await.unwrap();
+                wr.write_all(format!("{answer}\n").as_bytes()).await.unwrap();
+            }
+        });
+        (DaemonClient::new(sock.to_str().unwrap()), h, dir)
+    }
+
+    #[tokio::test]
+    async fn waiting_for_a_container_outlasts_a_daemon_that_is_replaced() {
+        let (c, h, _d) = comes_back(
+            Duration::from_millis(1500),
+            json!({"exit_status": 3, "exited_at": "t"}),
+        )
+        .await;
+        let (code, at) = c.wait_container("v1", "c1").await.unwrap();
+        assert_eq!((code, at.as_str()), (3, "t"));
+        h.abort();
+    }
+
+    #[tokio::test]
+    async fn waiting_goes_on_when_the_daemon_dies_with_the_request_in_hand() {
+        // What a killed daemon does to a wait that is under way: the connection is closed with no answer. The next try is answered.
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("d.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let h = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (rd, wr) = stream.into_split();
+            let mut line = String::new();
+            BufReader::new(rd).read_line(&mut line).await.unwrap();
+            drop(wr); // closed with no answer
+            let (stream, _) = listener.accept().await.unwrap();
+            let (rd, mut wr) = stream.into_split();
+            let mut line = String::new();
+            BufReader::new(rd).read_line(&mut line).await.unwrap();
+            wr.write_all(b"{\"exit_status\": 5, \"exited_at\": \"t\"}\n").await.unwrap();
+        });
+        let c = DaemonClient::new(sock.to_str().unwrap());
+        let (code, _) = c.wait_container("v1", "c1").await.expect("the wait is repeated");
+        assert_eq!(code, 5);
+        h.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_second_absence_of_the_daemon_gets_its_own_grace() {
+        // The daemon is away for 0.5 s, comes back and the wait is under way for 0.6 s, then the daemon is killed again and is away for 0.7 s.
+        // Each absence is shorter than the grace (1 s), together they are longer: the wait must go on.
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("d.sock");
+        let path = sock.clone();
+        let h = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let listener = UnixListener::bind(&path).unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let (rd, wr) = stream.into_split();
+            let mut line = String::new();
+            BufReader::new(rd).read_line(&mut line).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            drop(wr); // killed again
+            drop(listener);
+            let _ = std::fs::remove_file(&path);
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            let listener = UnixListener::bind(&path).unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let (rd, mut wr) = stream.into_split();
+            let mut line = String::new();
+            BufReader::new(rd).read_line(&mut line).await.unwrap();
+            wr.write_all(b"{\"exit_status\": 9, \"exited_at\": \"t\"}\n").await.unwrap();
+        });
+        let c = DaemonClient::new(sock.to_str().unwrap())
+            .with_reconnect_grace(Duration::from_millis(1000))
+            .with_healthy_after(Duration::from_millis(300));
+        let (code, _) = c.wait_container("v1", "c1").await.expect("the second absence is short");
+        assert_eq!(code, 9);
+        h.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn waiting_gives_up_when_the_daemon_stays_away_longer_than_the_grace() {
+        let c = DaemonClient::new("/nonexistent/daemon.sock")
+            .with_reconnect_grace(Duration::from_millis(1200));
+        let t0 = std::time::Instant::now();
+        let e = c.wait_container("v1", "c1").await.unwrap_err();
+        assert!(is_unreachable(&e), "{e:#}");
+        assert!(t0.elapsed() >= Duration::from_millis(1200));
+    }
+
+    #[tokio::test]
+    async fn an_error_the_daemon_answers_with_is_not_retried() {
+        let (c, h, _d) = once(json!({"exit_status": 137, "error": "no agent for VM v1"})).await;
+        let e = c.wait_container("v1", "c1").await.unwrap_err();
+        assert!(!is_unreachable(&e), "{e:#}");
+        assert!(format!("{e:#}").contains("no agent for VM"));
+        h.await.unwrap();
     }
 
     #[tokio::test]
