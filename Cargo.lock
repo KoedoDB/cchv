@@ -613,7 +613,7 @@ dependencies = [
 [[package]]
 name = "containerd-shimkit"
 version = "0.1.2-koedodb.2"
-source = "git+https://github.com/KoedoDB/containerd-shimkit.git?rev=55ee9692bb450129dbb2ab5885bd12b0d80ea771#55ee9692bb450129dbb2ab5885bd12b0d80ea771"
+source = "git+https://github.com/KoedoDB/containerd-shimkit.git?rev=89325ea9397d51fcd77540154ff5caf030875830#89325ea9397d51fcd77540154ff5caf030875830"
 dependencies = [
  "anyhow",
  "chrono",

@@ -13,7 +13,7 @@ path = "src/main.rs"
 cloudhv-common = { workspace = true }
 
 # containerd task service for a shim whose containers run in a VM: our cut-down shimkit (a start from containerd/runwasi), pinned by commit
-containerd-shimkit = { git = "https://github.com/KoedoDB/containerd-shimkit.git", rev = "55ee9692bb450129dbb2ab5885bd12b0d80ea771" } # tag v0.1.2-koedodb.2
+containerd-shimkit = { git = "https://github.com/KoedoDB/containerd-shimkit.git", rev = "89325ea9397d51fcd77540154ff5caf030875830" } # the commit after v0.1.2-koedodb.2 that adds Task::pids (without it, containerd takes a running task for a leaked shim when k3s restarts)
 
 # containerd gRPC client (for image digest resolution)
 containerd-client = "0.9.0"
