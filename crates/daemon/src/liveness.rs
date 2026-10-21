@@ -11,9 +11,11 @@
 //!    VM's any more: the pid was reused) is released at once, with its agent connection, whoever else knew about it.
 //! 2. **The guest**, every `check_every`: the agent's `Check` (a call over vsock that needs the guest's kernel, its agent and the vsock to
 //!    work, which the Cloud Hypervisor's own API does not: that answers while the guest is hung). A VM that fails `failures` checks in a
-//!    row (each with `check_timeout`) has a hung guest: its Cloud Hypervisor is killed, and the first watch then releases it. A slow guest
-//!    is not a hung one: the limits are long (by default 5 failures of 5 s, one every 10 s: over a minute), and a check that works resets
-//!    the count.
+//!    row (each with `check_timeout`) has a hung guest. What happens then is `action`: a warning that says it would be killed (`Log`, the
+//!    default, to learn how often a healthy VM misses checks before anything is killed), or its Cloud Hypervisor is killed (`Kill`) and the
+//!    first watch releases it. A slow guest is not a hung one, so a failure is not counted when the VM is not `Running` (paused by the daemon
+//!    itself for a snapshot or a hot-plug) or when the daemon's own round came late (the daemon or the host stalled: the VMs could not be
+//!    asked in time), and a check that works resets the count. The limits are long (by default 5 failures, one every 30 s, each with 10 s).
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -23,6 +25,9 @@ use log::{info, warn};
 
 use crate::api::{forget_vm, AgentRegistry};
 use crate::pool::Pool;
+
+/// A check that answered but took this long is logged.
+const SLOW_CHECK: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy)]
 pub struct Settings {
@@ -34,6 +39,16 @@ pub struct Settings {
     pub check_timeout: Duration,
     /// How many checks in a row may fail before the VM counts as hung.
     pub failures: u32,
+    /// What a hung VM gets.
+    pub action: crate::config::GuestCheckAction,
+}
+
+/// Whether the answer of `vm.info` says the VM is running (not paused, not shut down).
+pub fn is_running(vm_info: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(vm_info)
+        .ok()
+        .and_then(|v| v.get("state").and_then(|s| s.as_str()).map(|s| s == "Running"))
+        .unwrap_or(false)
 }
 
 /// The health clients of the VMs that have an agent connection (the agent registry keeps only the agent client).
@@ -108,8 +123,12 @@ pub fn spawn(pool: std::sync::Arc<Pool>, agents: AgentRegistry, s: Settings) {
     }
     tokio::spawn(async move {
         let mut strikes = Strikes::default();
+        let mut last_round = std::time::Instant::now();
         loop {
             tokio::time::sleep(s.check_every).await;
+            // A round that came much later than planned: the daemon (or the host) stalled, and the guests could not be asked in time.
+            let late = last_round.elapsed() > s.check_every * 2;
+            last_round = std::time::Instant::now();
             let clients = health_clients();
             let ids: Vec<String> = clients.iter().map(|(id, _)| id.clone()).collect();
             strikes.keep_only(&ids);
@@ -117,6 +136,7 @@ pub fn spawn(pool: std::sync::Arc<Pool>, agents: AgentRegistry, s: Settings) {
             let mut set = tokio::task::JoinSet::new();
             for (id, health) in clients {
                 set.spawn(async move {
+                    let started = std::time::Instant::now();
                     let ctx = ttrpc::context::with_duration(s.check_timeout);
                     let ok = matches!(
                         tokio::time::timeout(
@@ -126,21 +146,57 @@ pub fn spawn(pool: std::sync::Arc<Pool>, agents: AgentRegistry, s: Settings) {
                         .await,
                         Ok(Ok(r)) if r.ready
                     );
-                    (id, ok)
+                    (id, ok, started.elapsed())
                 });
             }
             while let Some(done) = set.join_next().await {
-                let Ok((id, ok)) = done else { continue };
+                let Ok((id, ok, took)) = done else { continue };
+                // The time of an answer, for choosing the limits from what healthy VMs do under load: a check that answered but took a
+                // while is logged too.
+                if ok && took >= SLOW_CHECK {
+                    info!("VM {id}: a check took {} ms", took.as_millis());
+                }
                 if !ok {
                     warn!("VM {id}: the guest did not answer a check");
+                    if late {
+                        warn!("VM {id}: not counted: this round came late (the daemon or the host stalled)");
+                        continue;
+                    }
+                    if let Some(sock) = pool.api_socket_of(&id) {
+                        // The Cloud Hypervisor answers while the guest is hung; if it does and the VM is not running, the daemon
+                        // paused it. (If it does not answer either, the failure counts.)
+                        if let Ok(info) = crate::vm_lifecycle::api_request_text(
+                            &sock,
+                            "GET",
+                            "/api/v1/vm.info",
+                            None,
+                            Duration::from_secs(5),
+                        )
+                        .await
+                        {
+                            if !is_running(&info) {
+                                warn!("VM {id}: not counted: the VM is not running (paused)");
+                                continue;
+                            }
+                        }
+                    }
                 }
                 if strikes.record(&id, ok, s.failures) {
-                    if pool.kill_ch(&id) {
-                        warn!(
-                            "VM {id}: {} checks in a row failed: its guest is hung, its Cloud Hypervisor is killed",
+                    match s.action {
+                        crate::config::GuestCheckAction::Kill => {
+                            if pool.kill_ch(&id) {
+                                warn!(
+                                    "VM {id}: {} checks in a row failed: its guest is hung, its Cloud Hypervisor is killed",
+                                    s.failures
+                                );
+                            }
+                        }
+                        crate::config::GuestCheckAction::Log => warn!(
+                            "VM {id}: {} checks in a row failed: its guest looks hung; guest_check_action is \"log\", so nothing is done (\"kill\" would kill its Cloud Hypervisor)",
                             s.failures
-                        );
+                        ),
                     }
+                    // Counting starts again: while it stays hung this warns every `failures` rounds.
                     strikes.keep_only(&[]);
                 }
             }
@@ -161,6 +217,15 @@ mod tests {
         assert!(!s.record("a", false, 3));
         assert!(!s.record("a", false, 3));
         assert!(s.record("a", false, 3));
+    }
+
+    #[test]
+    fn only_a_running_vm_counts_as_running() {
+        assert!(is_running(r#"{"config":{},"state":"Running"}"#));
+        assert!(!is_running(r#"{"state":"Paused"}"#));
+        assert!(!is_running(r#"{"state":"Shutdown"}"#));
+        assert!(!is_running("not json"));
+        assert!(!is_running("{}"));
     }
 
     #[test]

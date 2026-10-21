@@ -129,6 +129,7 @@ impl ApiServer {
                 check_every: std::time::Duration::from_secs(c.guest_check_secs),
                 check_timeout: std::time::Duration::from_secs(c.guest_check_timeout_secs.max(1)),
                 failures: c.guest_check_failures.max(1),
+                action: c.guest_check_action,
             },
         );
     }

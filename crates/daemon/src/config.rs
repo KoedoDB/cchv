@@ -118,6 +118,10 @@ pub struct DaemonConfig {
     pub guest_check_timeout_secs: u64,
     #[serde(default = "default_guest_check_failures")]
     pub guest_check_failures: u32,
+    /// What a VM that failed `guest_check_failures` checks in a row gets: `log` (a warning that says it would have been killed: to learn how often a
+    /// healthy VM misses the checks before anything is killed) or `kill` (its Cloud Hypervisor is killed).
+    #[serde(default)]
+    pub guest_check_action: GuestCheckAction,
 
     /// Persistent block volumes (`blockvol.rs`): the device-mapper names (`/sys/dev/block/<major>:<minor>/dm/name`, which writes a `-` of an LVM
     /// name twice: the logical volume `pv-x` of the volume group `vg` is `vg-pv--x`) that a pod may be given as a disk. A device whose name begins
@@ -261,14 +265,22 @@ fn default_max_active_vms() -> usize {
 fn default_adopted_claim_secs() -> u64 {
     600
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GuestCheckAction {
+    #[default]
+    Log,
+    Kill,
+}
+
 fn default_process_check_secs() -> u64 {
     2
 }
 fn default_guest_check_secs() -> u64 {
-    10
+    30
 }
 fn default_guest_check_timeout_secs() -> u64 {
-    5
+    10
 }
 fn default_guest_check_failures() -> u32 {
     5

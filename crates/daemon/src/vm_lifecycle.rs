@@ -765,6 +765,20 @@ pub async fn api_request_timeout(
     body: Option<&str>,
     timeout: Duration,
 ) -> Result<()> {
+    api_request_text(socket_path, method, path, body, timeout)
+        .await
+        .map(|_| ())
+}
+
+/// `api_request_timeout` that returns the body of the answer (at most 1 MiB of it is read: a Cloud Hypervisor that misbehaves cannot make
+/// this read without end).
+pub async fn api_request_text(
+    socket_path: &Path,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    timeout: Duration,
+) -> Result<String> {
     match tokio::time::timeout(timeout, api_request_inner(socket_path, method, path, body)).await {
         Ok(r) => r,
         Err(_) => anyhow::bail!(
@@ -779,8 +793,8 @@ async fn api_request_inner(
     method: &str,
     path: &str,
     body: Option<&str>,
-) -> Result<()> {
-    use http_body_util::{BodyExt, Empty, Full};
+) -> Result<String> {
+    use http_body_util::{BodyExt, Empty, Full, Limited};
     use hyper::body::Bytes;
     use hyper::Request;
     use hyper_util::rt::TokioIo;
@@ -822,7 +836,12 @@ async fn api_request_inner(
         anyhow::bail!("CH API {method} {path}: {} {}", status, body_str);
     }
 
-    Ok(())
+    let body = Limited::new(resp.into_body(), 1 << 20)
+        .collect()
+        .await
+        .map_err(|e| anyhow::anyhow!("CH API {method} {path}: reading the answer: {e}"))?
+        .to_bytes();
+    Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
 /// Convenience: send a CH API request with a body.

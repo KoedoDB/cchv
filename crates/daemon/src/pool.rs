@@ -259,6 +259,15 @@ impl Pool {
             .collect()
     }
 
+    /// The Cloud Hypervisor API socket of a VM handed to a pod.
+    pub fn api_socket_of(&self, vm_id: &str) -> Option<PathBuf> {
+        self.active
+            .try_lock()
+            .ok()?
+            .get(vm_id)
+            .map(|vm| vm.api_socket.clone())
+    }
+
     /// Kill the Cloud Hypervisor of a VM handed to a pod (its guest is hung). Only if that process is that VM's. Returns whether it was signalled;
     /// the VM is released by the watch of the processes after that.
     pub fn kill_ch(&self, vm_id: &str) -> bool {

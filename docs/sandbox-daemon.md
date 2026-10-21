@@ -210,10 +210,14 @@ polls `/proc/<pid>`), so a shim that was gone, restarted or confused left a VM i
 Two watches over the VMs handed to pods:
   1. **The process**, every `process_check_secs` (2): a VM whose Cloud Hypervisor is gone (no process, a zombie, or a process that is not that VM's:
      the command line no longer names its `--api-socket`, as when the pid was reused) is released at once with its agent connection.
-  2. **The guest**, every `guest_check_secs` (10): the agent's `Check` over vsock, with `guest_check_timeout_secs` (5). It needs the guest's kernel, its
+  2. **The guest**, every `guest_check_secs` (30): the agent's `Check` over vsock, with `guest_check_timeout_secs` (10). It needs the guest's kernel, its
      agent and the vsock to work; the Cloud Hypervisor's own API (`vmm.ping`) does not, it answers while the guest is hung. A VM that fails
-     `guest_check_failures` (5) checks in a row (over a minute) has its Cloud Hypervisor killed, and watch 1 then releases it; one good check resets the count.
-     The checks of all VMs run at once (a hung VM waits for its time-out alone). `guest_check_secs = 0` turns them off.
+     `guest_check_failures` (5) checks in a row (about three minutes) is hung. What it gets is `guest_check_action`: **`log`** (the default: a warning
+     that says it would have been killed, so that the limits can be chosen from what healthy VMs do under load) or `kill` (its Cloud Hypervisor is
+     killed, and watch 1 then releases it). One good check resets the count. A failure is not counted when the VM is not `Running` (the daemon paused
+     it for a snapshot or a hot-plug) or when the round came more than twice as late as planned (the daemon or the host stalled). A check that
+     answered but took 2 s or more is logged (`a check took N ms`). The checks of all VMs run at once (a hung VM waits for its time-out alone).
+     `guest_check_secs = 0` turns them off.
   The shim sees the result as it saw a dead VM before: its calls get "no agent for VM", it marks the VM lost, and its log pump and the pipes of
   containerd end.
   The host going down takes every VM with it (the registry is in `/run`).
@@ -841,9 +845,10 @@ The daemon is root and its socket is the one door:
 | `max_active_vms` | `512` | VMs handed to pods |
 | `keep_vms_on_stop` | `true` | the VMs handed to pods keep running when the daemon stops, and the next daemon takes them over; `false` stops them (the unit needs `KillMode=process` for the first) |
 | `process_check_secs` | `2` | how often the Cloud Hypervisor processes of the VMs handed to pods are looked at; a VM whose process is gone is released |
-| `guest_check_secs` | `10` | how often each such VM's guest is asked the agent's `Check` over vsock; `0` turns it off |
-| `guest_check_timeout_secs` | `5` | how long one check may take |
-| `guest_check_failures` | `5` | failed checks in a row after which the VM's Cloud Hypervisor is killed (the guest is hung) |
+| `guest_check_secs` | `30` | how often each such VM's guest is asked the agent's `Check` over vsock; `0` turns it off |
+| `guest_check_timeout_secs` | `10` | how long one check may take |
+| `guest_check_failures` | `5` | failed checks in a row after which the VM counts as hung |
+| `guest_check_action` | `log` | what a hung VM gets: `log` (a warning only) or `kill` (its Cloud Hypervisor is killed) |
 | `adopted_claim_secs` | `600` | a VM taken over from an earlier daemon that no shim speaks about for this long is released (must be longer than the shim's five minutes of trying again) |
 | `max_shadow_vms` | `2` | shadow VMs (warm-up) at once; a shadow that failed for an image is not retried for 5 minutes |
 | `max_request_bytes` | `8388608` | the longest request line (volumes of a pod are in it; the agent's own limit is 4 MiB) |
