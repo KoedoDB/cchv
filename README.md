@@ -6,9 +6,10 @@ in the Pod. Containers stay ordinary OCI images; the isolation is a KVM virtual 
 Rust, source-available (PolyForm Noncommercial, see License), for Linux hosts with `/dev/kvm`. A pool of warm VMs restored from snapshots keeps the start of a Pod short and the fixed memory
 cost of a VM small.
 
-It began as a fork of [devigned/containerd-cloudhypervisor](https://github.com/devigned/containerd-cloudhypervisor) by David Justice (MIT) and has been an
-independent repository since 2026-10-20 (the original has had no commits since March 2026; GitHub forwards the old address). The idea and the first
-implementation are his; we are grateful for them. [How it differs](#history-and-what-changed-from-the-original).
+It started from [devigned/containerd-cloudhypervisor](https://github.com/devigned/containerd-cloudhypervisor) by David Justice (MIT): the idea (a thin
+shim, a guest agent, a VM for each Pod) and the first implementation are his, and we are grateful for them. Since then it has been largely rewritten
+and extended (about 34,000 lines added and 5,000 removed; of the hand-written code, roughly 30% is still his), and it has been an independent repository
+since 2026-10-20 (the original has had no commits since March 2026; GitHub forwards the old address). [How it grew from the original](#history-and-what-is-different-from-the-original).
 
 ## What you get
 
@@ -93,7 +94,7 @@ VM of 1 GiB), direct I/O on, off and on again:
 
 What we have **not** measured or done: other hardware, a power cut, a hard reset with the Pods of this version (every VM is lost with the host; the Pods start again, a persistent volume keeps its data), many Pods at once, GPU or live migration (not supported), a run of days on this version.
 
-## History and what changed from the original
+## History and what is different from the original
 
 We run a small hosting service ([KoedoDB](https://koedodb.com)) and were looking for a way to run customers' code that **starts
 fast, uses little memory, performs well, and is safe**: microVMs light enough to keep one per project. This project is exactly
@@ -102,15 +103,14 @@ that idea, done in a way we liked: a thin shim, a guest agent, no big VMM stack.
 Trying it, we ran into a few things (for instance the problems reported as issues #97 and #98: pods that did not start from a warm
 restore, and memory that stayed resident), and the original had not seen new commits for a while. We needed fixes, and some of what
 we needed (hardening of what runs in the guest, running Cloud Hypervisor itself unprivileged and confined, `exec` and terminals,
-checks on everything the daemon and shim take as input) may not be what the original wants to carry. So we keep a copy that we maintain
-for our own use, and we keep it in the open in case it is useful to someone else.
+checks on everything the daemon and shim take as input) may not be what the original wants to carry. So we maintain our own version
+for our own use, and we publish the source so that it can be read and checked.
 
 This is not meant as criticism: the original is a good starting point, and finding and fixing the rough edges is what a first user
-does. If the original becomes active again, we would be glad to send our changes there (or to merge back); patches are welcome in
-both directions. We are not affiliated with the Cloud Hypervisor, containerd or Kata projects.
+does. We are not affiliated with the Cloud Hypervisor, containerd or Kata projects.
 
 
-### What changed
+### What is different
 
 - **Fixed**: pods start from warm snapshots (#97), the VM is sized from the Pod's limits, per-container limits are enforced in the guest,
   logs reach `kubectl logs`, children of the daemon are stopped and cleaned up when it stops, volumes (ConfigMaps, Secrets,
@@ -325,7 +325,7 @@ This is **not open source**: the source is public so that it can be read and che
   Personal, research, hobby and similar noncommercial use is allowed; commercial use needs a licence from us (license@koedodb.com).
   Running it as part of a service you sell or offer (a VPS or hosting provider, a PaaS, a BaaS, a cloud) is commercial use, and so is use inside a company for
   its business: it needs a licence from us.
-- Where a file has both, the combined file is to be used under the terms of both, so for practical purposes the fork as a whole is noncommercial.
+- Where a file has both, the combined file is to be used under the terms of both, so for practical purposes the whole is noncommercial.
 - Releases up to and including `v0.17.0-koedodb.1` were published under MIT, and stay under it for those who got them. The new terms apply from the next release.
 
 A release also carries software of others (Cloud Hypervisor, crun, the Linux
