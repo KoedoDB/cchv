@@ -326,8 +326,6 @@ See the **[docs/](docs/)** folder for detailed documentation:
 - The **original work** (devigned/containerd-cloudhypervisor by David Justice, up to its commit `be79d285c0f8`) stays under the **MIT** licence (the second part of [LICENSE](LICENSE)).
   You can take it from upstream under those terms.
 - Where a file has both, the combined file is to be used under the terms of both, so for practical purposes the whole is noncommercial.
-- The copies of `v0.15.0-koedodb.1`, `v0.16.0-koedodb.1` and `v0.17.0-koedodb.1` that were published came with a LICENSE file that said MIT; whoever got those
-  copies may keep using those copies under it. Everything after them, and every other copy, is under the terms above.
 
 A release also carries software of others (Cloud Hypervisor, crun, the Linux
 kernel, the Rust crates): [THIRD-PARTY.md](THIRD-PARTY.md) lists it with the licenses and the source of the GPL parts, and each release
