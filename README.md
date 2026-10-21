@@ -322,7 +322,9 @@ This is **not open source**: the source is public so that it can be read and che
   You can take it from upstream under those terms.
 - **Our changes and new files** (everything after that commit: the daemon, the shim and agent changes, the installer, the guest, the docs) are copyright
   (c) 2026 RadarWorks LLC (KoedoDB) and under the **PolyForm Noncommercial License 1.0.0**: [LICENSE-POLYFORM-NC.md](LICENSE-POLYFORM-NC.md).
-  Personal, research, hobby and similar noncommercial use is allowed; commercial use needs a licence from us (security@koedodb.com).
+  Personal, research, hobby and similar noncommercial use is allowed; commercial use needs a licence from us (license@koedodb.com).
+  Running it as part of a service you sell or offer (a VPS or hosting provider, a PaaS, a BaaS, a cloud) is commercial use, and so is use inside a company for
+  its business: it needs a licence from us.
 - Where a file has both, the combined file is to be used under the terms of both, so for practical purposes the fork as a whole is noncommercial.
 - Releases up to and including `v0.17.0-koedodb.1` were published under MIT, and stay under it for those who got them. The new terms apply from the next release.
 
