@@ -24,6 +24,14 @@ use crate::validate;
 /// Monotonic counter for unique warm VM IDs.
 static WARM_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// The name of a VM restored from a warm snapshot. It carries the daemon's pid: the counter starts at 0 in every daemon, and a taken-over VM keeps
+/// the name an earlier daemon gave it, so `warm-<key>-<seq>` alone was made again after a restart and was the name of a VM that a pod was using
+/// (seen on 2026-10-21: "link memory-ranges from base snapshot: File exists", the warm snapshot dropped, and VMs that the next daemon could not take
+/// over because their API socket was gone). The pool's and the sized VMs' names carry the pid too.
+fn warm_vm_id(image_key: &str, pid: u32, seq: u64) -> String {
+    format!("warm-{image_key}-{pid}-{seq}")
+}
+
 /// Per-VM agent connection, stored after first container start.
 pub(crate) type AgentRegistry = Arc<Mutex<HashMap<String, cloudhv_proto::AgentServiceClient>>>;
 
@@ -427,9 +435,11 @@ async fn handle_acquire(
     // Check for warm workload snapshot
     if !image_key.is_empty() && snapshots.has_snapshot(&image_key).await {
         let seq = WARM_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let vm_id = format!("warm-{}-{}", image_key, seq);
+        let vm_id = warm_vm_id(&image_key, std::process::id(), seq);
         let state_dir = std::path::PathBuf::from(&config.state_dir).join(&vm_id);
-        if let Err(e) = std::fs::create_dir_all(&state_dir) {
+        // The directory must be new: a name that is already there is a VM of this or of an earlier daemon (a taken-over VM keeps its
+        // name), and restoring into its directory would damage it. (`create_dir`, not `create_dir_all`, which accepts one that exists.)
+        if let Err(e) = std::fs::create_dir(&state_dir) {
             return serde_json::json!({"error": format!("create state dir: {e}")});
         }
 
@@ -1378,6 +1388,17 @@ mod tap_name_tests {
 #[cfg(test)]
 mod request_tests {
     use super::*;
+
+    #[test]
+    fn a_warm_vm_name_differs_between_daemons_and_is_a_valid_id() {
+        let key = "0b9d89849dd606c13fb0147b808d6fc7";
+        // The same counter value in two daemons (a restart): two names.
+        assert_ne!(warm_vm_id(key, 4086082, 0), warm_vm_id(key, 283149, 0));
+        // Within one daemon the counter makes them differ.
+        assert_ne!(warm_vm_id(key, 4086082, 0), warm_vm_id(key, 4086082, 1));
+        // A pid of 7 digits (the largest, 4194304) and a counter of 6 digits still fit the 64 characters of an id.
+        assert!(validate::is_id(&warm_vm_id(key, 4_194_304, 999_999)));
+    }
 
     #[tokio::test]
     async fn a_request_line_is_read_up_to_the_limit_and_no_further() {
