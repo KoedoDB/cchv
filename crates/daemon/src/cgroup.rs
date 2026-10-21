@@ -228,15 +228,15 @@ pub fn parse_populated(events: &str) -> Option<bool> {
         .map(|v| v.trim() == "1")
 }
 
-/// At start: the cgroups of VMs of an earlier daemon go, with whatever is left in them.
-pub async fn sweep() {
+/// At start: the cgroups of VMs of an earlier daemon go, with whatever is left in them; those of the VMs just taken over (`keep`) stay.
+pub async fn sweep(keep: &std::collections::HashSet<String>) {
     let Some(root) = root() else { return };
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
-        if e.path().is_dir() && !name.starts_with('.') {
+        if e.path().is_dir() && !name.starts_with('.') && !keep.contains(&name) {
             kill_and_remove(&name).await;
         }
     }

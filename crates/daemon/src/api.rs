@@ -86,6 +86,53 @@ impl ApiServer {
         }
     }
 
+    /// Connect again to the agents of the VMs taken over from the earlier daemon (`Pool::adopt`): the connection lived in the earlier
+    /// daemon's memory, and every call about a container goes through it. A VM whose agent does not answer is of no use to its pod (the
+    /// shim finds out when it asks): it is stopped, as a VM that died would be.
+    pub async fn adopt_agents(&self, vms: &[crate::pool::PoolVm]) {
+        for vm in vms {
+            let connected = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                crate::vm_lifecycle::connect_agent(&vm.vsock_socket),
+            )
+            .await;
+            match connected {
+                Ok(Ok((agent, _health))) => {
+                    self.agents.lock().await.insert(vm.vm_id.clone(), agent);
+                    // The TAP of the VM (if it has one) is in its pod's network namespace and keeps its name.
+                    reserve_tap_name(&tap_name_for(&vm.vm_id));
+                    info!("took over VM {} (cid {}, pid {})", vm.vm_id, vm.cid, vm.ch_pid);
+                }
+                other => {
+                    let why = match other {
+                        Ok(Err(e)) => format!("{e:#}"),
+                        _ => "no answer in 10 s".to_string(),
+                    };
+                    warn!("VM {} is not taken over, its agent does not answer ({why}): stopping it", vm.vm_id);
+                    let _ = self.pool.release(&vm.vm_id).await;
+                }
+            }
+        }
+    }
+
+    /// Release the VMs taken over from the earlier daemon that no pod's shim has spoken about for `adopted_claim_secs`: their pods are gone
+    /// (deleted while the daemon was away), and nothing else would ever release them.
+    pub fn spawn_unclaimed_reaper(&self) {
+        let pool = Arc::clone(&self.pool);
+        let agents = self.agents.clone();
+        let after = std::time::Duration::from_secs(self.config.adopted_claim_secs.max(1));
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                for id in pool.take_unclaimed(after) {
+                    warn!("VM {id} was taken over and no pod has asked about it for {}s: releasing it", after.as_secs());
+                    forget_vm(&agents, &id).await;
+                    let _ = pool.release(&id).await;
+                }
+            }
+        });
+    }
+
     /// Start the ttrpc server. Blocks until shutdown.
     pub async fn serve(&self) -> Result<()> {
         use std::os::unix::fs::{FileTypeExt, PermissionsExt};
@@ -199,6 +246,10 @@ async fn handle_connection(
         }
         let request: serde_json::Value = serde_json::from_slice(&line)?;
         let method = request.get("method").and_then(|v| v.as_str()).unwrap_or("");
+        // A request about a VM shows that it has a pod (see `Pool::claim`).
+        if let Some(id) = request.get("vm_id").and_then(|v| v.as_str()) {
+            pool.claim(id);
+        }
 
         log::debug!(
             "request: method={} vm_id={} container_id={}",

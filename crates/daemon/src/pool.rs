@@ -38,6 +38,9 @@ pub struct Pool {
     active: Mutex<HashMap<String, PoolVm>>,
     /// Count of VMs currently acquired by shims.
     active_count: std::sync::atomic::AtomicUsize,
+    /// The VMs taken over from an earlier daemon (`adopt`) that no shim has spoken to since, with the time they were taken over. A pod's
+    /// shim asks about its VM at once (it was waiting for the daemon to come back); one that nobody asks about has no pod any more.
+    unclaimed: std::sync::Mutex<HashMap<String, std::time::Instant>>,
     /// Held while a VM is being restored for the pool, so that two refills do not both see "one short" and make two.
     refill: Mutex<()>,
     /// Next CID to assign (incremented per VM).
@@ -55,6 +58,7 @@ impl Pool {
             ready: Mutex::new(Vec::new()),
             active: Mutex::new(HashMap::new()),
             active_count: std::sync::atomic::AtomicUsize::new(0),
+            unclaimed: std::sync::Mutex::new(HashMap::new()),
             refill: Mutex::new(()),
             next_cid: std::sync::atomic::AtomicU64::new(3), // CID 0-2 reserved
             stopping: std::sync::atomic::AtomicBool::new(false),
@@ -110,6 +114,7 @@ impl Pool {
         // Try to pop from the ready pool
         let vm = self.ready.lock().await.pop();
         if let Some(vm) = vm {
+            self.mark_handed_out(&vm);
             self.active_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.active
@@ -129,6 +134,7 @@ impl Pool {
         // Pool empty — synchronous fallback
         info!("pool empty, restoring synchronously...");
         let vm = self.restore_one().await?;
+        self.mark_handed_out(&vm);
         self.active_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.active
@@ -166,9 +172,22 @@ impl Pool {
     /// Register an externally-created VM (e.g. warm restore) as active.
     /// This ensures release() can find and clean it up properly.
     pub async fn register_active(&self, vm: PoolVm) {
+        self.mark_handed_out(&vm);
         self.active_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.active.lock().await.insert(vm.vm_id.clone(), vm);
+    }
+
+    /// Leave in the registry what the next daemon needs to take this VM over (see `adopt`). Failing to is not an error for the pod: the
+    /// VM runs, and is only stopped, as it always was, if the daemon is replaced.
+    fn mark_handed_out(&self, vm: &PoolVm) {
+        let state_dir = PathBuf::from(&self.config.state_dir).join(&vm.vm_id);
+        if let Err(e) = crate::ctl::mark_active(&state_dir, vm.cid) {
+            warn!(
+                "VM {} cannot be recorded for a restart of the daemon, and will be stopped by it: {e:#}",
+                vm.vm_id
+            );
+        }
     }
 
     /// Replenish the pool by restoring one VM from the base snapshot.
@@ -231,6 +250,35 @@ impl Pool {
             .partition(|vm| crate::ctl::pid_alive(vm.ch_pid));
         *ready = alive;
         dead
+    }
+
+    /// The VM is for the daemon's own use (a shadow VM that warms an image up), not a pod's: the next daemon must not take it over (it would
+    /// have no owner, as the work that used it is gone with the daemon), so it is not recorded as handed to a pod.
+    pub fn disown(&self, vm_id: &str) {
+        let state_dir = PathBuf::from(&self.config.state_dir).join(vm_id);
+        crate::ctl::clear_active(&state_dir);
+    }
+
+    /// A shim has spoken about the VM: it has a pod.
+    pub fn claim(&self, vm_id: &str) {
+        let mut unclaimed = self.unclaimed.lock().unwrap_or_else(|e| e.into_inner());
+        if !unclaimed.is_empty() {
+            unclaimed.remove(vm_id);
+        }
+    }
+
+    /// The taken-over VMs that nobody has spoken about for `after`; they are no longer listed as unclaimed.
+    pub fn take_unclaimed(&self, after: std::time::Duration) -> Vec<String> {
+        let mut unclaimed = self.unclaimed.lock().unwrap_or_else(|e| e.into_inner());
+        let stale: Vec<String> = unclaimed
+            .iter()
+            .filter(|(_, since)| since.elapsed() >= after)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &stale {
+            unclaimed.remove(id);
+        }
+        stale
     }
 
     /// Whether the daemon has been told to stop.
@@ -461,24 +509,111 @@ impl Pool {
         })
     }
 
-    /// Stop every VM this daemon owns: the ready ones, the ones handed to pods, and any Cloud Hypervisor process that is left in the
-    /// state directory (a shadow VM, or one of an earlier daemon that was killed). Called when the daemon is told to stop, so that its
-    /// VMs do not outlive it: a VM that does is held in memory (one resident guest, 38 to 133 MiB) and known to nobody.
-    pub async fn shutdown_all(&self) {
+    /// The daemon is told to stop. The VMs handed to pods keep running: they are the customers' (a database, a web server), and replacing the
+    /// daemon (an update, a restart) must not end them; the next daemon takes them over (`adopt`). Everything else goes: the VMs waiting in
+    /// the pool, and any Cloud Hypervisor process left in the state directory that is not a pod's (a shadow VM, one that was being made).
+    /// `keep_active` false stops the pods' VMs too (the daemon is being removed, or the operator wants everything down).
+    pub async fn shutdown_all(&self, keep_active: bool) {
         self.stopping
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let mut vms: Vec<PoolVm> = self.ready.lock().await.drain(..).collect();
-        vms.extend(self.active.lock().await.drain().map(|(_, vm)| vm));
-        self.active_count
-            .store(0, std::sync::atomic::Ordering::SeqCst);
-        info!("stopping {} VMs", vms.len());
+        let kept: HashSet<String> = if keep_active {
+            self.active.lock().await.keys().cloned().collect()
+        } else {
+            vms.extend(self.active.lock().await.drain().map(|(_, vm)| vm));
+            self.active_count
+                .store(0, std::sync::atomic::Ordering::SeqCst);
+            HashSet::new()
+        };
+        info!(
+            "stopping {} VMs, leaving {} to their pods",
+            vms.len(),
+            kept.len()
+        );
         for vm in &vms {
             self.destroy_vm(vm).await;
         }
-        let left = self.sweep_orphans().await;
+        let left = self.sweep_orphans(&kept).await;
         if left > 0 {
             info!("stopped {left} more Cloud Hypervisor processes found in the state directory");
         }
+    }
+
+    /// At start: take over the VMs the earlier daemon handed to pods and that still run. A VM is taken over if its registry says it was
+    /// handed out (`ctl::mark_active`), its Cloud Hypervisor is that VM's (`ctl::is_ch_of`: the command line names the VM's API socket and,
+    /// rootless, it runs as the VM's user) and answers on its API socket. It is put back among the active VMs (so the counter, the
+    /// CIDs and the pod's calls are as they were); its agent connection is made again by the API server (`ApiServer::adopt`). Every other
+    /// VM of the earlier daemon is stopped, as before (`sweep_orphans`). Returns the VMs taken over.
+    pub async fn adopt(&self) -> Vec<PoolVm> {
+        let root = PathBuf::from(&self.config.state_dir);
+        let mut taken: Vec<PoolVm> = Vec::new();
+        for name in crate::ctl::registered(&root) {
+            if !crate::validate::is_id(&name) {
+                continue;
+            }
+            let dir = root.join(&name);
+            let Some(cid) = crate::ctl::read_active_cid(&dir) else {
+                continue;
+            };
+            let Some(pid) = crate::ctl::read_pid(&dir) else {
+                continue;
+            };
+            if !crate::ctl::pid_alive(pid) || !crate::ctl::is_ch_of(pid, &dir) {
+                continue;
+            }
+            let api_socket = dir.join("api.sock");
+            if let Err(e) = crate::vm_lifecycle::api_request_timeout(
+                &api_socket,
+                "GET",
+                "/api/v1/vmm.ping",
+                None,
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            {
+                warn!("VM {name} (pid {pid}) is not taken over, its Cloud Hypervisor does not answer: {e:#}");
+                continue;
+            }
+            taken.push(PoolVm {
+                vm_id: name,
+                api_socket,
+                vsock_socket: dir.join("vsock.sock"),
+                cid,
+                ch_pid: pid,
+                created_at: std::time::Instant::now(),
+            });
+        }
+        // The next CID after the largest in use: a CID is the guest's address on the host's vsock, and two VMs must not have one.
+        if let Some(max) = taken.iter().map(|v| v.cid).max() {
+            self.next_cid
+                .fetch_max(max + 1, std::sync::atomic::Ordering::SeqCst);
+        }
+        {
+            let mut active = self.active.lock().await;
+            for vm in &taken {
+                crate::rootless::adopt(&root.join(&vm.vm_id));
+                active.insert(vm.vm_id.clone(), vm.clone());
+            }
+        }
+        self.active_count
+            .fetch_add(taken.len(), std::sync::atomic::Ordering::SeqCst);
+        {
+            let now = std::time::Instant::now();
+            let mut unclaimed = self.unclaimed.lock().unwrap_or_else(|e| e.into_inner());
+            for vm in &taken {
+                unclaimed.insert(vm.vm_id.clone(), now);
+            }
+        }
+        let keep: HashSet<String> = taken.iter().map(|v| v.vm_id.clone()).collect();
+        let swept = self.sweep_orphans(&keep).await;
+        if !taken.is_empty() || swept > 0 {
+            info!(
+                "took over {} VMs of the earlier daemon, stopped {} that were not a pod's",
+                taken.len(),
+                swept
+            );
+        }
+        taken
     }
 
     /// Make the state directory ready: it exists, a VM's user can pass through it (0711: enter, not list, so that one VM cannot see the
@@ -512,7 +647,7 @@ impl Pool {
     ///
     /// This is what makes the cleanup certain. A daemon that is stopped (SIGTERM, SIGINT) cleans up before it exits; one that is killed
     /// (SIGKILL, the OOM killer, a crash) cannot run anything, and its VMs and directories are removed by the next daemon at its start.
-    pub async fn sweep_orphans(&self) -> usize {
+    pub async fn sweep_orphans(&self, keep: &HashSet<String>) -> usize {
         let root = PathBuf::from(&self.config.state_dir);
         let mut stopped = 0;
         let mut seen: HashSet<String> = HashSet::new();
@@ -526,7 +661,10 @@ impl Pool {
                     continue;
                 }
                 let dir = root.join(&name);
-                seen.insert(name);
+                seen.insert(name.clone());
+                if keep.contains(&name) {
+                    continue;
+                }
                 if self.sweep_vm(&dir).await {
                     stopped += 1;
                 }
@@ -543,6 +681,7 @@ impl Pool {
                     || name == "base-snapshot"
                     || name == "snapshot-cache"
                     || seen.contains(&name)
+                    || keep.contains(&name)
                 {
                     continue;
                 }
@@ -666,6 +805,104 @@ mod tests {
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].vm_id, "alive");
     }
+    /// A VM an earlier daemon handed to a pod: a process with `--api-socket <dir>/api.sock` in its command line (a shell that starts a sleep), an
+    /// API socket that answers the ping, and the registry's record.
+    fn running_vm_dir(state: &Path, name: &str, handed_out: bool) -> (PathBuf, std::process::Child) {
+        use std::os::unix::process::CommandExt;
+        let dir = state.join(name);
+        std::fs::create_dir_all(&dir).expect("vm dir");
+        let child = std::process::Command::new("sh")
+            // `; :` so that the shell does not replace itself with the sleep (and lose its arguments).
+            .args(["-c", "sleep 30; :", "--api-socket"])
+            .arg(dir.join("api.sock"))
+            .process_group(0)
+            .spawn()
+            .expect("spawn");
+        crate::ctl::write_pid(&dir, child.id()).expect("pid");
+        if handed_out {
+            crate::ctl::mark_active(&dir, 41).expect("active");
+        }
+        (dir, child)
+    }
+
+    /// Answer every request on `sock` with 204, as the Cloud Hypervisor does a ping.
+    fn answer_pings(sock: &Path) {
+        let listener = std::os::unix::net::UnixListener::bind(sock).expect("bind");
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for stream in listener.incoming().flatten() {
+                let mut stream = stream;
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n");
+            }
+        });
+    }
+
+    #[test]
+    fn a_taken_over_vm_that_no_shim_speaks_about_is_given_up_after_a_while() {
+        let pool = Pool::new(test_config());
+        {
+            let now = std::time::Instant::now();
+            let mut u = pool.unclaimed.lock().unwrap();
+            u.insert("sized-1-1".into(), now);
+            u.insert("sized-1-2".into(), now);
+        }
+        pool.claim("sized-1-1"); // its shim came back
+        assert!(pool.take_unclaimed(std::time::Duration::from_secs(600)).is_empty(), "not yet");
+        assert_eq!(pool.take_unclaimed(std::time::Duration::ZERO), vec!["sized-1-2".to_string()]);
+        assert!(pool.take_unclaimed(std::time::Duration::ZERO).is_empty(), "only once");
+    }
+
+    #[tokio::test]
+    async fn a_new_daemon_takes_over_the_vms_handed_to_pods_and_stops_the_rest() {
+        let state = std::env::temp_dir().join(format!("cchv-adopt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        std::fs::create_dir_all(&state).unwrap();
+        let config: DaemonConfig = serde_json::from_str(&format!(
+            r#"{{"kernel_path":"/k","rootfs_path":"/r","state_dir":"{}"}}"#,
+            state.display()
+        ))
+        .expect("config");
+
+        // A pod's VM, a VM that was only in the pool, and a pod's VM whose Cloud Hypervisor does not answer.
+        let (pods, mut pods_proc) = running_vm_dir(&state, "sized-1-1", true);
+        answer_pings(&pods.join("api.sock"));
+        let (pooled, mut pooled_proc) = running_vm_dir(&state, "pool-1-2", false);
+        answer_pings(&pooled.join("api.sock"));
+        let (mute, mut mute_proc) = running_vm_dir(&state, "sized-1-3", true);
+        let _silent = std::os::unix::net::UnixListener::bind(mute.join("api.sock")).unwrap();
+
+        let pool = Pool::new(config);
+        let taken = pool.adopt().await;
+
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].vm_id, "sized-1-1");
+        assert_eq!(taken[0].cid, 41);
+        assert_eq!(pool.active_count(), 1);
+        assert!(pool.get_active("sized-1-1").await.is_some());
+        assert_eq!(pool.next_cid_pub(), 42, "no CID in use is given again");
+        assert!(
+            pods_proc.try_wait().unwrap().is_none(),
+            "the pod's VM still runs"
+        );
+        assert!(pods.exists() && crate::ctl::read_active_cid(&pods) == Some(41));
+        // The other two are stopped; their directories go. (The process may not be reaped yet: look at the directory, and wait.)
+        assert!(!pooled.exists());
+        assert!(!mute.exists());
+        let _ = pooled_proc.wait();
+        let _ = mute_proc.wait();
+        assert!(pooled_proc.try_wait().unwrap().is_some());
+
+        // Stopping the daemon leaves the pod's VM; stopping it with keep off does not.
+        pool.shutdown_all(true).await;
+        assert!(pods_proc.try_wait().unwrap().is_none());
+        pool.shutdown_all(false).await;
+        let _ = pods_proc.wait();
+        assert!(!pods.exists());
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
     /// A directory of its own under the temp dir, with a kernel and a rootfs in it.
     fn files_dir(name: &str) -> (PathBuf, DaemonConfig) {
         let dir =

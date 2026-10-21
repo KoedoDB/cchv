@@ -189,6 +189,22 @@ On ReleaseSandbox:
   1. Destroy the VM (shutdown + kill CH process)
   2. No recycling — clean VMs are cheap from snapshot
 
+When the daemon stops (SIGTERM) — `keep_vms_on_stop`, on by default:
+  1. The VMs waiting in the pool are stopped; the VMs handed to pods keep running (the unit has `KillMode=process`, so systemd does not
+     end the Cloud Hypervisors with the daemon). Off: every VM is stopped, as before.
+When the daemon starts (also after a SIGKILL, when systemd starts it again):
+  1. The registry (`<state_dir>/.ctl/<vm_id>/`, root's) says which VMs were handed to pods (`active`, `cid`; `blocks.list` for the devices of
+     persistent volumes). A VM is taken over if it is recorded, its process is that VM's Cloud Hypervisor (the command line names the VM's
+     `--api-socket`; rootless, it runs as the VM's user) and it answers on its API socket. The counter, the CIDs, the VM's user, its cgroup,
+     the disks of its emptyDirs and the locks of its devices are taken over (a lock lives as long as the file that holds it, so it is taken
+     again); the connection to the guest's agent is made again before the API is opened.
+  2. Every other VM left by the earlier daemon is stopped, as before, and so is what the start sweeps (cgroups, processes of the VMs' users, ACL
+     entries, outboxes, emptyDir disks): except for the VMs taken over.
+  3. A taken-over VM that no shim speaks about for `adopted_claim_secs` (600) is released: its pod is gone. The shims try for five minutes
+     while the daemon is away, and ask about their VMs at once when it is back.
+  A daemon that did not record this (an older one) stops every VM when it stops; the first replacement is from it.
+  The host going down takes every VM with it (the registry is in `/run`).
+
 Pool sizing:
   - pool_size: target idle VMs (default: 3)
   - max_pool_size: hard cap on idle VMs (default: 10)
@@ -428,6 +444,7 @@ The installer DaemonSet additionally:
    ExecStart=/usr/local/bin/cloudhv-sandbox-daemon \
      --config /opt/cloudhv/daemon.json
    Restart=always
+   KillMode=process
    MemoryMax=4G
 
    [Install]
@@ -750,7 +767,7 @@ Checked on the development machine with the real daemon (`scripts/test-ch-confin
 its own mount, PID, network, IPC and UTS namespaces; a user and a group of its own and only the kvm group besides; `CapEff` and
 `CapBnd` 0; `NoNewPrivs`; the root holds `dev proc tmp` and the bound paths only (no `/home`, `/etc/shadow`, other VMs, `.ctl`); the
 root is read-only; it is process 1 and sees one process; the network namespace has only `lo` and 127.0.0.1 services are unreachable;
-it is in a cgroup with `memory.max` and `pids.max`; SIGTERM to the launcher ends both; stopping the daemon leaves no launcher, no process
+it is in a cgroup with `memory.max` and `pids.max`; SIGTERM to the launcher ends both; stopping the daemon (with `keep_vms_on_stop` off, as that check was made) leaves no launcher, no process
 of the VMs' users, no cgroup, no VM directory, no outbox; the base snapshot is 0640. And by hand with a pod's network namespace: a
 confined VM got its TAP as a descriptor in an empty network namespace, TC redirects were set in the pod's namespace, the guest was
 configured and a container started; the shadow VM made a workload snapshot through its outbox (0600 root), and a second pod was
@@ -809,6 +826,8 @@ The daemon is root and its socket is the one door:
 | `mke2fs_path` | `/usr/sbin/mke2fs` | makes the file system on the file (falls back to `/sbin`, `/usr/bin`, `/usr/local/bin`; it must be e2fsprogs', not BusyBox's, which makes ext2 only) |
 | `max_memory_mb`, `max_vcpus` | `65536`, `64` | the most a request may ask for |
 | `max_active_vms` | `512` | VMs handed to pods |
+| `keep_vms_on_stop` | `true` | the VMs handed to pods keep running when the daemon stops, and the next daemon takes them over; `false` stops them (the unit needs `KillMode=process` for the first) |
+| `adopted_claim_secs` | `600` | a VM taken over from an earlier daemon that no shim speaks about for this long is released (must be longer than the shim's five minutes of trying again) |
 | `max_shadow_vms` | `2` | shadow VMs (warm-up) at once; a shadow that failed for an image is not retried for 5 minutes |
 | `max_request_bytes` | `8388608` | the longest request line (volumes of a pod are in it; the agent's own limit is 4 MiB) |
 | `max_connections` | `64` | |

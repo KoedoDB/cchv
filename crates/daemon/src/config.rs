@@ -97,6 +97,16 @@ pub struct DaemonConfig {
     #[serde(default = "default_max_active_vms")]
     pub max_active_vms: usize,
 
+    /// Whether the VMs handed to pods keep running when the daemon stops (SIGTERM: an update, a restart). The next daemon takes them over
+    /// (`Pool::adopt`). Off: the daemon stops them, as it did before.
+    #[serde(default = "default_keep_vms_on_stop")]
+    pub keep_vms_on_stop: bool,
+
+    /// Seconds after which a VM taken over from an earlier daemon that no shim has spoken about is released: its pod is gone. The shim tries
+    /// again for five minutes while the daemon is away, so this has to be longer than that.
+    #[serde(default = "default_adopted_claim_secs")]
+    pub adopted_claim_secs: u64,
+
     /// Persistent block volumes (`blockvol.rs`): the device-mapper names (`/sys/dev/block/<major>:<minor>/dm/name`, which writes a `-` of an LVM
     /// name twice: the logical volume `pv-x` of the volume group `vg` is `vg-pv--x`) that a pod may be given as a disk. A device whose name begins
     /// with none of them is refused. Empty: the feature is off. Needs `emptydir_dir` (the nodes are made in the VM's directory there).
@@ -235,6 +245,12 @@ fn default_max_vcpus() -> u32 {
 }
 fn default_max_active_vms() -> usize {
     512
+}
+fn default_adopted_claim_secs() -> u64 {
+    600
+}
+fn default_keep_vms_on_stop() -> bool {
+    true
 }
 fn default_max_shadow_vms() -> usize {
     2

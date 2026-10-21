@@ -81,20 +81,34 @@ async fn daemon_main() -> Result<()> {
     let socket_path = config.socket_path.clone();
     let run = async {
         pool.prepare_state_dir()?;
-        // VMs of an earlier daemon that died without cleaning up are held in memory and known to nobody: stop them first.
-        let swept = pool.sweep_orphans().await;
-        if swept > 0 {
-            info!("stopped {swept} Cloud Hypervisor processes left by an earlier daemon");
-        }
+        // The VMs the earlier daemon handed to pods and that still run are taken over; every other VM it left (the ones waiting in its pool,
+        // those it was making, those of a daemon that died before it recorded them) is held in memory and known to nobody: stopped.
+        let adopted = pool.adopt().await;
+        let kept_vms: std::collections::HashSet<String> =
+            adopted.iter().map(|v| v.vm_id.clone()).collect();
+        let kept_uids: std::collections::HashSet<u32> = adopted
+            .iter()
+            .filter_map(|v| {
+                rootless::uid_of(&std::path::Path::new(&config.state_dir).join(&v.vm_id))
+            })
+            .collect();
         // Rootless: what an earlier daemon left of its VMs' users (processes, ACL entries on the images) goes before any user is given
-        // out.
-        cgroup::sweep().await;
-        rootless::sweep_processes(&config).await;
-        rootless::sweep_acls(&config);
-        rootless::sweep_outboxes(std::path::Path::new(&config.state_dir));
+        // out. The users of the VMs just taken over stay.
+        cgroup::sweep(&kept_vms).await;
+        rootless::sweep_processes(&config, &kept_uids).await;
+        rootless::sweep_acls(&config, &kept_uids);
+        rootless::sweep_outboxes(std::path::Path::new(&config.state_dir), &kept_vms);
         // The disks of the emptyDirs of the VMs just stopped go with them; the directory is made if it is not there.
-        emptydir::init(&config);
+        emptydir::init(&config, &kept_vms);
         blockvol::init(&config);
+        // A pod's persistent volume is locked again, or the VM goes: it would share the volume with whoever is given it next.
+        for vm in &adopted {
+            let dir = std::path::Path::new(&config.state_dir).join(&vm.vm_id);
+            if !blockvol::adopt(&dir) {
+                log::warn!("VM {} cannot be taken over (its block devices), stopping it", vm.vm_id);
+                let _ = pool.release(&vm.vm_id).await;
+            }
+        }
         consolefwd::init(&config);
         // The workload snapshots of an earlier daemon are unknown to this one (its cache is empty) and were made by VMs it can no longer
         // vouch for: they go. The base snapshot is reused only if the daemon marked it complete (see `Pool::base_snapshot_valid`).
@@ -116,18 +130,21 @@ async fn daemon_main() -> Result<()> {
 
         // Start API server.
         let server = api::ApiServer::new(config.clone(), Arc::clone(&pool), snapshots);
+        // The connections to the guests' agents are made again for the VMs taken over: the pods' calls go through them.
+        server.adopt_agents(&adopted).await;
+        server.spawn_unclaimed_reaper();
         server.serve().await
     };
 
-    // On SIGTERM or SIGINT, stop every VM before exiting: the VMs are this daemon's children and must not outlive it. From then on no
-    // request makes a VM (`Pool::is_stopping`).
+    // On SIGTERM or SIGINT, stop the VMs that are not a pod's before exiting; the pods' VMs run on, and the next daemon takes them over
+    // (`keep_vms_on_stop`, `Pool::adopt`). From then on no request makes a VM (`Pool::is_stopping`).
     tokio::select! {
         result = run => result,
         _ = stop.wait() => {
-            info!("stop requested: stopping all VMs");
-            pool.shutdown_all().await;
+            info!("stop requested: stopping the VMs that are not a pod's");
+            pool.shutdown_all(config.keep_vms_on_stop).await;
             let _ = std::fs::remove_file(&socket_path);
-            info!("all VMs stopped, exiting");
+            info!("done, exiting");
             Ok(())
         }
     }

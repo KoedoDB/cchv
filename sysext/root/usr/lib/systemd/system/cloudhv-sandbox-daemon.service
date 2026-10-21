@@ -9,6 +9,9 @@ Environment=RUST_LOG=info
 ExecStart=/usr/bin/cloudhv-sandbox-daemon /opt/cloudhv/daemon.json
 Restart=always
 RestartSec=5
+# Only the daemon is stopped, not the Cloud Hypervisors it started: the VMs handed to pods run on while the daemon is replaced, and the next one takes
+# them over (keep_vms_on_stop in daemon.json). With the default (control-group) systemd would end every process of the unit, VMs included.
+KillMode=process
 MemoryMax=4G
 
 # Hardening. The daemon runs as root: it makes TAP devices, enters pod network namespaces, sets up tc, and starts the

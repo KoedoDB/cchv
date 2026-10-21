@@ -132,6 +132,59 @@ pub fn pid_alive(pid: u32) -> bool {
 const SYS_PIDFD_OPEN: libc::c_long = 434;
 const SYS_PIDFD_SEND_SIGNAL: libc::c_long = 424;
 
+/// Whether `pid` is the Cloud Hypervisor of the VM whose state directory this is: its command line names the VM's API socket and, rootless,
+/// its user is the VM's user. Nothing is signalled; this is what the daemon checks before it takes a VM over after a restart (and what
+/// `signal_ch` checks before it signals).
+pub fn is_ch_of(pid: u32, state_dir: &Path) -> bool {
+    if !valid_pid(pid) {
+        return false;
+    }
+    (|| {
+        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        if !cmdline_is_ch_of(&cmdline, &state_dir.join("api.sock")) {
+            return None;
+        }
+        if let Some(want) = crate::rootless::uid_of(state_dir) {
+            if uid_of_pid(pid) != Some(want) {
+                return None;
+            }
+        }
+        Some(())
+    })()
+    .is_some()
+}
+
+// What a daemon that is replaced needs to leave for the next one, so that the VMs handed to pods keep running (see `Pool::adopt`).
+// Written as the VM is handed out, read at the next start. A VM without all of it is not taken over: it is stopped, as it always was.
+
+/// Record that the VM is in a pod's hands, with the vsock CID it was given.
+pub fn mark_active(state_dir: &Path, cid: u64) -> Result<()> {
+    write(state_dir, "cid", &cid.to_string())?;
+    write(state_dir, "active", "1")
+}
+
+/// The VM is not a pod's after all (a shadow VM, which only the daemon uses and which is gone with it): the next daemon must not take it over.
+pub fn clear_active(state_dir: &Path) {
+    let _ = std::fs::remove_file(dir_of(state_dir).join("active"));
+}
+
+/// The CID of a VM that is in a pod's hands: None for a VM that is not (or was recorded by an older daemon, which stopped its VMs).
+pub fn read_active_cid(state_dir: &Path) -> Option<u64> {
+    read(state_dir, "active")?;
+    read(state_dir, "cid").and_then(|t| t.trim().parse().ok())
+}
+
+/// The names of the registry's directories, VM by VM.
+pub fn registered(state_root: &Path) -> Vec<String> {
+    std::fs::read_dir(state_root.join(CTL_DIR))
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Send `sig` to `pid`, which must be the Cloud Hypervisor of the VM whose state directory this is (see the module comment). Returns
 /// whether the signal was sent; a process that is not that VM's Cloud Hypervisor is left alone.
 pub fn signal_ch(pid: u32, state_dir: &Path, sig: i32) -> bool {
@@ -144,19 +197,7 @@ pub fn signal_ch(pid: u32, state_dir: &Path, sig: i32) -> bool {
     if !have_pidfd && io::Error::last_os_error().raw_os_error() != Some(libc::ENOSYS) {
         return false; // ESRCH: gone already
     }
-    let verified = (|| {
-        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-        if !cmdline_is_ch_of(&cmdline, &state_dir.join("api.sock")) {
-            return None;
-        }
-        if let Some(want) = crate::rootless::uid_of(state_dir) {
-            if uid_of_pid(pid) != Some(want) {
-                return None;
-            }
-        }
-        Some(())
-    })()
-    .is_some();
+    let verified = is_ch_of(pid, state_dir);
     let sent = if !verified {
         false
     } else if have_pidfd {
@@ -321,6 +362,32 @@ mod tests {
         assert!(pid_alive(std::process::id()));
         assert!(!pid_alive(4_194_300));
         assert!(pids_of_uid(unsafe { libc::getuid() }).contains(&std::process::id()));
+    }
+
+    #[test]
+    fn a_vm_handed_to_a_pod_is_recorded_for_the_next_daemon() {
+        let root = std::env::temp_dir().join(format!("cchv-ctl-active-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("pool-1-1");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(read_active_cid(&dir), None, "not handed out");
+        write(&dir, "cid", "7").unwrap();
+        assert_eq!(read_active_cid(&dir), None, "a CID alone is a VM in the pool");
+        mark_active(&dir, 9).unwrap();
+        assert_eq!(read_active_cid(&dir), Some(9));
+        clear_active(&dir);
+        assert_eq!(read_active_cid(&dir), None, "a shadow VM is not taken over");
+        mark_active(&dir, 9).unwrap();
+        assert_eq!(registered(&root), vec!["pool-1-1".to_string()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_process_that_is_not_the_vms_cloud_hypervisor_is_not_taken_for_it() {
+        // This test process has no `--api-socket` argument.
+        assert!(!is_ch_of(std::process::id(), Path::new("/run/cloudhv/daemon/pool-1-4")));
+        assert!(!is_ch_of(0, Path::new("/run/cloudhv/daemon/pool-1-4")));
+        assert!(!is_ch_of(1, Path::new("/run/cloudhv/daemon/pool-1-4")));
     }
 
     #[test]

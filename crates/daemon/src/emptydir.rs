@@ -49,12 +49,12 @@ fn settings() -> Option<&'static Settings> {
 
 /// Read the configuration, make the root directory (0711) and remove what an earlier daemon left in it. The VMs of an earlier daemon are
 /// stopped by now. On an error the feature is off and the daemon goes on.
-pub fn init(config: &DaemonConfig) {
+pub fn init(config: &DaemonConfig, keep: &std::collections::HashSet<String>) {
     let s = if config.emptydir_dir.is_empty() {
         None
     } else {
         let root = PathBuf::from(&config.emptydir_dir);
-        match prepare_root(&root) {
+        match prepare_root(&root, keep) {
             Ok(()) => Some(Settings {
                 root,
                 max_mib: config.emptydir_max_mib,
@@ -93,7 +93,7 @@ pub(crate) fn find_mke2fs(configured: &str) -> PathBuf {
     .unwrap_or(c)
 }
 
-fn prepare_root(root: &Path) -> Result<()> {
+fn prepare_root(root: &Path, keep: &std::collections::HashSet<String>) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(root).with_context(|| format!("create {}", root.display()))?;
     let meta = std::fs::symlink_metadata(root)?;
@@ -101,7 +101,7 @@ fn prepare_root(root: &Path) -> Result<()> {
         anyhow::bail!("{} is not a directory", root.display());
     }
     std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o711))?;
-    let swept = sweep_dir(root);
+    let swept = sweep_dir(root, keep);
     if swept > 0 {
         info!("removed the emptyDir disks of {swept} VMs of an earlier daemon");
     }
@@ -109,11 +109,14 @@ fn prepare_root(root: &Path) -> Result<()> {
 }
 
 /// Remove everything in `root` (not `root`): links are removed, never followed. Returns how many entries went.
-fn sweep_dir(root: &Path) -> usize {
+fn sweep_dir(root: &Path, keep: &std::collections::HashSet<String>) -> usize {
     let mut n = 0;
     if let Ok(entries) = std::fs::read_dir(root) {
         for e in entries.flatten() {
             let p = e.path();
+            if keep.contains(e.file_name().to_string_lossy().as_ref()) {
+                continue; // the disks of a VM just taken over
+            }
             let gone = match e.file_type() {
                 Ok(t) if t.is_dir() => std::fs::remove_dir_all(&p),
                 _ => std::fs::remove_file(&p),
@@ -553,12 +556,24 @@ mod tests {
         std::fs::write(root.join("pool-1-1").join(format!("{ID}.img")), b"x").unwrap();
         std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
         std::os::unix::fs::symlink(&outside, root.join("pool-1-1").join("inner")).unwrap();
-        assert_eq!(sweep_dir(&root), 2);
+        assert_eq!(sweep_dir(&root, &std::collections::HashSet::new()), 2);
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
         assert!(
             outside.join("keep").exists(),
             "a link is removed, what it points to is not"
         );
+    }
+
+    #[test]
+    fn sweeping_leaves_the_disks_of_the_vms_taken_over() {
+        let root = tmp("sweep-keep");
+        std::fs::create_dir_all(root.join("pool-1-1")).unwrap();
+        std::fs::create_dir_all(root.join("pool-1-2")).unwrap();
+        std::fs::write(root.join("pool-1-2").join("a.img"), b"x").unwrap();
+        let keep: std::collections::HashSet<String> = ["pool-1-2".to_string()].into();
+        assert_eq!(sweep_dir(&root, &keep), 1);
+        assert!(!root.join("pool-1-1").exists());
+        assert!(root.join("pool-1-2").join("a.img").exists());
     }
 
     #[tokio::test]

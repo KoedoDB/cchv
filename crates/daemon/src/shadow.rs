@@ -210,6 +210,8 @@ impl SnapshotManager {
 
         // 1. Acquire a clean VM from pool (or restore synchronously)
         let pool_vm = self.pool.acquire().await.context("acquire for shadow")?;
+        // Not a pod's VM: if the daemon is replaced while this runs, the work goes with it, and so must the VM.
+        self.pool.disown(&pool_vm.vm_id);
         info!(
             "shadow VM for {} using pool VM {} (pid={})",
             image_key, pool_vm.vm_id, pool_vm.ch_pid

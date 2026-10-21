@@ -250,6 +250,13 @@ fn parse_with(
 
 /// Take the exclusive lock of a device for the VM whose state directory is `state_dir`. A device another VM holds is refused.
 fn take_lock(locks: &Path, state_dir: &Path, major: u32, minor: u32) -> Result<()> {
+    lock_device(locks, state_dir, major, minor)?;
+    // In the registry (root's), so that a daemon that takes the VM over can take the lock again (`adopt`).
+    crate::ctl::append(state_dir, "blocks.list", &format!("{major}:{minor}"))
+        .context("record the device of the VM")
+}
+
+fn lock_device(locks: &Path, state_dir: &Path, major: u32, minor: u32) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -274,6 +281,34 @@ fn take_lock(locks: &Path, state_dir: &Path, major: u32, minor: u32) -> Result<(
         .or_default()
         .push(file);
     Ok(())
+}
+
+/// A VM of an earlier daemon is taken over: lock again the devices it has. The locks went with the earlier daemon (a lock lives as long as the
+/// file that holds it), and without them the volume could be given to a second VM while the first still writes to it. A device that cannot be
+/// locked (another VM holds it: it was given away in between) is reported; the caller stops the VM then. Returns whether all were locked.
+pub fn adopt(state_dir: &Path) -> bool {
+    let Some(s) = settings() else {
+        return crate::ctl::read(state_dir, "blocks.list").is_none();
+    };
+    let Some(list) = crate::ctl::read(state_dir, "blocks.list") else {
+        return true;
+    };
+    let mut all = true;
+    for line in list.lines().filter(|l| !l.is_empty()) {
+        let dev = line
+            .split_once(':')
+            .and_then(|(a, b)| Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?)));
+        let Some((major, minor)) = dev else {
+            warn!("{}: a device of the VM is not understood: {line:?}", state_dir.display());
+            all = false;
+            continue;
+        };
+        if let Err(e) = lock_device(&s.locks, state_dir, major, minor) {
+            warn!("{}: block device {major}:{minor} cannot be locked again: {e:#}", state_dir.display());
+            all = false;
+        }
+    }
+    all
 }
 
 /// Let go of the devices of the VM whose state directory is `state_dir` (a VM that had none is not an error). The nodes go with the VM's
@@ -585,8 +620,11 @@ mod tests {
     #[test]
     fn a_device_is_held_by_one_vm_until_it_is_released() {
         let locks = tmp("locks");
-        let a = Path::new("/run/cloudhv/daemon/sized-1-0");
-        let b = Path::new("/run/cloudhv/daemon/sized-1-1");
+        // The registry (where the devices of a VM are recorded) is next to the VMs' directories.
+        let state = tmp("locks-state");
+        let a_buf = state.join("sized-1-0");
+        let b_buf = state.join("sized-1-1");
+        let (a, b) = (a_buf.as_path(), b_buf.as_path());
         take_lock(&locks, a, 252, 3).unwrap();
         assert!(
             take_lock(&locks, b, 252, 3).is_err(),
@@ -598,6 +636,7 @@ mod tests {
         release(b);
         release(b); // a VM that has none is not an error
         let _ = std::fs::remove_dir_all(locks);
+        let _ = std::fs::remove_dir_all(state);
     }
 
     #[test]

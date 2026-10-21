@@ -231,6 +231,21 @@ pub fn alloc_for(state_dir: &Path) -> Result<Option<(u32, u32)>> {
     Ok(Some((uid, gid)))
 }
 
+/// A VM of an earlier daemon is taken over (`Pool::adopt`): its user is taken again, so that it is not given to a second VM, and the
+/// daemon's memory knows it again. The user comes from the registry (`ch.uid`, root's). Rootless off: nothing.
+pub fn adopt(state_dir: &Path) {
+    let Some(m) = state() else { return };
+    let Some(uid) = crate::ctl::read(state_dir, "ch.uid").and_then(|s| s.trim().parse::<u32>().ok())
+    else {
+        return;
+    };
+    let mut s = m.lock().unwrap();
+    if uid >= s.uids.base && uid - s.uids.base < s.uids.count {
+        s.uids.in_use.insert(uid);
+    }
+    s.by_vm.insert(vm_name(state_dir), uid);
+}
+
 /// The group of `/dev/kvm`.
 pub fn gid() -> u32 {
     state().map(|m| m.lock().unwrap().gid).unwrap_or(0)
@@ -378,10 +393,13 @@ pub fn collect_outbox(state_dir: &Path, dest: &Path) -> Result<()> {
 }
 
 /// At start: the outboxes of an earlier daemon's VMs go.
-pub fn sweep_outboxes(state_root: &Path) {
+pub fn sweep_outboxes(state_root: &Path, keep: &HashSet<String>) {
     let dir = state_root.join(crate::confine::OUT_DIR);
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for e in entries.flatten() {
+            if keep.contains(e.file_name().to_string_lossy().as_ref()) {
+                continue;
+            }
             remove_outbox_dir(&e.path());
         }
     }
@@ -575,8 +593,8 @@ pub async fn release(state_dir: &Path) {
 
 /// At start: kill every process that belongs to a user of this daemon's range. They are the processes of VMs of an earlier daemon (a
 /// Cloud Hypervisor, or what it started); the range is the daemon's alone (checked against /etc/passwd at start). A user that still has
-/// one afterwards is quarantined. Only when rootless is on.
-pub async fn sweep_processes(config: &DaemonConfig) {
+/// one afterwards is quarantined. Only when rootless is on. The users in `keep` are those of the VMs just taken over: they stay.
+pub async fn sweep_processes(config: &DaemonConfig, keep: &HashSet<u32>) {
     if !config.ch_rootless {
         return;
     }
@@ -586,7 +604,10 @@ pub async fn sweep_processes(config: &DaemonConfig) {
     let lo = config.ch_uid_base;
     let mut killed = 0;
     for _ in 0..100 {
-        let procs = crate::ctl::procs_in_uid_range(lo, hi);
+        let procs: Vec<(u32, u32)> = crate::ctl::procs_in_uid_range(lo, hi)
+            .into_iter()
+            .filter(|(_, uid)| !keep.contains(uid))
+            .collect();
         if procs.is_empty() {
             break;
         }
@@ -602,6 +623,9 @@ pub async fn sweep_processes(config: &DaemonConfig) {
     if let Some(m) = state() {
         let mut s = m.lock().unwrap();
         for (pid, uid) in crate::ctl::procs_in_uid_range(lo, hi) {
+            if keep.contains(&uid) {
+                continue;
+            }
             warn!("process {pid} of user {uid} could not be killed; the user is not used");
             s.uids.quarantine(uid);
         }
@@ -610,8 +634,8 @@ pub async fn sweep_processes(config: &DaemonConfig) {
 
 /// At start: take every ACL entry of a user of this daemon's range off the images and the cached snapshots. The entries of the VMs of
 /// an earlier daemon (killed, or the machine restarted with the images on disk) would otherwise stay for ever, and a VM given one of
-/// those users later could read an image that was not its own.
-pub fn sweep_acls(config: &DaemonConfig) {
+/// those users later could read an image that was not its own. The users in `keep` (VMs just taken over) keep theirs.
+pub fn sweep_acls(config: &DaemonConfig, keep: &HashSet<u32>) {
     if config.ch_uid_count == 0 {
         return;
     }
@@ -637,7 +661,14 @@ pub fn sweep_acls(config: &DaemonConfig) {
                     stack.push((p, depth + 1));
                 } else if ft.is_file() {
                     if let Ok(fd) = fsutil::open_nosymlinks(&p, libc::O_RDONLY | libc::O_NONBLOCK) {
-                        if let Ok(true) = acl::remove_range_fd(fd.as_raw_fd(), lo, hi) {
+                        // The range minus the users just taken over: each stretch between them.
+                        let mut removed = false;
+                        for (a, b) in ranges_without(lo, hi, keep) {
+                            if let Ok(true) = acl::remove_range_fd(fd.as_raw_fd(), a, b) {
+                                removed = true;
+                            }
+                        }
+                        if removed {
                             swept += 1;
                         }
                     }
@@ -650,6 +681,24 @@ pub fn sweep_acls(config: &DaemonConfig) {
             "took the ACL entries of the VMs' users off {swept} files left by an earlier daemon"
         );
     }
+}
+
+/// `[lo, hi)` without the users in `keep`, as the stretches that remain, in order.
+fn ranges_without(lo: u32, hi: u32, keep: &HashSet<u32>) -> Vec<(u32, u32)> {
+    let mut kept: Vec<u32> = keep.iter().copied().filter(|u| *u >= lo && *u < hi).collect();
+    kept.sort_unstable();
+    let mut out = Vec::new();
+    let mut from = lo;
+    for u in kept {
+        if u > from {
+            out.push((from, u));
+        }
+        from = u + 1;
+    }
+    if from < hi {
+        out.push((from, hi));
+    }
+    out
 }
 
 /// Just enough of POSIX ACLs (the `system.posix_acl_access` attribute) to add and take back readers. Done here so that the host
@@ -1001,5 +1050,25 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&d);
         let _ = std::fs::remove_dir_all(&outside);
+    }
+}
+
+#[cfg(test)]
+mod adopt_tests {
+    use super::*;
+
+    #[test]
+    fn the_users_taken_over_are_left_out_of_the_range() {
+        let none = HashSet::new();
+        assert_eq!(ranges_without(200_000, 200_010, &none), vec![(200_000, 200_010)]);
+        let keep: HashSet<u32> = [200_003, 200_004, 200_009].into();
+        assert_eq!(
+            ranges_without(200_000, 200_010, &keep),
+            vec![(200_000, 200_003), (200_005, 200_009)]
+        );
+        let ends: HashSet<u32> = [200_000, 200_009].into();
+        assert_eq!(ranges_without(200_000, 200_010, &ends), vec![(200_001, 200_009)]);
+        let outside: HashSet<u32> = [5, 999_999].into();
+        assert_eq!(ranges_without(200_000, 200_010, &outside), vec![(200_000, 200_010)]);
     }
 }
