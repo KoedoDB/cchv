@@ -16,6 +16,8 @@ accepted = [
     "MPL-2.0",
     "0BSD",
     "BSL-1.0",
+    # our own crates (the fork's changes; the original MIT parts are listed as MIT). No third-party crate is expected under it.
+    "PolyForm-Noncommercial-1.0.0",
 ]
 targets = [
     "x86_64-unknown-linux-musl",

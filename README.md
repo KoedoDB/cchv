@@ -3,7 +3,7 @@
 **cchv** is a [containerd](https://containerd.io/) shim (runtime v2) that runs every [Kubernetes](https://kubernetes.io/) Pod in its own lightweight
 [Cloud Hypervisor](https://www.cloudhypervisor.org/) virtual machine. You use it like any other runtime: a `RuntimeClass` and `runtimeClassName: cloudhv`
 in the Pod. Containers stay ordinary OCI images; the isolation is a KVM virtual machine with its own guest kernel instead of a shared host kernel.
-Rust, MIT licence, for Linux hosts with `/dev/kvm`. A pool of warm VMs restored from snapshots keeps the start of a Pod short and the fixed memory
+Rust, source-available (PolyForm Noncommercial, see License), for Linux hosts with `/dev/kvm`. A pool of warm VMs restored from snapshots keeps the start of a Pod short and the fixed memory
 cost of a VM small.
 
 It began as a fork of [devigned/containerd-cloudhypervisor](https://github.com/devigned/containerd-cloudhypervisor) by David Justice (MIT) and has been an
@@ -316,7 +316,16 @@ See the **[docs/](docs/)** folder for detailed documentation:
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Copyright (c) 2026 David Justice for the original work; the modifications in this fork are copyright
-(c) 2026 RadarWorks LLC (KoedoDB) and under the same license. A release also carries software of others (Cloud Hypervisor, crun, the Linux
+This is **not open source**: the source is public so that it can be read and checked.
+
+- The **original work** (devigned/containerd-cloudhypervisor by David Justice, up to its commit `be79d285c0f8`) stays under the **MIT** licence: [LICENSE](LICENSE).
+  You can take it from upstream under those terms.
+- **Our changes and new files** (everything after that commit: the daemon, the shim and agent changes, the installer, the guest, the docs) are copyright
+  (c) 2026 RadarWorks LLC (KoedoDB) and under the **PolyForm Noncommercial License 1.0.0**: [LICENSE-POLYFORM-NC.md](LICENSE-POLYFORM-NC.md).
+  Personal, research, hobby and similar noncommercial use is allowed; commercial use needs a licence from us (security@koedodb.com).
+- Where a file has both, the combined file is to be used under the terms of both, so for practical purposes the fork as a whole is noncommercial.
+- Releases up to and including `v0.17.0-koedodb.1` were published under MIT, and stay under it for those who got them. The new terms apply from the next release.
+
+A release also carries software of others (Cloud Hypervisor, crun, the Linux
 kernel, the Rust crates): [THIRD-PARTY.md](THIRD-PARTY.md) lists it with the licenses and the source of the GPL parts, and each release
 attaches the license texts and CycloneDX SBOMs.

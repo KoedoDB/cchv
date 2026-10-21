@@ -1,7 +1,9 @@
 MIT License
 
+This is the licence of the ORIGINAL work (devigned/containerd-cloudhypervisor, up to its commit be79d285c0f8). The changes and new files
+of the KoedoDB fork after that commit are under the PolyForm Noncommercial License 1.0.0: see LICENSE-POLYFORM-NC.md and the README.
+
 Copyright (c) 2026 David Justice
-Copyright (c) 2026 RadarWorks LLC (modifications in the KoedoDB fork)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

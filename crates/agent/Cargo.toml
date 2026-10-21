@@ -2,7 +2,7 @@
 name = "cloudhv-agent"
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+license = "MIT AND PolyForm-Noncommercial-1.0.0"
 description = "In-VM guest agent for containerd-cloudhypervisor"
 
 [[bin]]
