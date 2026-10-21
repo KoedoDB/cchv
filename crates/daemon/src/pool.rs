@@ -242,6 +242,36 @@ impl Pool {
         });
     }
 
+    /// The VMs handed to pods whose Cloud Hypervisor is gone: no process, a zombie, or a process that is not that VM's (the pid was reused).
+    /// A VM without a pid yet is left alone. This looks at the process table, not at the registry (see `liveness.rs`).
+    pub async fn dead_active(&self) -> Vec<PoolVm> {
+        let state_dir = PathBuf::from(&self.config.state_dir);
+        self.active
+            .lock()
+            .await
+            .values()
+            .filter(|vm| {
+                vm.ch_pid != 0
+                    && (!crate::ctl::pid_alive(vm.ch_pid)
+                        || !crate::ctl::is_ch_of(vm.ch_pid, &state_dir.join(&vm.vm_id)))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Kill the Cloud Hypervisor of a VM handed to a pod (its guest is hung). Only if that process is that VM's. Returns whether it was signalled;
+    /// the VM is released by the watch of the processes after that.
+    pub fn kill_ch(&self, vm_id: &str) -> bool {
+        let Ok(active) = self.active.try_lock() else {
+            return false;
+        };
+        let Some(vm) = active.get(vm_id) else {
+            return false;
+        };
+        let dir = PathBuf::from(&self.config.state_dir).join(&vm.vm_id);
+        vm.ch_pid != 0 && crate::ctl::signal_ch(vm.ch_pid, &dir, libc::SIGKILL)
+    }
+
     /// Remove from the ready list, and return, the VMs whose process no longer exists.
     async fn take_dead_ready(&self) -> Vec<PoolVm> {
         let mut ready = self.ready.lock().await;
@@ -805,6 +835,35 @@ mod tests {
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].vm_id, "alive");
     }
+    #[tokio::test]
+    async fn an_active_vm_is_dead_when_its_process_is_gone_or_is_not_its_cloud_hypervisor() {
+        let tmp = std::env::temp_dir().join(format!("cchv-dead-active-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("tmp");
+        let mut config = test_config();
+        config.state_dir = tmp.to_string_lossy().into_owned();
+        let pool = Pool::new(config);
+        let (_d1, mut alive) = running_vm_dir(&tmp, "alive", true);
+        let (_d2, mut dying) = running_vm_dir(&tmp, "dying", true);
+        {
+            let mut active = pool.active.lock().await;
+            active.insert("alive".into(), vm("alive", alive.id()));
+            active.insert("dying".into(), vm("dying", dying.id()));
+            // A process that exists but is not this VM's Cloud Hypervisor (the pid was reused): this test's own.
+            active.insert("reused".into(), vm("reused", std::process::id()));
+            // No pid yet: left alone.
+            active.insert("nopid".into(), vm("nopid", 0));
+        }
+        dying.kill().expect("kill");
+        dying.wait().expect("wait");
+        let mut dead: Vec<String> = pool.dead_active().await.into_iter().map(|v| v.vm_id).collect();
+        dead.sort();
+        let _ = alive.kill();
+        let _ = alive.wait();
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert_eq!(dead, vec!["dying".to_string(), "reused".to_string()]);
+    }
+
     /// A VM an earlier daemon handed to a pod: a process with `--api-socket <dir>/api.sock` in its command line (a shell that starts a sleep), an
     /// API socket that answers the ping, and the registry's record.
     fn running_vm_dir(state: &Path, name: &str, handed_out: bool) -> (PathBuf, std::process::Child) {

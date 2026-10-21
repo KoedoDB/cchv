@@ -47,7 +47,8 @@ fn release_tap_name_of(vm_id: &str) {
 }
 
 /// What the daemon keeps for a VM besides the VM itself: its agent connection and its TAP name.
-async fn forget_vm(agents: &AgentRegistry, vm_id: &str) {
+pub(crate) async fn forget_vm(agents: &AgentRegistry, vm_id: &str) {
+    crate::liveness::forget(vm_id);
     agents.lock().await.remove(vm_id);
     release_tap_name_of(vm_id);
 }
@@ -97,7 +98,8 @@ impl ApiServer {
             )
             .await;
             match connected {
-                Ok(Ok((agent, _health))) => {
+                Ok(Ok((agent, health))) => {
+                    crate::liveness::register(&vm.vm_id, health);
                     self.agents.lock().await.insert(vm.vm_id.clone(), agent);
                     // The TAP of the VM (if it has one) is in its pod's network namespace and keeps its name.
                     reserve_tap_name(&tap_name_for(&vm.vm_id));
@@ -113,6 +115,22 @@ impl ApiServer {
                 }
             }
         }
+    }
+
+    /// Watch the VMs handed to pods (see `liveness.rs`): a VM whose Cloud Hypervisor is gone is released, and one whose guest does not answer
+    /// the agent's `Check` for long enough has its Cloud Hypervisor killed.
+    pub fn spawn_liveness(&self) {
+        let c = &self.config;
+        crate::liveness::spawn(
+            Arc::clone(&self.pool),
+            self.agents.clone(),
+            crate::liveness::Settings {
+                process_every: std::time::Duration::from_secs(c.process_check_secs.max(1)),
+                check_every: std::time::Duration::from_secs(c.guest_check_secs),
+                check_timeout: std::time::Duration::from_secs(c.guest_check_timeout_secs.max(1)),
+                failures: c.guest_check_failures.max(1),
+            },
+        );
     }
 
     /// Release the VMs taken over from the earlier daemon that no pod's shim has spoken about for `adopted_claim_secs`: their pods are gone
@@ -536,9 +554,10 @@ async fn finish_warm_restore(
 ) -> Result<serde_json::Value> {
     // Connect to the guest agent of the restored VM. It is needed for the network configuration
     // and, always, to hand the warm container over to the pod's container ID (below).
-    let (agent, _health) = crate::vm_lifecycle::connect_agent(vsock_socket)
+    let (agent, health) = crate::vm_lifecycle::connect_agent(vsock_socket)
         .await
         .context("agent connect")?;
+    crate::liveness::register(vm_id, health);
     agents.lock().await.insert(vm_id.to_string(), agent.clone());
 
     // Set up networking: TAP in host → CH add-net → move to pod netns + TC

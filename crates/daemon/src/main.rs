@@ -15,6 +15,7 @@ mod emptydir;
 mod exec;
 mod fsutil;
 mod imagekey;
+mod liveness;
 mod netns;
 mod pool;
 mod rootless;
@@ -133,6 +134,8 @@ async fn daemon_main() -> Result<()> {
         // The connections to the guests' agents are made again for the VMs taken over: the pods' calls go through them.
         server.adopt_agents(&adopted).await;
         server.spawn_unclaimed_reaper();
+        // A VM whose Cloud Hypervisor is gone is released, and one whose guest is hung is killed: the daemon decides, not the registry or the shim.
+        server.spawn_liveness();
         server.serve().await
     };
 

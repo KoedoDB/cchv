@@ -107,6 +107,18 @@ pub struct DaemonConfig {
     #[serde(default = "default_adopted_claim_secs")]
     pub adopted_claim_secs: u64,
 
+    /// How often (seconds) the processes of the VMs handed to pods are looked at: one whose Cloud Hypervisor is gone is released (`liveness.rs`).
+    #[serde(default = "default_process_check_secs")]
+    pub process_check_secs: u64,
+    /// How often (seconds) each such VM's guest is asked the agent's `Check` (over vsock). 0: never. A VM that fails `guest_check_failures` checks in
+    /// a row (each with `guest_check_timeout_secs`) has its Cloud Hypervisor killed.
+    #[serde(default = "default_guest_check_secs")]
+    pub guest_check_secs: u64,
+    #[serde(default = "default_guest_check_timeout_secs")]
+    pub guest_check_timeout_secs: u64,
+    #[serde(default = "default_guest_check_failures")]
+    pub guest_check_failures: u32,
+
     /// Persistent block volumes (`blockvol.rs`): the device-mapper names (`/sys/dev/block/<major>:<minor>/dm/name`, which writes a `-` of an LVM
     /// name twice: the logical volume `pv-x` of the volume group `vg` is `vg-pv--x`) that a pod may be given as a disk. A device whose name begins
     /// with none of them is refused. Empty: the feature is off. Needs `emptydir_dir` (the nodes are made in the VM's directory there).
@@ -248,6 +260,18 @@ fn default_max_active_vms() -> usize {
 }
 fn default_adopted_claim_secs() -> u64 {
     600
+}
+fn default_process_check_secs() -> u64 {
+    2
+}
+fn default_guest_check_secs() -> u64 {
+    10
+}
+fn default_guest_check_timeout_secs() -> u64 {
+    5
+}
+fn default_guest_check_failures() -> u32 {
+    5
 }
 fn default_keep_vms_on_stop() -> bool {
     true
