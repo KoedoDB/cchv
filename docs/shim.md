@@ -112,3 +112,19 @@ master over the socket (SCM_RIGHTS) before the process runs; the agent keeps the
 the stdout FIFO for the log file and the attached clients, and writes the stdin FIFO for them). So it works exactly as far as the FIFOs do:
 the container needs `stdin: true` for a client to send input, and `tty: true` for a terminal. Not tested with a real client in this tree.
 
+## The shim's log
+
+The shim logs to **journald**, not to the FIFO that containerd's shim library sets up (containerd puts that into its own log, and on a k3s node
+that log is not kept where it is collected: what the shim did, for instance whether `delete` was called and where it stopped, was lost). `journal.rs`
+writes journald's native protocol to `/run/systemd/journal/socket` (no extra dependency) in every way containerd runs the shim (`start`, the server,
+`delete`), with `SYSLOG_IDENTIFIER=cloudhv-shim`, `PRIORITY`, `CODE_MODULE`, `CLOUDHV_SHIM_ID` (the `-id` flag: the sandbox's id) and `MESSAGE`
+(cut at 8 KiB). The level is `info`, `debug` with `-debug`. If the socket cannot be used the line goes to standard error: the log never stops the shim.
+
+```
+journalctl SYSLOG_IDENTIFIER=cloudhv-shim                    # all shims
+journalctl SYSLOG_IDENTIFIER=cloudhv-shim CLOUDHV_SHIM_ID=<sandbox id>
+journalctl -u cloudhv-sandbox-daemon -t cloudhv-shim --since "1 hour ago"   # the daemon's lines and the shims', in time order
+```
+
+A log collector reads it from the journal like the daemon's. Keep the journal large enough (`SystemMaxUse`) and watch `RateLimitBurst`: a busy
+daemon logs a lot (about 580,000 lines in 50 minutes on a test host under load), and what the journal drops is gone.

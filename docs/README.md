@@ -26,8 +26,8 @@ without the overhead of a full-featured VMM stack.
   at `/opt/cloudhv/cache/` to eliminate `mkfs.ext4` from the hot path.
 - **Kernel-level networking** — the guest kernel configures its own IP via boot parameters
   (IP_PNP). No agent-side networking code.
-- **Infrastructure logs separate from workload logs** — shim errors go to containerd's log
-  (`journalctl`); container stdout/stderr goes to `kubectl logs`.
+- **Infrastructure logs separate from workload logs** — shim errors go to journald
+  (`journalctl SYSLOG_IDENTIFIER=cloudhv-shim`); container stdout/stderr goes to `kubectl logs`.
 - **Every feature has an integration test** — if there's no test proving it works e2e,
   we assume it doesn't work.
 

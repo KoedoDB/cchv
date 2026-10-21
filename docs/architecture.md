@@ -208,8 +208,9 @@ This approach uses no shared filesystem — all log data flows over the existing
 vsock connection between the shim and the guest agent.
 
 Infrastructure errors (VM boot failures, API errors, disk hot-plug issues) are logged
-via the shim's own logger and appear in the containerd log (`journalctl -u containerd`),
-keeping operator diagnostics separate from application output.
+via the shim's own logger, which writes to journald (`journalctl SYSLOG_IDENTIFIER=cloudhv-shim`, one
+sandbox with `CLOUDHV_SHIM_ID=<sandbox id>`), next to the daemon's lines, keeping operator diagnostics
+separate from application output. See [shim.md](shim.md#the-shims-log).
 
 ## Dynamic Memory Management
 
