@@ -210,16 +210,32 @@ impl Netlink {
         Ok(None)
     }
 
+    /// The pod's own interface (the CNI's veth) in the namespace we are in, for the TAP `tap` that is, or will be, next to it:
+    /// `(name, index, "<ip>/<prefix>" or "" when it has no address, mac)`.
+    ///
+    /// It is the interface that has an IPv4 address. But once the VM has the pod's address (`flush_addrs` in the daemon's `activate_tap`) the
+    /// veth has none, and a container started again in the same pod (a retry after a start that failed, a restart) must still find it; so
+    /// see [`pick_veth`] for the rest.
     pub fn find_veth(&self, tap: &str) -> Result<Option<(String, u32, String, String)>> {
-        for (idx, name, mac) in self.dump_links()? {
-            if name == "lo" || name == tap || name.is_empty() {
-                continue;
-            }
-            if let Some(cidr) = self.get_ipv4(idx)? {
-                return Ok(Some((name, idx, cidr, mac)));
+        self.find_veth_with(tap, None)
+    }
+
+    /// [`find_veth`](Self::find_veth) with the MAC address of the veth when the caller knows it (the daemon remembers it from the first start).
+    pub fn find_veth_with(
+        &self,
+        tap: &str,
+        mac: Option<&str>,
+    ) -> Result<Option<(String, u32, String, String)>> {
+        let links = self.dump_links()?;
+        let mut cidrs = std::collections::HashMap::new();
+        for (idx, name, _) in &links {
+            if is_pod_candidate(name, tap) {
+                if let Some(c) = self.get_ipv4(*idx)? {
+                    cidrs.insert(*idx, c);
+                }
             }
         }
-        Ok(None)
+        Ok(pick_veth(&links, tap, mac, &|idx| cidrs.get(&idx).cloned()))
     }
 
     pub fn get_ipv4(&self, ifindex: u32) -> Result<Option<String>> {
@@ -694,6 +710,55 @@ pub fn close_nested(buf: &mut [u8], start: usize, ty: u16) {
     buf[start + 2..start + 4].copy_from_slice(&(ty | 0x8000).to_ne_bytes());
 }
 
+/// The prefix of the names of the TAP devices the daemon makes (`tap_<11 hex digits>`).
+pub const TAP_PREFIX: &str = "tap_";
+
+/// Whether a link of a pod's namespace can be the pod's own interface: not `lo`, not nameless, not `tap` (the one being set up) and not
+/// another of the daemon's TAP devices (an earlier start of a container of this pod may have left one).
+fn is_pod_candidate(name: &str, tap: &str) -> bool {
+    !(name.is_empty() || name == "lo" || name == tap || name.starts_with(TAP_PREFIX))
+}
+
+/// Choose the pod's veth from the links of its namespace (`(index, name, mac)`), `cidr_of` giving the IPv4 address of a link if it has one.
+///
+/// 1. The link with the MAC address `mac`, when the caller knows it.
+/// 2. Else the first candidate that has an IPv4 address (what a pod that was never set up has).
+/// 3. Else the one candidate, if there is exactly one. The pod's address is gone from it after the VM took it over; in a namespace of a
+///    pod there is the CNI's interface and the daemon's TAP devices, and no other.
+///
+/// More than one candidate and no way to tell them apart is `None`: no guess.
+pub fn pick_veth(
+    links: &[(u32, String, String)],
+    tap: &str,
+    mac: Option<&str>,
+    cidr_of: &dyn Fn(u32) -> Option<String>,
+) -> Option<(String, u32, String, String)> {
+    let candidates: Vec<&(u32, String, String)> = links
+        .iter()
+        .filter(|(_, name, _)| is_pod_candidate(name, tap))
+        .collect();
+    let found = |l: &(u32, String, String)| {
+        (
+            l.1.clone(),
+            l.0,
+            cidr_of(l.0).unwrap_or_default(),
+            l.2.clone(),
+        )
+    };
+    if let Some(m) = mac.filter(|m| !m.is_empty()) {
+        if let Some(l) = candidates.iter().find(|l| l.2.eq_ignore_ascii_case(m)) {
+            return Some(found(l));
+        }
+    }
+    if let Some(l) = candidates.iter().find(|l| cidr_of(l.0).is_some()) {
+        return Some(found(l));
+    }
+    if mac.is_none() && candidates.len() == 1 {
+        return Some(found(candidates[0]));
+    }
+    None
+}
+
 pub fn parse_link_nlas(data: &[u8]) -> (String, String) {
     let mut name = String::new();
     let mut mac = String::new();
@@ -795,5 +860,69 @@ mod tests {
         // The index of a link that is not there is an error of this request, not of an earlier one.
         assert!(nl.get_link_index("cchv-no-such-link").is_err());
         assert_eq!(nl.get_link_index("lo").expect("lo"), lo);
+    }
+
+    fn links() -> Vec<(u32, String, String)> {
+        vec![
+            (1, "lo".into(), "".into()),
+            (2, "eth0".into(), "aa:bb:cc:00:00:01".into()),
+            (7, "tap_0123456789a".into(), "aa:bb:cc:00:00:02".into()),
+        ]
+    }
+
+    #[test]
+    fn the_veth_with_an_address_is_the_pods_interface() {
+        let has = |i: u32| (i == 2).then(|| "10.0.0.5/24".to_string());
+        let got = pick_veth(&links(), "tap_new", None, &has).unwrap();
+        assert_eq!(
+            (got.0.as_str(), got.1, got.2.as_str()),
+            ("eth0", 2, "10.0.0.5/24")
+        );
+    }
+
+    #[test]
+    fn a_veth_the_vm_took_the_address_from_is_still_found() {
+        // After the VM had the pod's address (flush_addrs) a container started again in the same pod finds the veth without one.
+        let none = |_: u32| None;
+        let got = pick_veth(&links(), "tap_new", None, &none).unwrap();
+        assert_eq!((got.0.as_str(), got.1, got.2.as_str()), ("eth0", 2, ""));
+        // The mac the first start remembered picks it too, and a mac that is not there picks nothing.
+        assert!(pick_veth(&links(), "tap_new", Some("AA:BB:CC:00:00:01"), &none).is_some());
+        assert!(pick_veth(&links(), "tap_new", Some("de:ad:be:ef:00:00"), &none).is_none());
+    }
+
+    #[test]
+    fn the_daemons_tap_devices_and_lo_are_never_the_veth() {
+        let only_tap = vec![
+            (1, "lo".to_string(), "".to_string()),
+            (
+                7,
+                "tap_0123456789a".to_string(),
+                "aa:bb:cc:00:00:02".to_string(),
+            ),
+        ];
+        let none = |_: u32| None;
+        assert!(pick_veth(&only_tap, "tap_new", None, &none).is_none());
+        // Even with an address on a TAP (it has none, but the rule does not depend on it).
+        let has = |i: u32| (i == 7).then(|| "10.0.0.5/24".to_string());
+        assert!(pick_veth(&only_tap, "tap_new", None, &has).is_none());
+    }
+
+    #[test]
+    fn two_interfaces_without_an_address_are_not_guessed() {
+        let mut l = links();
+        l.push((9, "net1".into(), "aa:bb:cc:00:00:09".into()));
+        let none = |_: u32| None;
+        assert!(pick_veth(&l, "tap_new", None, &none).is_none());
+        // The mac tells them apart.
+        assert_eq!(
+            pick_veth(&l, "tap_new", Some("aa:bb:cc:00:00:09"), &none)
+                .unwrap()
+                .0,
+            "net1"
+        );
+        // An address does too, as before.
+        let has = |i: u32| (i == 9).then(|| "192.168.1.2/24".to_string());
+        assert_eq!(pick_veth(&l, "tap_new", None, &has).unwrap().0, "net1");
     }
 }
