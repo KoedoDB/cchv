@@ -49,6 +49,25 @@ pub struct BlockRequest {
     pub fs: String,
     /// `"format": "if-blank"`.
     pub format: bool,
+    /// `"owner": "<uid>:<gid>"`: who owns the root of the file system when it is made (`root_owner` of `mke2fs`). `0:0` without it. A file system that
+    /// exists keeps its owner: this is read only when the device is blank and is formatted.
+    pub owner: (u32, u32),
+}
+
+/// `"<uid>:<gid>"`: two decimal numbers, nothing else (no sign, no space), neither the "no id" value of Linux (4294967295).
+fn parse_owner(s: &str) -> Result<(u32, u32), String> {
+    let bad = || format!("owner {s:?} is not <uid>:<gid>");
+    let (u, g) = s.split_once(':').ok_or_else(bad)?;
+    let id = |t: &str| -> Result<u32, String> {
+        if t.is_empty() || t.len() > 10 || !t.bytes().all(|c| c.is_ascii_digit()) {
+            return Err(bad());
+        }
+        match t.parse::<u32>() {
+            Ok(n) if n != u32::MAX => Ok(n),
+            _ => Err(bad()),
+        }
+    };
+    Ok((id(u)?, id(g)?))
 }
 
 struct Settings {
@@ -219,6 +238,10 @@ fn parse_with(
             Some("if-blank") => true,
             Some(other) => return Err(format!("format {other:?} is not known")),
         };
+        let owner = match b.get("owner").and_then(|o| o.as_str()) {
+            None | Some("") => (0, 0),
+            Some(o) => parse_owner(o)?,
+        };
         if format && !format_ok {
             return Err(
                 "a block volume asks to be formatted: volume_block_format_if_blank is off".into(),
@@ -243,6 +266,7 @@ fn parse_with(
             minor,
             fs: fs.to_string(),
             format,
+            owner,
         });
     }
     Ok(out)
@@ -350,7 +374,11 @@ fn is_blank(path: &Path) -> Result<bool> {
 
 /// The arguments of `mke2fs` for a volume: ext4 with a journal (the data is meant to stay), no blocks reserved for root, the inode tables made
 /// as they are used. `lazy_journal_init` is not used: the device is not known to be zeros beyond its first MiB. The node last.
-fn mke2fs_args(node: &Path) -> Vec<std::ffi::OsString> {
+fn mke2fs_args(node: &Path, owner: (u32, u32)) -> Vec<std::ffi::OsString> {
+    let extended = format!(
+        "lazy_itable_init=1,nodiscard,root_owner={}:{}",
+        owner.0, owner.1
+    );
     let mut a: Vec<std::ffi::OsString> = [
         "-q",
         "-t",
@@ -362,7 +390,7 @@ fn mke2fs_args(node: &Path) -> Vec<std::ffi::OsString> {
         "-O",
         "has_journal",
         "-E",
-        "lazy_itable_init=1,nodiscard,root_owner=0:0",
+        extended.as_str(),
         "-L",
         "pv",
     ]
@@ -373,9 +401,9 @@ fn mke2fs_args(node: &Path) -> Vec<std::ffi::OsString> {
     a
 }
 
-async fn format(s: &Settings, node: &Path) -> Result<()> {
+async fn format(s: &Settings, node: &Path, owner: (u32, u32)) -> Result<()> {
     let mut cmd = tokio::process::Command::new(&s.mke2fs);
-    cmd.args(mke2fs_args(node))
+    cmd.args(mke2fs_args(node, owner))
         .env_clear()
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -466,7 +494,9 @@ async fn plug(
     make_node(node, b.major, b.minor)?;
     if b.format {
         if is_blank(node)? {
-            format(s, node).await.context("make the file system")?;
+            format(s, node, b.owner)
+                .await
+                .context("make the file system")?;
             info!("made an ext4 on the blank device {}:{}", b.major, b.minor);
         } else {
             info!(
@@ -534,7 +564,8 @@ mod tests {
                 major: 252,
                 minor: 3,
                 fs: "ext4".into(),
-                format: false
+                format: false,
+                owner: (0, 0)
             }
         );
         // A volume without a block is not one of these.
@@ -666,7 +697,7 @@ mod tests {
 
     #[test]
     fn mke2fs_gets_the_node_last_and_a_journal_that_is_written() {
-        let a = mke2fs_args(Path::new("/x/pv-1"));
+        let a = mke2fs_args(Path::new("/x/pv-1"), (0, 0));
         assert_eq!(a.last().unwrap(), "/x/pv-1");
         assert!(a.iter().any(|x| x == "has_journal"));
         assert!(!a.iter().any(|x| x == "^has_journal"));
@@ -682,6 +713,52 @@ mod tests {
     }
 
     #[test]
+    fn the_owner_of_the_new_file_system_is_a_uid_and_a_gid() {
+        assert_eq!(parse_owner("999:999"), Ok((999, 999)));
+        assert_eq!(parse_owner("0:0"), Ok((0, 0)));
+        assert_eq!(parse_owner("1000:0"), Ok((1000, 0)));
+        for bad in [
+            "",
+            "999",
+            "999:",
+            ":999",
+            "a:b",
+            "-1:0",
+            "+1:0",
+            "1:2:3",
+            " 1:2",
+            "1: 2",
+            "4294967295:0",
+            "0:4294967295",
+            "99999999999:0",
+            "1.5:0",
+        ] {
+            assert!(parse_owner(bad).is_err(), "{bad:?} must be refused");
+        }
+        let a = mke2fs_args(Path::new("/x/pv-1"), (999, 998));
+        assert!(
+            a.iter()
+                .any(|x| x == "lazy_itable_init=1,nodiscard,root_owner=999:998"),
+            "mke2fs gets the owner: {a:?}"
+        );
+        let a = mke2fs_args(Path::new("/x/pv-1"), (0, 0));
+        assert!(a
+            .iter()
+            .any(|x| x.to_string_lossy().ends_with("root_owner=0:0")));
+    }
+
+    #[test]
+    fn a_volume_may_name_its_owner_and_a_bad_owner_refuses_the_request() {
+        let with = |o: &str| json!({"volumes": [{"destination": "/x", "block": {"id": ID, "major": 252, "minor": 3, "format": "if-blank", "owner": o}}]});
+        let formatting: Option<(&[String], bool)> = Some((&[], true));
+        let got = parse_with(&with("999:999"), formatting, allow).unwrap();
+        assert_eq!(got[0].owner, (999, 999));
+        assert!(parse_with(&with("postgres"), formatting, allow).is_err());
+        let without = json!({"volumes": [vol(ID, 252, 3)]});
+        assert_eq!(parse_with(&without, on(), allow).unwrap()[0].owner, (0, 0));
+    }
+
+    #[test]
     fn the_disk_is_raw_writable_and_opened_with_direct_io() {
         let b = BlockRequest {
             id: ID.into(),
@@ -689,6 +766,7 @@ mod tests {
             minor: 3,
             fs: "ext4".into(),
             format: false,
+            owner: (0, 0),
         };
         let body = disk_body(
             Path::new("/var/lib/cloudhv/emptydir/vm/pv-0123456789abcdef"),

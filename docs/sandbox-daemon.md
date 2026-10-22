@@ -899,7 +899,7 @@ The Pod says what the device is for in an annotation:
 ```yaml
 metadata:
   annotations:
-    cloudhv.koedodb.com/block-volumes: '[{"device":"/dev/pgdata","mount":"/var/lib/postgresql","format":"if-blank"}]'
+    cloudhv.koedodb.com/block-volumes: '[{"device":"/dev/pgdata","mount":"/var/lib/postgresql","format":"if-blank","owner":"999:999"}]'
 spec:
   runtimeClassName: cloudhv
   containers:
@@ -916,6 +916,9 @@ spec:
   that is not `nodev`; the VM's user cannot make a node there.
 - **File system**: only ext4 (the guest kernel has no other). It is made only for `"format": "if-blank"` with `volume_block_format_if_blank` on, and only on a device whose
   first MiB is zeros. ext4 can be grown while mounted, not shrunk.
+- **Owner**: `"owner": "<uid>:<gid>"` (optional, two decimal numbers) is the owner of the root of the new file system (`mke2fs -E root_owner`; `0:0` without it), so that a
+  container that runs as a non-root user (PostgreSQL as 999:999) can write in it. It is read only when the device is formatted: a file system that exists keeps its owner.
+  A bad value (a name, a sign, the "no id" value 4294967295) refuses the request.
 - **Set up on the host**: the containerd runtime needs `pod_annotations = ['cloudhv.koedodb.com/*']`, or the annotation does not reach the shim; the daemon's unit needs
   `CAP_MKNOD` and `DeviceAllow=block-device-mapper rwm`. **LVM does not zero a new logical volume**: whatever the disk held before is still there, so zero a new volume
   (`blkdiscard --zeroout`) before a Pod is given it.

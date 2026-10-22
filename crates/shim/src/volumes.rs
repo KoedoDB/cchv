@@ -242,8 +242,8 @@ fn is_disk_emptydir(source: &str, policy: &Policy) -> bool {
 
 /// The name of a volume in the guest: the same host directory (an emptyDir mounted by two containers) is the same directory.
 /// The annotation of a pod that says what its raw block devices (`volumeDevices`) are for: a JSON list of
-/// `{"device": "<devicePath in the container>", "mount": "<where the guest mounts it>", "fs": "ext4", "format": "if-blank"}` (`fs` and `format`
-/// optional). The platform (the Regional Agent) writes it with the pod; a raw block device without it is not given to the VM.
+/// `{"device": "<devicePath in the container>", "mount": "<where the guest mounts it>", "fs": "ext4", "format": "if-blank", "owner": "999:999"}` (`fs`,
+/// `format` and `owner` optional; `owner` is the uid:gid of the root of the file system made on a blank device, so that a non-root user can write in it). The platform (the Regional Agent) writes it with the pod; a raw block device without it is not given to the VM.
 const BLOCK_VOLUMES_ANNOTATION: &str = "cloudhv.koedodb.com/block-volumes";
 const MAX_BLOCK_VOLUMES: usize = 4;
 
@@ -299,6 +299,10 @@ fn block_volumes(spec: &serde_json::Value) -> Result<Vec<serde_json::Value>, Str
         }
         if let Some(format) = e.get("format").and_then(|f| f.as_str()) {
             block["format"] = serde_json::json!(format);
+        }
+        // "owner": "<uid>:<gid>" of the root of a file system made on a blank device (the daemon checks it).
+        if let Some(owner) = e.get("owner").and_then(|o| o.as_str()) {
+            block["owner"] = serde_json::json!(owner);
         }
         out.push(serde_json::json!({
             "destination": mount,
@@ -671,6 +675,24 @@ mod tests {
         })
         .to_string()
         .into_bytes()
+    }
+
+    #[test]
+    fn the_owner_of_a_block_volume_is_passed_on_for_the_daemon_to_check() {
+        let root = Tmp::new("blk-owner");
+        let spec = block_spec(
+            serde_json::json!([{"device": "/dev/pgdata", "mount": "/var/lib/postgresql", "format": "if-blank", "owner": "999:999"}]),
+            serde_json::json!([{"path": "/dev/pgdata", "type": "b", "major": 252, "minor": 7, "fileMode": 432}]),
+        );
+        let got = from_spec_with(&spec, &policy(&root.0, false)).unwrap();
+        assert_eq!(got[0]["block"]["owner"], "999:999");
+        // Without it the key is absent (the daemon's default is root).
+        let spec = block_spec(
+            serde_json::json!([{"device": "/dev/pgdata", "mount": "/var/lib/postgresql", "format": "if-blank"}]),
+            serde_json::json!([{"path": "/dev/pgdata", "type": "b", "major": 252, "minor": 7, "fileMode": 432}]),
+        );
+        let got = from_spec_with(&spec, &policy(&root.0, false)).unwrap();
+        assert!(got[0]["block"].get("owner").is_none());
     }
 
     #[test]
