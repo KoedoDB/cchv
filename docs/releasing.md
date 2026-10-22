@@ -13,8 +13,8 @@ Tags are plain SemVer, **`v<major>.<minor>.<patch>`**, our own line, starting at
   signatures still verify (a signature is tied to the tag of the workflow run that made it). The mapping, for a reader of our notes: `v0.17.0-koedodb.3` is
   the release with the kernel 6.18.58 and the new root file system; `v0.3.0` is the one after it. The original's tags `v0.1.0` to `v0.14.0` were removed from this
   repository on 2026-10-22 (they are still in the original, and their commits are in our history), so that our numbers do not collide with them.
-- A tag with a dash (`v0.3.0-rc.1`) is published as a **pre-release and never as "Latest"** (the workflow decides by the dash). A plain `v0.3.0` is a normal
-  release: say in its notes what has been tested and what has not. Never re-tag a published release.
+- Every release with major version 0 (`v0.3.0`), and any tag with a dash (`v1.0.0-rc.1`), is published as a **pre-release and never as "Latest"** (the workflow decides
+  by `v0.` and by the dash). Say in the notes what has been tested and what has not. Never re-tag a published release.
 
 The files do not carry the version (`Cargo.toml` says `0.1.0`); **the tag is the version**. The workflow reads it from the tag name and
 writes it, with the commit, to `BUILD-INFO` before the build, so that `containerd-shim-cloudhv-v1 --version`,
