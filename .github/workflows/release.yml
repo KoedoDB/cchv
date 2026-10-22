@@ -461,7 +461,7 @@ jobs:
 
           ### Licenses, SBOMs and source of the GPL parts
 
-          The code of this repository is MIT. `THIRD-PARTY-LICENSES.txt` has the licenses of the Rust crates inside the binaries;
+          The code of this repository is under the PolyForm Noncommercial License 1.0.0 (`LICENSE`), except for the original work it started from, which stays under MIT. `THIRD-PARTY-LICENSES.txt` has the licenses of the Rust crates inside the binaries;
           `sbom-*.cdx.json` are CycloneDX SBOMs (the three binaries' crates, and `sbom-bundled-components` for Cloud Hypervisor, the CNI
           plugins, crun and the Linux kernel). `THIRD-PARTY.md` lists everything bundled and its license.
 

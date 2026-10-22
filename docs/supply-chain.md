@@ -68,7 +68,7 @@ that publishes the binaries.
   OIDC identity). The Helm chart of the release and the release notes name the image by digest. The chart refuses to render without
   a digest or a tag.
   Verify: `cosign verify --certificate-identity-regexp '^https://github.com/<owner>/<repo>/' --certificate-oidc-issuer https://token.actions.githubusercontent.com ghcr.io/<owner>/cloudhv-installer@<digest>`
-- **Review before the first tag:** the signing step and the digest handling in `release.yml` have not run yet (they need a real tag push).
+- The signing step and the digest handling in `release.yml` ran for `v0.17.0-koedodb.2` (2026-10-22): `cosign verify-blob` of `checksums-sha256.txt` against its `.sigstore.json` bundle passes with the identity regexp above. The installer image and the chart are packages on GHCR; a package made by a workflow is private until its visibility is changed in the package settings, and `cosign verify` of a private package fails with `UNAUTHORIZED`.
 
 ## The installer on the node
 
