@@ -5,16 +5,16 @@ in this repository does today.)
 
 ## Versions
 
-Tags look like **`v<minor line>-koedodb.<n>`**, for example `v0.16.0-koedodb.1`:
+Tags are plain SemVer, **`v<major>.<minor>.<patch>`**, our own line, starting at **`v0.3.0`** (2026-10-22):
 
-- the part before the dash continues the original's numbering (the original stopped at `v0.14.0`; our lines are `0.15` and `0.16`), so
-  that a reader can see where the code comes from, and our tags cannot collide with a future tag of the original. **A feature release
-  starts a new minor line** (`v0.16.0-koedodb.1` is the one with the disk-backed emptyDir and the 320 MiB default VM); fixes of a line
-  count up in `-koedodb.<n>`;
-- `-koedodb.<n>` counts our releases on top of it. It is a SemVer pre-release label on purpose: this is experimental software, and a tag
-  with a dash is published as a **pre-release and never as "Latest"** (the workflow decides by the dash).
-- `v0.15.0-koedodb.1` was the first release; it stays published as a pre-release and its notes say it is superseded. Never re-tag a
-  published release.
+- **a feature release raises the minor** (`v0.4.0`), a fix raises the patch (`v0.3.1`). The major stays 0 while this is experimental software.
+- The numbers before `v0.3.0` are the old scheme, kept for the record: `v0.15.0-koedodb.1`, `v0.16.0-koedodb.1` and `v0.17.0-koedodb.1` to `.3` continued the
+  original project's numbering (the original stopped at `v0.14.0`) with our own `-koedodb.<n>` suffix. Those five releases stay published as pre-releases, and their
+  signatures still verify (a signature is tied to the tag of the workflow run that made it). The mapping, for a reader of our notes: `v0.17.0-koedodb.3` is
+  the release with the kernel 6.18.58 and the new root file system; `v0.3.0` is the one after it. The original's tags `v0.1.0` to `v0.14.0` were removed from this
+  repository on 2026-10-22 (they are still in the original, and their commits are in our history), so that our numbers do not collide with them.
+- A tag with a dash (`v0.3.0-rc.1`) is published as a **pre-release and never as "Latest"** (the workflow decides by the dash). A plain `v0.3.0` is a normal
+  release: say in its notes what has been tested and what has not. Never re-tag a published release.
 
 The files do not carry the version (`Cargo.toml` says `0.1.0`); **the tag is the version**. The workflow reads it from the tag name and
 writes it, with the commit, to `BUILD-INFO` before the build, so that `containerd-shim-cloudhv-v1 --version`,
