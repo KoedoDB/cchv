@@ -835,6 +835,11 @@ The daemon is root and its socket is the one door:
 | `console_forward_max_bytes_per_sec` | `2097152` | the most bytes the daemon reads from one VM's console in a second; the rest of the second it does not read, and the Cloud Hypervisor drops what the guest writes |
 | `volume_block_prefixes` | `[]` (off) | persistent block volumes: the device-mapper names a Pod may be given as a disk (an LVM volume `pv-x` of the group `vg` is `vg-pv--x`); a device whose name begins with none of them is refused. Needs `emptydir_dir` |
 | `volume_block_format_if_blank` | `false` | a volume that asks for `"format": "if-blank"` gets an ext4 made on it when its first MiB is zeros; off, the platform makes the file system before the Pod starts |
+| `volume_block_vg` | `""` | the volume group in which the volume helper makes the logical volumes of volumes asked for by name (below). Empty: that is off, and a device given as `volumeDevices` is accepted without a look at whose it is |
+| `volume_block_max_mib` | `0` | the most a volume made or extended by name may be, in MiB; 0 refuses every creation |
+| `volume_block_allow_untagged` | `false` | with `volume_block_vg`, let through a `volumeDevices` logical volume that has no `cloudhv-ns=` tag (made by hand). One tagged for another namespace never goes |
+| `volume_helper_socket` | `/run/cloudhv/volume-helper.sock` | the helper's Unix socket (0600, root's) |
+| `lvm_bin_dir` | `/usr/sbin` | where the helper finds `lvs`, `lvcreate`, `lvchange`, `lvextend` and `blkdiscard` |
 | `disk_direct` | `true` | open the hot-plugged disks (emptyDirs on disk, persistent volumes) with O_DIRECT: the guest has its own page cache and the host does not cache every block a second time (about 260 MiB less charged to a database Pod of 1 GiB, no loss of write speed in our test) |
 | `vm_balloon` | `false` | give each VM a balloon with free page reporting, so its resident memory follows what the guest uses |
 | `erofs_cache_dir` | `/run/cloudhv/erofs-cache` | where the shim keeps the images; must be the shim's `EROFS_CACHE_DIR` |
@@ -922,6 +927,45 @@ spec:
 - **Set up on the host**: the containerd runtime needs `pod_annotations = ['cloudhv.koedodb.com/*']`, or the annotation does not reach the shim; the daemon's unit needs
   `CAP_MKNOD` and `DeviceAllow=block-device-mapper rwm`. **LVM does not zero a new logical volume**: whatever the disk held before is still there, so zero a new volume
   (`blkdiscard --zeroout`) before a Pod is given it.
+#### Volumes by name (the daemon makes and checks the logical volumes)
+
+With `volume_block_vg` set, the Pod does not need a claim or `volumeDevices`. It asks for a volume by name and size:
+
+```yaml
+metadata:
+  annotations:
+    cloudhv.koedodb.com/block-volumes: '[{"volume":"data","size_mib":8192,"mount":"/var/lib/postgresql","format":"if-blank","owner":"999:999"}]'
+spec:
+  runtimeClassName: cloudhv
+```
+
+- **The daemon never runs LVM.** It would need the device-mapper control device, write access to `/etc/lvm` and `/run/lvm`, and a tool that parses a great deal, in the
+  process that also reads every request and starts every Cloud Hypervisor. A second process does it: `cloudhv-sandbox-daemon --volume-helper`, the unit
+  `cloudhv-volume-helper.service` (installed by the installer and in the system extension, **not enabled**: enable it on a host that has `volume_block_vg`). It listens on
+  `volume_helper_socket` and understands two requests, `ensure {namespace, volume, size_mib}` and `tags {major, minor}`, one line of JSON each. The daemon's own unit does not
+  change (it only connects to the socket).
+- **The name is derived, never given.** The logical volume is `pv-<namespace>_<volume>` in `volume_block_vg`. The namespace is the pod's Kubernetes namespace, which the
+  shim reads from `io.kubernetes.cri.sandbox-namespace` in the OCI spec (containerd writes it; a pod can only pass `cloudhv.koedodb.com/*` annotations to the spec, see the
+  containerd setting above, so it cannot set it). The annotation has a volume name (`[a-z0-9-]`, 32 at most) and a size, never a logical volume's name. `_` cannot be in either, so two pairs
+  never make one name. The daemon checks the helper's answer again: the device-mapper name in sysfs must be exactly the derived one, and the tags must be this namespace's and ready.
+- **Whose it is.** Every logical volume the helper makes carries `cloudhv-ns=<namespace>` from the moment it exists (`lvcreate --addtag`). A logical volume without that tag, or
+  with another namespace's (or two), is never adopted, extended or handed out. A device given as `volumeDevices` is looked up the same way: its tag must be the pod's namespace and it
+  must be ready; an untagged one only with `volume_block_allow_untagged` (for volumes made by hand before the tags).
+- **Zeroed whole before it is ready.** LVM does not zero a new volume; it holds what the extents held before, perhaps another customer's data. After `lvcreate` the helper writes zeros
+  over all of it (`blkdiscard --zeroout`, then `dd` if the device cannot) and only then adds `cloudhv-ready`. A volume with the owner tag and no `cloudhv-ready` is a creation that did not
+  finish and is zeroed again; nothing sees it before. **Do not remove `cloudhv-ready` by hand**: the volume is zeroed whole.
+- **Extended, never shrunk.** A larger `size_mib` extends the logical volume. The new extents are zeroed too (the guest can read the whole device): `cloudhv-extending=<old MiB>` is on the volume
+  from before `lvextend` until the new part is zeroed, so a crash in between is finished by the next request, from the old size on, never over the data. The file system is not grown
+  (follow-up: `resize2fs` in the guest, or by the agent). A smaller size does nothing.
+- **A cap and a single writer.** `volume_block_max_mib` limits any one volume (made or extended to); 0 makes none. The helper answers one request at a time. The daemon's per-device `flock` still keeps a volume to one VM.
+- **Never deleted.** Nothing removes a logical volume: deleting a Project's volume is an operator's action (`lvremove`), taken together with the Project's backups. The helper's `tags` request
+  answers only for volumes of its own volume group.
+- **Not covered here (follow-ups)**: growing the file system after an extension; a backup of the volume; removing the volume of a deleted Project; thin provisioning (the volumes are thick, as tested).
+- **What the helper's unit allows**: `CAP_SYS_ADMIN` (the device-mapper ioctls) and `CAP_MKNOD` (a node of its own for a volume that udev has not made, to zero it), `ProtectSystem=strict` with write access to
+  `/run/cloudhv`, `/etc/lvm`, `/run/lvm` and `/run/lock/lvm` only, no network, `DevicePolicy=closed` with `/dev/mapper/control`, device-mapper and the disk classes of a host. The host needs `lvm2`
+  and `util-linux` (`blkdiscard`). **The unit has not been run under systemd on a node yet**; the helper has been run against the real LVM tools in a throw-away container
+  (`crates/daemon/tests/volume-helper-lvm.sh`: a volume group on a loop device; stale data under a new volume, extension, an unfinished creation and an unfinished extension, another namespace's volume, the cap).
+
 - Tested on a host (Debian 13, a PostgreSQL 18 Pod in a VM of 1 GiB on a logical volume of 8 GiB): the data survives the Pod being made again; a second Pod on the same volume,
   and a volume that is not allowed, are refused; `kill -9` of the Cloud Hypervisor under `pgbench`, several times, with no broken invariant (`pg_amcheck` clean); a full disk gives
   `ERROR`, not `PANIC`; and after a hard reset of the host in the middle of writes every acknowledged insert was there (a software reset: it does not show what the drive's

@@ -244,7 +244,13 @@ fn is_disk_emptydir(source: &str, policy: &Policy) -> bool {
 /// The annotation of a pod that says what its raw block devices (`volumeDevices`) are for: a JSON list of
 /// `{"device": "<devicePath in the container>", "mount": "<where the guest mounts it>", "fs": "ext4", "format": "if-blank", "owner": "999:999"}` (`fs`,
 /// `format` and `owner` optional; `owner` is the uid:gid of the root of the file system made on a blank device, so that a non-root user can write in it). The platform (the Regional Agent) writes it with the pod; a raw block device without it is not given to the VM.
+///
+/// An entry can instead ask for a volume by name, with no device and no claim: `{"volume": "data", "size_mib": 8192, "mount": "/var/lib/postgresql",
+/// "format": "if-blank", "owner": "999:999"}`. The daemon's volume helper makes the logical volume for the pod's namespace (`doc/sandbox-daemon.md`); the
+/// name of the volume is derived from the namespace and the volume's name, which is why the shim sends the pod's namespace (the one containerd writes in
+/// `io.kubernetes.cri.sandbox-namespace`, which a pod cannot set: only `cloudhv.koedodb.com/*` annotations pass from a pod to the spec).
 const BLOCK_VOLUMES_ANNOTATION: &str = "cloudhv.koedodb.com/block-volumes";
+const SANDBOX_NAMESPACE: &str = "io.kubernetes.cri.sandbox-namespace";
 const MAX_BLOCK_VOLUMES: usize = 4;
 
 /// The persistent block volumes of a spec, as the daemon's API takes them: `"block": {"id", "major", "minor", "fs", "format"}`. The device is
@@ -270,6 +276,11 @@ fn block_volumes(spec: &serde_json::Value) -> Result<Vec<serde_json::Value>, Str
         .and_then(|d| d.as_array())
         .cloned()
         .unwrap_or_default();
+    let namespace = spec
+        .pointer("/annotations")
+        .and_then(|a| a.get(SANDBOX_NAMESPACE))
+        .and_then(|n| n.as_str())
+        .filter(|n| !n.is_empty());
     let mut out = Vec::new();
     for e in &entries {
         let device = e.get("device").and_then(|d| d.as_str()).unwrap_or("");
@@ -278,6 +289,36 @@ fn block_volumes(spec: &serde_json::Value) -> Result<Vec<serde_json::Value>, Str
             return Err(format!(
                 "block volume of {device:?}: the mount {mount:?} is not an absolute path"
             ));
+        }
+        if let Some(name) = e.get("volume") {
+            // A volume by name: no device. The daemon checks every field again; here they are only passed on, with the pod's namespace.
+            let (Some(name), Some(ns)) = (name.as_str(), namespace) else {
+                return Err(format!(
+                    "block volume {name}: it needs a name and the pod's namespace ({SANDBOX_NAMESPACE})"
+                ));
+            };
+            if !device.is_empty() {
+                return Err(format!("block volume {name:?} names a volume and a device"));
+            }
+            let Some(size_mib) = e.get("size_mib").and_then(|n| n.as_u64()) else {
+                return Err(format!("block volume {name:?} has no size_mib"));
+            };
+            let digest = Sha256::digest(format!("pv-by-name:{ns}:{name}").as_bytes());
+            let id: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
+            let mut block = serde_json::json!({"id": id, "namespace": ns, "volume": name, "size_mib": size_mib});
+            for key in ["fs", "format", "owner"] {
+                if let Some(v) = e.get(key).and_then(|v| v.as_str()) {
+                    block[key] = serde_json::json!(v);
+                }
+            }
+            out.push(serde_json::json!({
+                "destination": mount,
+                "source": format!("{VOLUME_ROOT}/{id}"),
+                "readonly": false,
+                "files": [],
+                "block": block,
+            }));
+            continue;
         }
         let found = devices.iter().find(|d| {
             d.get("path").and_then(|p| p.as_str()) == Some(device)
@@ -294,6 +335,9 @@ fn block_volumes(spec: &serde_json::Value) -> Result<Vec<serde_json::Value>, Str
         let digest = Sha256::digest(format!("pv:{major}:{minor}").as_bytes());
         let id: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
         let mut block = serde_json::json!({"id": id, "major": major, "minor": minor});
+        if let Some(ns) = namespace {
+            block["namespace"] = serde_json::json!(ns);
+        }
         if let Some(fs) = e.get("fs").and_then(|f| f.as_str()) {
             block["fs"] = serde_json::json!(fs);
         }
@@ -668,13 +712,74 @@ mod tests {
     }
 
     fn block_spec(annotation: serde_json::Value, devices: serde_json::Value) -> Vec<u8> {
+        block_spec_in(annotation.to_string(), devices, None)
+    }
+
+    /// A spec with the namespace containerd writes for the pod (`None`: none).
+    fn block_spec_in(annotation: String, devices: serde_json::Value, ns: Option<&str>) -> Vec<u8> {
+        let mut annotations = serde_json::json!({ BLOCK_VOLUMES_ANNOTATION: annotation });
+        if let Some(n) = ns {
+            annotations[SANDBOX_NAMESPACE] = serde_json::json!(n);
+        }
         serde_json::json!({
             "mounts": [],
-            "annotations": { BLOCK_VOLUMES_ANNOTATION: annotation.to_string() },
+            "annotations": annotations,
             "linux": { "devices": devices },
         })
         .to_string()
         .into_bytes()
+    }
+
+    #[test]
+    fn a_volume_by_name_carries_the_pods_namespace_and_no_device() {
+        let root = Tmp::new("blk-named");
+        let entries = serde_json::json!([{"volume": "data", "size_mib": 8192, "mount": "/var/lib/postgresql", "format": "if-blank", "owner": "999:999"}])
+            .to_string();
+        let none = serde_json::json!([]);
+        let spec = block_spec_in(entries.clone(), none.clone(), Some("p-abc-db"));
+        let got = from_spec_with(&spec, &policy(&root.0, false)).unwrap();
+        assert_eq!(got.len(), 1);
+        let b = &got[0]["block"];
+        assert_eq!(got[0]["destination"], "/var/lib/postgresql");
+        assert_eq!(b["namespace"], "p-abc-db");
+        assert_eq!(b["volume"], "data");
+        assert_eq!(b["size_mib"], 8192);
+        assert_eq!(b["format"], "if-blank");
+        assert_eq!(b["owner"], "999:999");
+        assert!(b.get("major").is_none() && b.get("minor").is_none());
+        // The id depends on the namespace and the name: two namespaces' "data" are two volumes.
+        let other = block_spec_in(entries.clone(), none.clone(), Some("p-zzz-db"));
+        let got2 = from_spec_with(&other, &policy(&root.0, false)).unwrap();
+        assert_ne!(got[0]["block"]["id"], got2[0]["block"]["id"]);
+        // Without the namespace of the pod there is no volume.
+        let bare = block_spec_in(entries, none.clone(), None);
+        assert!(from_spec_with(&bare, &policy(&root.0, false)).is_err());
+        // Without a size, or with a device as well.
+        let no_size = block_spec_in(
+            r#"[{"volume":"data","mount":"/x"}]"#.into(),
+            none.clone(),
+            Some("p-abc-db"),
+        );
+        assert!(from_spec_with(&no_size, &policy(&root.0, false)).is_err());
+        let both = block_spec_in(
+            r#"[{"volume":"data","size_mib":1,"device":"/dev/x","mount":"/x"}]"#.into(),
+            none,
+            Some("p-abc-db"),
+        );
+        assert!(from_spec_with(&both, &policy(&root.0, false)).is_err());
+    }
+
+    #[test]
+    fn a_device_volume_carries_the_namespace_too() {
+        let root = Tmp::new("blk-dev-ns");
+        let spec = block_spec_in(
+            serde_json::json!([{"device": "/dev/pgdata", "mount": "/var/lib/postgresql"}])
+                .to_string(),
+            serde_json::json!([{"path": "/dev/pgdata", "type": "b", "major": 252, "minor": 7, "fileMode": 432}]),
+            Some("p-abc-db"),
+        );
+        let got = from_spec_with(&spec, &policy(&root.0, false)).unwrap();
+        assert_eq!(got[0]["block"]["namespace"], "p-abc-db");
     }
 
     #[test]

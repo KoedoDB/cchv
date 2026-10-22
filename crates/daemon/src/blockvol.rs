@@ -16,6 +16,14 @@
 //! - **The file system**: never made unless the volume says `"format": "if-blank"` and `volume_block_format_if_blank` is on, and then only on
 //!   a device whose first MiB is zeros: an ext4 with a journal (`mke2fs`, by root, before the VM's user is given the node). Only ext4: the
 //!   guest kernel has no other.
+//! - **Volumes by name** (`volume_block_vg`, `lvm.rs`): the pod's annotation can ask for a volume by name and size instead of a device
+//!   (`"volume": "data", "size_mib": 8192`). The daemon never runs LVM: its helper (`cloudhv-volume-helper`) makes the logical volume
+//!   `pv-<namespace>_<volume>` of the volume group, zeroes it whole, and tags it `cloudhv-ns=<namespace>` and `cloudhv-ready`. The name comes from the
+//!   pod's Kubernetes namespace (from containerd, through the shim) and the volume name, never from the annotation, so a pod cannot ask for another
+//!   pod's volume. The daemon checks the answer again on its own: the device-mapper name must be exactly the one derived, and the tags must say
+//!   this namespace and ready.
+//! - **Whose volume it is**: with `volume_block_vg`, a device given as `volumeDevices` is looked up too: its `cloudhv-ns=` tag must be the pod's namespace
+//!   and it must be ready. A volume without a tag is refused unless `volume_block_allow_untagged`, and a volume of another namespace never goes.
 //! - What the guest writes is the guest's: a file system it corrupts hurts the guest, and the device is not touched by the host once plugged.
 
 use std::collections::HashMap;
@@ -52,6 +60,17 @@ pub struct BlockRequest {
     /// `"owner": "<uid>:<gid>"`: who owns the root of the file system when it is made (`root_owner` of `mke2fs`). `0:0` without it. A file system that
     /// exists keeps its owner: this is read only when the device is blank and is formatted.
     pub owner: (u32, u32),
+    /// The Kubernetes namespace of the pod (containerd's, through the shim). Needed with `volume_block_vg`.
+    pub namespace: Option<String>,
+    /// A volume asked for by name: made by the helper, so `major` and `minor` are 0 until `plug` has the helper's answer.
+    pub managed: Option<ManagedVolume>,
+}
+
+/// A volume asked for by name and size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedVolume {
+    pub volume: String,
+    pub size_mib: u64,
 }
 
 /// `"<uid>:<gid>"`: two decimal numbers, nothing else (no sign, no space), neither the "no id" value of Linux (4294967295).
@@ -70,7 +89,16 @@ fn parse_owner(s: &str) -> Result<(u32, u32), String> {
     Ok((id(u)?, id(g)?))
 }
 
+/// The volumes by name and the check of whose a volume is (`volume_block_vg`).
+struct Managed {
+    vg: String,
+    max_mib: u64,
+    allow_untagged: bool,
+    client: crate::lvm::Client,
+}
+
 struct Settings {
+    managed: Option<Managed>,
     prefixes: Vec<String>,
     format_if_blank: bool,
     locks: PathBuf,
@@ -105,6 +133,14 @@ pub fn init(config: &DaemonConfig) {
         let locks = Path::new(&config.state_dir).join("block-locks");
         match prepare_locks(&locks) {
             Ok(()) => Some(Settings {
+                managed: (!config.volume_block_vg.is_empty()).then(|| Managed {
+                    vg: config.volume_block_vg.clone(),
+                    max_mib: config.volume_block_max_mib,
+                    allow_untagged: config.volume_block_allow_untagged,
+                    client: crate::lvm::Client {
+                        socket: PathBuf::from(&config.volume_helper_socket),
+                    },
+                }),
                 prefixes: config.volume_block_prefixes.clone(),
                 format_if_blank: config.volume_block_format_if_blank,
                 locks,
@@ -190,6 +226,9 @@ pub fn parse(request: &serde_json::Value) -> Result<Vec<BlockRequest>, String> {
     parse_with(
         request,
         settings().map(|s| (&s.prefixes[..], s.format_if_blank)),
+        settings()
+            .and_then(|s| s.managed.as_ref())
+            .map(|m| m.max_mib),
         |maj, min| {
             settings()
                 .map(|s| check_device(s, maj, min))
@@ -201,6 +240,7 @@ pub fn parse(request: &serde_json::Value) -> Result<Vec<BlockRequest>, String> {
 fn parse_with(
     request: &serde_json::Value,
     on: Option<(&[String], bool)>,
+    managed_max_mib: Option<u64>,
     check: impl Fn(u32, u32) -> Result<(), String>,
 ) -> Result<Vec<BlockRequest>, String> {
     let mut out: Vec<BlockRequest> = Vec::new();
@@ -219,13 +259,55 @@ fn parse_with(
         if !is_volume_id(id) {
             return Err("a block volume id is not 32 hex characters".into());
         }
+        let namespace = match b.get("namespace").and_then(|n| n.as_str()) {
+            None | Some("") => None,
+            Some(n) if crate::lvm::valid_namespace(n) => Some(n.to_string()),
+            Some(n) => return Err(format!("{n:?} is not a namespace name")),
+        };
+        if managed_max_mib.is_some() && namespace.is_none() {
+            return Err("a block volume has no namespace (volume_block_vg is on)".into());
+        }
         let num = |k: &str| {
             b.get(k)
                 .and_then(|n| n.as_u64())
                 .and_then(|n| u32::try_from(n).ok())
         };
-        let (Some(major), Some(minor)) = (num("major"), num("minor")) else {
-            return Err("a block volume has no device numbers".into());
+        // A volume by name has no device numbers: the helper makes the device. A device has no name.
+        let by_name = b.get("volume").filter(|v| !v.is_null());
+        let (major, minor, managed) = if let Some(v) = by_name {
+            let max = managed_max_mib.ok_or("volumes by name are off (volume_block_vg)")?;
+            if b.get("major").is_some() || b.get("minor").is_some() {
+                return Err("a block volume names a volume and a device".into());
+            }
+            let volume = v.as_str().filter(|v| crate::lvm::valid_volume(v));
+            let Some(volume) = volume else {
+                return Err("a block volume's name is not a volume name".into());
+            };
+            let Some(size_mib) = b
+                .get("size_mib")
+                .and_then(|n| n.as_u64())
+                .filter(|n| *n > 0)
+            else {
+                return Err("a block volume by name has no size_mib".into());
+            };
+            if size_mib > max {
+                return Err(format!(
+                    "a block volume of {size_mib} MiB is more than volume_block_max_mib ({max})"
+                ));
+            }
+            (
+                0,
+                0,
+                Some(ManagedVolume {
+                    volume: volume.to_string(),
+                    size_mib,
+                }),
+            )
+        } else {
+            let (Some(major), Some(minor)) = (num("major"), num("minor")) else {
+                return Err("a block volume has no device numbers".into());
+            };
+            (major, minor, None)
         };
         let fs = b.get("fs").and_then(|f| f.as_str()).unwrap_or("ext4");
         if !FS_TYPES.contains(&fs) {
@@ -253,13 +335,27 @@ fn parse_with(
         if out.iter().any(|o| o.id == id) {
             continue;
         }
-        if out.iter().any(|o| o.major == major && o.minor == minor) {
+        if managed.is_none()
+            && out
+                .iter()
+                .any(|o| o.managed.is_none() && o.major == major && o.minor == minor)
+        {
             return Err("two block volumes are the same device".into());
+        }
+        if managed.is_some()
+            && out.iter().any(|o| {
+                o.managed.as_ref().map(|m| &m.volume) == managed.as_ref().map(|m| &m.volume)
+            })
+        {
+            return Err("two block volumes are the same volume".into());
         }
         if out.len() >= MAX_BLOCKS {
             return Err(format!("more than {MAX_BLOCKS} block volumes"));
         }
-        check(major, minor)?;
+        // A device the helper has not made yet is checked when it has (`plug`).
+        if managed.is_none() {
+            check(major, minor)?;
+        }
         out.push(BlockRequest {
             id: id.to_string(),
             major,
@@ -267,6 +363,8 @@ fn parse_with(
             fs: fs.to_string(),
             format,
             owner,
+            namespace,
+            managed,
         });
     }
     Ok(out)
@@ -469,17 +567,83 @@ pub async fn attach(api_socket: &Path, blocks: &[BlockRequest]) -> Result<()> {
         }
         if let Err(e) = plug(s, api_socket, state_dir, &node, b).await {
             let _ = std::fs::remove_file(&node);
-            return Err(e.context(format!("block volume {}:{}", b.major, b.minor)));
+            return Err(e.context(format!("block volume {}", b.id)));
         }
-        info!(
-            "block volume {} ({}:{}) attached to {}",
-            b.id,
-            b.major,
-            b.minor,
-            state_dir.display()
-        );
+        info!("block volume {} attached to {}", b.id, state_dir.display());
     }
     Ok(())
+}
+
+/// Whether the volume `info` (what the helper says of a device) may be given to a pod of `namespace`.
+fn check_owner(
+    info: Option<&crate::lvm::LvInfo>,
+    namespace: &str,
+    allow_untagged: bool,
+) -> Result<(), String> {
+    let Some(i) = info else {
+        return Err("the device is not a logical volume of volume_block_vg".into());
+    };
+    match i.namespaces().as_slice() {
+        [] if allow_untagged => Ok(()),
+        [] => Err(format!(
+            "the logical volume {}/{} has no {} tag (volume_block_allow_untagged is off)",
+            i.vg,
+            i.lv,
+            crate::lvm::NS_TAG_KEY
+        )),
+        [n] if *n == namespace => {
+            if i.has_tag(crate::lvm::READY_TAG) {
+                Ok(())
+            } else {
+                Err(format!("the logical volume {}/{} is not ready", i.vg, i.lv))
+            }
+        }
+        _ => Err(format!(
+            "the logical volume {}/{} belongs to another namespace",
+            i.vg, i.lv
+        )),
+    }
+}
+
+/// The device numbers of a volume to give a pod. A volume by name is made (or found) by the helper, and what it answers is checked again here: the
+/// device-mapper name from sysfs must be exactly the derived one, the tags must be this namespace's and ready. A device is looked up, and its owner tag
+/// checked. Without `volume_block_vg` a device is as it was: the numbers of the request.
+async fn resolve(s: &Settings, b: &BlockRequest) -> Result<(u32, u32)> {
+    let Some(m) = &s.managed else {
+        return Ok((b.major, b.minor));
+    };
+    let namespace = b.namespace.clone().context("the volume has no namespace")?;
+    let client = m.client.clone();
+    if let Some(v) = &b.managed {
+        let (ns, vol, size) = (namespace.clone(), v.volume.clone(), v.size_mib);
+        let got = tokio::task::spawn_blocking(move || client.ensure(&ns, &vol, size))
+            .await
+            .context("the call to the volume helper")??;
+        let lv = crate::lvm::lv_name(&namespace, &v.volume).map_err(|e| anyhow::anyhow!(e))?;
+        let want = crate::lvm::dm_name(&m.vg, &lv).map_err(|e| anyhow::anyhow!(e))?;
+        let (major, minor) = (got.info.major, got.info.minor);
+        if lvm_name_in(Path::new("/sys/dev/block"), major, minor).as_deref() != Some(&want) {
+            anyhow::bail!("the device {major}:{minor} the helper named is not {want}");
+        }
+        check_owner(Some(&got.info), &namespace, false).map_err(|e| anyhow::anyhow!(e))?;
+        if !got.info.has_tag(crate::lvm::READY_TAG) {
+            anyhow::bail!("the helper's volume is not ready");
+        }
+        if got.created || got.extended {
+            info!(
+                "the helper made the volume {want} ({} MiB; created {}, extended {})",
+                got.info.size_mib, got.created, got.extended
+            );
+        }
+        Ok((major, minor))
+    } else {
+        let (major, minor) = (b.major, b.minor);
+        let info = tokio::task::spawn_blocking(move || client.tags(major, minor))
+            .await
+            .context("the call to the volume helper")??;
+        check_owner(info.as_ref(), &namespace, m.allow_untagged).map_err(|e| anyhow::anyhow!(e))?;
+        Ok((major, minor))
+    }
 }
 
 async fn plug(
@@ -489,20 +653,18 @@ async fn plug(
     node: &Path,
     b: &BlockRequest,
 ) -> Result<()> {
-    check_device(s, b.major, b.minor).map_err(|e| anyhow::anyhow!(e))?;
-    take_lock(&s.locks, state_dir, b.major, b.minor)?;
-    make_node(node, b.major, b.minor)?;
+    let (major, minor) = resolve(s, b).await?;
+    check_device(s, major, minor).map_err(|e| anyhow::anyhow!(e))?;
+    take_lock(&s.locks, state_dir, major, minor)?;
+    make_node(node, major, minor)?;
     if b.format {
         if is_blank(node)? {
             format(s, node, b.owner)
                 .await
                 .context("make the file system")?;
-            info!("made an ext4 on the blank device {}:{}", b.major, b.minor);
+            info!("made an ext4 on the blank device {major}:{minor}");
         } else {
-            info!(
-                "the device {}:{} is not blank: no file system made",
-                b.major, b.minor
-            );
+            info!("the device {major}:{minor} is not blank: no file system made");
         }
     }
     // Only now the VM's user owns the node: root made the file system, and the VM could not have opened the node before.
@@ -555,7 +717,7 @@ mod tests {
     #[test]
     fn the_volumes_of_a_request_are_checked_and_one_volume_is_one_device() {
         let two_destinations = json!({"volumes": [vol(ID, 252, 3), vol(ID, 252, 3)]});
-        let got = parse_with(&two_destinations, on(), allow).unwrap();
+        let got = parse_with(&two_destinations, on(), None, allow).unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(
             got[0],
@@ -565,19 +727,26 @@ mod tests {
                 minor: 3,
                 fs: "ext4".into(),
                 format: false,
-                owner: (0, 0)
+                owner: (0, 0),
+                namespace: None,
+                managed: None,
             }
         );
         // A volume without a block is not one of these.
         let none = json!({"volumes": [{"destination": "/x", "source": "/y"}]});
-        assert!(parse_with(&none, None, allow).unwrap().is_empty());
-        assert!(parse_with(&json!({}), None, allow).unwrap().is_empty());
+        assert!(parse_with(&none, None, None, allow).unwrap().is_empty());
+        assert!(parse_with(&json!({}), None, None, allow)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn a_request_the_feature_does_not_allow_is_refused() {
         let r = json!({"volumes": [vol(ID, 252, 3)]});
-        assert!(parse_with(&r, None, allow).is_err(), "the feature is off");
+        assert!(
+            parse_with(&r, None, None, allow).is_err(),
+            "the feature is off"
+        );
         for bad in [
             vol("not-an-id", 252, 3),
             json!({"destination": "/x", "block": {"id": ID, "minor": 3}}),
@@ -587,24 +756,24 @@ mod tests {
             json!({"destination": "/x", "block": {"id": ID, "major": 252, "minor": 3, "format": "always"}}),
         ] {
             let r = json!({"volumes": [bad]});
-            assert!(parse_with(&r, on(), allow).is_err(), "{r}");
+            assert!(parse_with(&r, on(), None, allow).is_err(), "{r}");
         }
         let two = json!({"volumes": [vol(ID, 252, 3), vol(ID2, 252, 3)]});
         assert!(
-            parse_with(&two, on(), allow).is_err(),
+            parse_with(&two, on(), None, allow).is_err(),
             "two names for one device"
         );
         let many: Vec<serde_json::Value> = (0..5u64)
             .map(|i| vol(&format!("{i:032x}"), 252, 10 + i))
             .collect();
-        assert!(parse_with(&json!({ "volumes": many }), on(), allow).is_err());
+        assert!(parse_with(&json!({ "volumes": many }), on(), None, allow).is_err());
     }
 
     #[test]
     fn a_format_is_refused_unless_the_daemon_allows_it() {
         let r = json!({"volumes": [{"destination": "/x", "block": {"id": ID, "major": 252, "minor": 3, "format": "if-blank"}}]});
-        assert!(parse_with(&r, Some((&[], false)), allow).is_err());
-        let got = parse_with(&r, Some((&[], true)), allow).unwrap();
+        assert!(parse_with(&r, Some((&[], false)), None, allow).is_err());
+        let got = parse_with(&r, Some((&[], true)), None, allow).unwrap();
         assert!(got[0].format);
     }
 
@@ -612,7 +781,10 @@ mod tests {
     fn the_device_is_checked_for_every_volume() {
         let r = json!({"volumes": [vol(ID, 8, 0)]});
         let refuse = |_: u32, _: u32| Err("not allowed".to_string());
-        assert_eq!(parse_with(&r, on(), refuse).unwrap_err(), "not allowed");
+        assert_eq!(
+            parse_with(&r, on(), None, refuse).unwrap_err(),
+            "not allowed"
+        );
     }
 
     #[test]
@@ -751,11 +923,14 @@ mod tests {
     fn a_volume_may_name_its_owner_and_a_bad_owner_refuses_the_request() {
         let with = |o: &str| json!({"volumes": [{"destination": "/x", "block": {"id": ID, "major": 252, "minor": 3, "format": "if-blank", "owner": o}}]});
         let formatting: Option<(&[String], bool)> = Some((&[], true));
-        let got = parse_with(&with("999:999"), formatting, allow).unwrap();
+        let got = parse_with(&with("999:999"), formatting, None, allow).unwrap();
         assert_eq!(got[0].owner, (999, 999));
-        assert!(parse_with(&with("postgres"), formatting, allow).is_err());
+        assert!(parse_with(&with("postgres"), formatting, None, allow).is_err());
         let without = json!({"volumes": [vol(ID, 252, 3)]});
-        assert_eq!(parse_with(&without, on(), allow).unwrap()[0].owner, (0, 0));
+        assert_eq!(
+            parse_with(&without, on(), None, allow).unwrap()[0].owner,
+            (0, 0)
+        );
     }
 
     #[test]
@@ -767,6 +942,8 @@ mod tests {
             fs: "ext4".into(),
             format: false,
             owner: (0, 0),
+            namespace: None,
+            managed: None,
         };
         let body = disk_body(
             Path::new("/var/lib/cloudhv/emptydir/vm/pv-0123456789abcdef"),
@@ -781,5 +958,116 @@ mod tests {
         // `disk_direct: false` leaves the host's page cache in between.
         let cached = disk_body(Path::new("/x/pv-0123456789abcdef"), &b, false);
         assert_eq!(cached["direct"], false);
+    }
+
+    // ---- volumes by name, and whose a volume is ----
+
+    fn named(
+        volume: serde_json::Value,
+        size: serde_json::Value,
+        ns: Option<&str>,
+    ) -> serde_json::Value {
+        let mut b = json!({"id": ID, "volume": volume, "size_mib": size, "format": "if-blank", "owner": "999:999"});
+        if let Some(n) = ns {
+            b["namespace"] = json!(n);
+        }
+        json!({"volumes": [{"destination": "/var/lib/postgresql", "block": b}]})
+    }
+
+    #[test]
+    fn a_volume_by_name_needs_the_feature_a_namespace_and_a_size_under_the_cap() {
+        let formatting: Option<(&[String], bool)> = Some((&[], true));
+        let ok = named(json!("data"), json!(8192), Some("p-abc-db"));
+        let got = parse_with(&ok, formatting, Some(10_000), allow).unwrap();
+        assert_eq!(got[0].namespace.as_deref(), Some("p-abc-db"));
+        assert_eq!(
+            got[0].managed,
+            Some(ManagedVolume {
+                volume: "data".into(),
+                size_mib: 8192
+            })
+        );
+        assert_eq!((got[0].major, got[0].minor), (0, 0));
+        // Not allowed at all without volume_block_vg.
+        assert!(parse_with(&ok, formatting, None, allow).is_err());
+        // The device check is not run for a device that does not exist yet.
+        let never = |_: u32, _: u32| -> Result<(), String> { Err("must not be called".into()) };
+        assert!(parse_with(&ok, formatting, Some(10_000), never).is_ok());
+        for bad in [
+            named(json!("data"), json!(8192), None), // no namespace
+            named(json!("data"), json!(8192), Some("P_x")), // not a namespace
+            named(json!("Data"), json!(8192), Some("p-abc-db")), // not a volume name
+            named(json!("../x"), json!(8192), Some("p-abc-db")),
+            named(json!(""), json!(8192), Some("p-abc-db")),
+            named(json!("data"), json!(0), Some("p-abc-db")), // no size
+            named(json!("data"), json!("8192"), Some("p-abc-db")), // a string
+            named(json!("data"), json!(10_001), Some("p-abc-db")), // over the cap
+            named(json!("data"), json!(-5), Some("p-abc-db")),
+        ] {
+            assert!(
+                parse_with(&bad, formatting, Some(10_000), allow).is_err(),
+                "{bad}"
+            );
+        }
+        // A volume by name with device numbers is both, and neither.
+        let mut both = named(json!("data"), json!(8192), Some("p-abc-db"));
+        both["volumes"][0]["block"]["major"] = json!(252);
+        assert!(parse_with(&both, formatting, Some(10_000), allow).is_err());
+        // Two volumes of one name are one volume, asked for twice with two ids.
+        let mut two = named(json!("data"), json!(8192), Some("p-abc-db"));
+        let mut second = two["volumes"][0].clone();
+        second["block"]["id"] = json!(ID2);
+        two["volumes"].as_array_mut().unwrap().push(second);
+        assert!(parse_with(&two, formatting, Some(10_000), allow).is_err());
+    }
+
+    #[test]
+    fn a_device_needs_a_namespace_when_whose_it_is_is_checked() {
+        let r = json!({"volumes": [vol(ID, 252, 3)]});
+        assert!(parse_with(&r, on(), Some(10_000), allow).is_err());
+        let mut r = r;
+        r["volumes"][0]["block"]["namespace"] = json!("p-abc-db");
+        let got = parse_with(&r, on(), Some(10_000), allow).unwrap();
+        assert_eq!(got[0].namespace.as_deref(), Some("p-abc-db"));
+        r["volumes"][0]["block"]["namespace"] = json!("P-abc");
+        assert!(parse_with(&r, on(), Some(10_000), allow).is_err());
+    }
+
+    fn lv(tags: &[&str]) -> crate::lvm::LvInfo {
+        crate::lvm::LvInfo {
+            vg: "vg".into(),
+            lv: "pv-p-abc-db_data".into(),
+            size_mib: 100,
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            major: 252,
+            minor: 3,
+        }
+    }
+
+    #[test]
+    fn a_volume_goes_only_to_the_namespace_its_tag_names_and_only_when_ready() {
+        let ready = lv(&["cloudhv-ns=p-abc-db", "cloudhv-ready"]);
+        assert!(check_owner(Some(&ready), "p-abc-db", false).is_ok());
+        let e = check_owner(Some(&ready), "p-zzz-db", false).unwrap_err();
+        assert!(e.contains("another namespace"), "{e}");
+        assert!(
+            check_owner(Some(&ready), "p-zzz-db", true).is_err(),
+            "untagged allowed does not allow another's"
+        );
+        // Not finished.
+        assert!(check_owner(Some(&lv(&["cloudhv-ns=p-abc-db"])), "p-abc-db", false).is_err());
+        // Two owners.
+        let two = lv(&[
+            "cloudhv-ns=p-abc-db",
+            "cloudhv-ns=p-zzz-db",
+            "cloudhv-ready",
+        ]);
+        assert!(check_owner(Some(&two), "p-abc-db", false).is_err());
+        // No tag: only when it is allowed.
+        let bare = lv(&[]);
+        assert!(check_owner(Some(&bare), "p-abc-db", false).is_err());
+        assert!(check_owner(Some(&bare), "p-abc-db", true).is_ok());
+        // Not a volume of the group.
+        assert!(check_owner(None, "p-abc-db", true).is_err());
     }
 }

@@ -200,6 +200,61 @@ WantedBy=multi-user.target
 UNIT
 mv -f "$HOST/etc/systemd/system/cloudhv-sandbox-daemon.service.new" "$HOST/etc/systemd/system/cloudhv-sandbox-daemon.service"
 
+# The volume helper (docs/sandbox-daemon.md, "Persistent block volumes"): LVM for volumes asked for by name. The unit is installed and NOT enabled: a host
+# whose daemon.json has volume_block_vg enables it (systemctl enable --now cloudhv-volume-helper). The daemon never runs LVM itself.
+cat > "$HOST/etc/systemd/system/cloudhv-volume-helper.service.new" << 'HELPERUNIT'
+[Unit]
+Description=CloudHV volume helper (LVM for the daemon's persistent block volumes)
+Documentation=https://github.com/KoedoDB/cchv/blob/main/docs/sandbox-daemon.md
+# Not enabled by default: it is for a host whose daemon.json has volume_block_vg (volumes by name). The daemon itself never runs LVM.
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cloudhv-sandbox-daemon --volume-helper /opt/cloudhv/daemon.json
+Restart=always
+RestartSec=5
+Environment=RUST_LOG=info
+MemoryMax=256M
+TasksMax=64
+
+# What it does: lvs, lvcreate, lvchange, lvextend and blkdiscard, on the volume group of daemon.json, for requests on a Unix socket (0600, root's) in /run/cloudhv.
+# CAP_SYS_ADMIN: the device-mapper ioctls. CAP_MKNOD: a node for a volume that udev has not made (to zero it). Nothing else: no network, no cgroups, no processes of others.
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_MKNOD
+ProtectSystem=strict
+# /etc/lvm: LVM keeps a backup and an archive of every change of the volume group's metadata there. /run/lvm and /run/lock/lvm: its locks and caches.
+ReadWritePaths=/run/cloudhv /etc/lvm /run/lvm /run/lock/lvm
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+# AF_NETLINK: libudev (lvm waits for udev to make the nodes).
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+DevicePolicy=closed
+DeviceAllow=/dev/mapper/control rw
+DeviceAllow=block-device-mapper rwm
+# The disks the volume group is made of (add the kind of yours if it is not here).
+DeviceAllow=block-sd rwm
+DeviceAllow=block-nvme rwm
+DeviceAllow=block-virtblk rwm
+DeviceAllow=block-md rwm
+# /run/cloudhv is the daemon's too (the same settings as its unit): the socket is in it.
+RuntimeDirectory=cloudhv
+RuntimeDirectoryMode=0711
+RuntimeDirectoryPreserve=yes
+
+[Install]
+WantedBy=multi-user.target
+HELPERUNIT
+mv -f "$HOST/etc/systemd/system/cloudhv-volume-helper.service.new" "$HOST/etc/systemd/system/cloudhv-volume-helper.service"
+
 host systemctl daemon-reload
 host systemctl enable cloudhv-sandbox-daemon
 

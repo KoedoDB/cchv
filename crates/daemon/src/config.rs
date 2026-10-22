@@ -132,6 +132,23 @@ pub struct DaemonConfig {
     /// platform makes the file system before the pod starts.
     #[serde(default)]
     pub volume_block_format_if_blank: bool,
+    /// Volumes the platform does not make by hand but asks for by name (`lvm.rs`): the volume group the daemon's helper (`cloudhv-volume-helper`) makes their
+    /// logical volumes in. Empty (the default): that is off, and only a device given as `volumeDevices` is accepted, as before.
+    #[serde(default)]
+    pub volume_block_vg: String,
+    /// The most a volume made or extended by name may be, in MiB. 0 (the default): none may be made.
+    #[serde(default)]
+    pub volume_block_max_mib: u64,
+    /// With `volume_block_vg`, a device given as `volumeDevices` must carry the tag of the pod's namespace (`cloudhv-ns=<namespace>`), or the pod is refused.
+    /// True lets through a logical volume that has no `cloudhv-ns=` tag (one made by hand, before the tags): a volume of another namespace is refused either way.
+    #[serde(default)]
+    pub volume_block_allow_untagged: bool,
+    /// The Unix socket of the volume helper.
+    #[serde(default = "default_volume_helper_socket")]
+    pub volume_helper_socket: String,
+    /// Where `lvs`, `lvcreate`, `lvchange`, `lvextend` and `blkdiscard` are, for the helper.
+    #[serde(default = "default_lvm_bin_dir")]
+    pub lvm_bin_dir: String,
 
     /// Whether the disks hot-plugged into a VM (the disk-backed emptyDirs and the persistent block volumes) are opened with O_DIRECT. On (the default): the guest has its own
     /// page cache, and the host does not cache every block a second time (that was charged to the pod's cgroup: 320 MB for a database pod of 1 GiB); the guest's `fsync`
@@ -236,6 +253,12 @@ fn default_emptydir_max_mib() -> u64 {
 }
 fn default_emptydir_reserve_mib() -> u64 {
     2048
+}
+fn default_volume_helper_socket() -> String {
+    "/run/cloudhv/volume-helper.sock".to_string()
+}
+fn default_lvm_bin_dir() -> String {
+    "/usr/sbin".to_string()
 }
 fn default_mke2fs_path() -> String {
     "/usr/sbin/mke2fs".to_string()

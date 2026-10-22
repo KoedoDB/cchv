@@ -16,6 +16,7 @@ mod exec;
 mod fsutil;
 mod imagekey;
 mod liveness;
+mod lvm;
 mod netns;
 mod pool;
 mod rootless;
@@ -38,6 +39,15 @@ fn main() -> Result<()> {
     // The launcher of a confined Cloud Hypervisor is this same binary: it must not start a runtime (it forks and unshares).
     if std::env::args().nth(1).as_deref() == Some("--ch-launcher") {
         confine::launcher_main();
+    }
+    // The volume helper (lvm.rs) is this same binary in a unit of its own: it runs LVM for the daemon, which does not.
+    if std::env::args().nth(1).as_deref() == Some("--volume-helper") {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+        let path = std::env::args()
+            .nth(2)
+            .unwrap_or_else(|| "/opt/cloudhv/daemon.json".to_string());
+        let config = config::DaemonConfig::load(&PathBuf::from(path))?;
+        return lvm::run_helper(&config);
     }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

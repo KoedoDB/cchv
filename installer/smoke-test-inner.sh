@@ -59,6 +59,7 @@ check "runtime handler registered once" '[ "$(grep -c "runtimes.cloudhv" /etc/co
 check "runc handler kept" 'grep -q "runtimes.runc" /etc/containerd/config.toml'
 check "containerd's config backed up" 'ls /etc/containerd/config.toml.bak.* >/dev/null 2>&1'
 check "unit has the hardening" 'grep -q "^CapabilityBoundingSet=" /etc/systemd/system/cloudhv-sandbox-daemon.service && grep -q "^NoNewPrivileges=yes" /etc/systemd/system/cloudhv-sandbox-daemon.service'
+check "the volume helper's unit is installed, with its hardening, and is not enabled" 'grep -q "^CapabilityBoundingSet=CAP_SYS_ADMIN CAP_MKNOD$" /etc/systemd/system/cloudhv-volume-helper.service && grep -q "^ExecStart=/usr/local/bin/cloudhv-sandbox-daemon --volume-helper " /etc/systemd/system/cloudhv-volume-helper.service && ! grep -q "cloudhv-volume-helper" /calls'
 check "console argument filled in" 'grep -Eq "console=(hvc0|ttyAMA0)" /opt/cloudhv/daemon.json && ! grep -q "KERNEL_CONSOLE" /opt/cloudhv/daemon.json'
 check "containerd restart scheduled (config changed)" 'grep "^systemd-run" /calls | grep -q "restart containerd"'
 check "daemon stopped before the copy" 'grep -q "^systemctl stop cloudhv-sandbox-daemon" /calls'
