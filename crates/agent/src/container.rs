@@ -6,6 +6,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::cgdelegate;
 use anyhow::{Context, Result};
 use log::{error, info, warn};
 use tokio::process::Command;
@@ -1218,6 +1219,13 @@ async fn prepare_inner(
 
     // The spec crun gets: rebuilt from an allowlist (see spec.rs).
     let mut clean = spec::sanitize_spec(&spec_value, container_id, mounts)?;
+    // A container the Pod's annotation names gets a cgroup subtree of its own to subdivide (cgdelegate.rs). The daemon has refused the
+    // annotation unless its configuration allows it; the name must match this container, so that no other container of the Pod is given it.
+    if cgdelegate::requested(&spec_value) {
+        let (uid, gid) = cgdelegate::identity(&clean);
+        cgdelegate::prepare(container_id, uid, gid).context("delegate a cgroup")?;
+        cgdelegate::apply(&mut clean);
+    }
     // Whether the process has a terminal is what the task was created with, not what the JSON says (as for an exec): crun needs
     // `--console-socket` exactly when it is true.
     if let Some(p) = clean.get_mut("process").and_then(|p| p.as_object_mut()) {

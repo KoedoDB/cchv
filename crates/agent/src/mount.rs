@@ -4,6 +4,8 @@ use anyhow::Result;
 #[cfg(target_os = "linux")]
 use log::debug;
 use log::info;
+#[cfg(target_os = "linux")]
+use log::warn;
 
 /// Mount essential filesystems for a minimal init environment.
 ///
@@ -74,12 +76,28 @@ pub fn mount_essential_filesystems() -> Result<()> {
     )?;
 
     std::fs::create_dir_all("/sys/fs/cgroup").ok();
-    mount_if_needed(
+    // `nsdelegate` makes a cgroup namespace's root a delegation boundary (a container with a delegated cgroup, see cgdelegate.rs). It is
+    // a property of the file system and can only be set here, in the first mount; a kernel that does not know it gets the plain mount.
+    let cgroup_flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC;
+    if mount_with_data(
         "cgroup2",
         "/sys/fs/cgroup",
         "cgroup2",
-        MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
-    )?;
+        cgroup_flags,
+        Some("nsdelegate"),
+    )
+    .is_err()
+    {
+        warn!("cgroup2 without nsdelegate");
+        mount_if_needed("cgroup2", "/sys/fs/cgroup", "cgroup2", cgroup_flags)?;
+    }
+    // The controllers a delegated cgroup hands on to its children. Without them at the root no cgroup has their files.
+    if let Err(e) = std::fs::write(
+        "/sys/fs/cgroup/cgroup.subtree_control",
+        "+cpu +memory +pids",
+    ) {
+        warn!("could not enable cpu, memory and pids for child cgroups: {e}");
+    }
 
     info!("essential filesystems mounted");
     Ok(())

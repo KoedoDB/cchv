@@ -229,6 +229,11 @@ pub struct DaemonConfig {
     #[serde(default)]
     pub vm_balloon: bool,
 
+    /// Let a Pod ask (annotation `cloudhv.koedodb.com/cgroup-delegate`) for a container that can make child cgroups and limit the processes
+    /// it starts, inside its own subtree of the guest's cgroups. Off by default: a request that carries the annotation is refused.
+    #[serde(default)]
+    pub allow_cgroup_delegate: bool,
+
     /// Limit a VM's CPU time to its vCPUs plus one (`cpu.max`). Off by default: a pod's own limits already size the VM.
     #[serde(default)]
     pub ch_cpu_limit: bool,

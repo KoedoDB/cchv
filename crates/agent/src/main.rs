@@ -14,6 +14,7 @@ mod proto {
     pub mod agent_ttrpc;
 }
 
+mod cgdelegate;
 mod container;
 mod disks;
 mod exec;

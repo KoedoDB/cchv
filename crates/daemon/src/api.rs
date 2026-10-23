@@ -352,6 +352,9 @@ async fn handle_acquire(
     let erofs_path = field(request, "erofs_path");
     let container_id = field(request, "container_id");
     let config_json_b64 = field(request, "config_json");
+    if let Err(e) = validate::check_cgroup_delegate(config, config_json_b64) {
+        return error("bad request (cgroup delegate)", format!("{e:#}"));
+    }
 
     // Everything that becomes a path, a name or a size is checked before anything is made.
     if !netns.is_empty() {
@@ -886,6 +889,9 @@ async fn handle_add_container(
         return error("bad request (erofs_path)", format!("{e:#}"));
     }
     let config_json_b64 = field(request, "config_json");
+    if let Err(e) = validate::check_cgroup_delegate(config, config_json_b64) {
+        return error("bad request (cgroup delegate)", format!("{e:#}"));
+    }
     let volumes = volumes_from_request(request);
     let disks = match crate::emptydir::parse(request) {
         Ok(d) => d,

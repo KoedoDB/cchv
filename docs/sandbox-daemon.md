@@ -845,6 +845,7 @@ The daemon is root and its socket is the one door:
 | `lvm_bin_dir` | `/usr/sbin` | where the helper finds `lvs`, `lvcreate`, `lvchange`, `lvextend` and `blkdiscard` |
 | `disk_direct` | `true` | open the hot-plugged disks (emptyDirs on disk, persistent volumes) with O_DIRECT: the guest has its own page cache and the host does not cache every block a second time (about 260 MiB less charged to a database Pod of 1 GiB, no loss of write speed in our test) |
 | `vm_balloon` | `false` | give each VM a balloon with free page reporting, so its resident memory follows what the guest uses |
+| `allow_cgroup_delegate` | `false` | accept the Pod annotation `cloudhv.koedodb.com/cgroup-delegate` (a container with a cgroup subtree of its own to subdivide); with `false` a request carrying it is refused |
 | `erofs_cache_dir` | `/run/cloudhv/erofs-cache` | where the shim keeps the images; must be the shim's `EROFS_CACHE_DIR` |
 | `emptydir_dir` | `/var/lib/cloudhv/emptydir` | where the disks of emptyDirs are made (the host's disk, not `/run`); empty turns them off and a request for one is refused. See "emptyDir disks" |
 | `emptydir_max_mib`, `emptydir_reserve_mib` | `16384`, `2048` | the largest disk a request may ask for; a disk is refused when the free space of `emptydir_dir` is below `size/4 + reserve` |
@@ -1006,3 +1007,56 @@ cloudhv.koedodb.com/block-volumes: '[{"volume":"data","size_mib":2048,"mount":"/
   and a volume that is not allowed, are refused; `kill -9` of the Cloud Hypervisor under `pgbench`, several times, with no broken invariant (`pg_amcheck` clean); a full disk gives
   `ERROR`, not `PANIC`; and after a hard reset of the host in the middle of writes every acknowledged insert was there (a software reset: it does not show what the drive's
   cache does in a power cut).
+
+## A delegated cgroup subtree for a container (`cgdelegate.rs` in the agent)
+
+For a container that starts other processes and has to limit them itself (a supervisor that runs several programs of different owners in
+one VM). Not a privileged mode: the container gets a cgroup v2 subtree of its own, can make child cgroups in it and write `memory.max`,
+`cpu.max` and `pids.max` of the children, and nothing else changes.
+
+**Asking.** Pod annotation `cloudhv.koedodb.com/cgroup-delegate: "spawner"`, a comma-separated list of **container names**. containerd gives a
+Pod's annotations to every container, so the guest compares the list with the container's own `io.kubernetes.cri.container-name`
+(containerd sets that one; a Pod cannot). A container not named gets nothing; so does one with no name (a client that is not Kubernetes).
+The handler's `pod_annotations` (`cloudhv.koedodb.com/*`) already lets the annotation through. **The daemon refuses** an AcquireSandbox or
+AddContainer request that carries the annotation unless `allow_cgroup_delegate` is `true` (default `false`).
+
+**What the guest does** (before `crun run`, for the named container):
+
+1. Controllers `cpu`, `memory` and `pids` are enabled at the cgroup root at boot (`cgroup.subtree_control`), and cgroup2 is mounted with
+   `nsdelegate`. The agent makes `/sys/fs/cgroup/<container id>`: the cgroup crun then uses (the limits of the Pod and the device rules
+   are written to it by crun, as root).
+2. Owners: the directory and `cgroup.procs`, `cgroup.threads`, `cgroup.subtree_control` go to the container's uid/gid (`process.user`).
+   **Every other file** of the cgroup (`memory.max`, `memory.high`, `memory.swap.max`, `cpu.max`, `pids.max`, `cgroup.kill`, `cgroup.freeze`,
+   `cgroup.type`, ...) goes to `nobody` (65534), also when the container is root: root is the owner of root-owned files, so they must not stay root's.
+3. The container gets a cgroup namespace (its root is the delegated cgroup) and a read-write cgroup2 mount at `/sys/fs/cgroup` that
+   shows only that subtree.
+4. `CAP_CHOWN`, `CAP_DAC_OVERRIDE` and `CAP_FOWNER` are removed from all its capability sets, even if the Pod asks for them. No capability is added.
+
+**What the container must do.** Its first process starts in the delegated cgroup itself. The kernel does not let a cgroup that holds
+processes pass controllers on, so the entrypoint first moves into a leaf (`mkdir leaf; echo $$ > leaf/cgroup.procs`), then writes
+`+cpu +memory +pids` to `cgroup.subtree_control`, then makes one child per program it starts, sets the limits and puts the child in
+(the process, or `CLONE_INTO_CGROUP`). Without `CAP_CHOWN` it cannot `chown` files for another user: make them as that user (`setfsuid`) instead.
+
+### Security properties, and what is not guaranteed
+
+Meant to hold (by the kernel's rules for delegation plus the steps above):
+
+- The container cannot write the limits of its own cgroup (not the owner, no `CAP_DAC_OVERRIDE`/`CAP_FOWNER`/`CAP_CHOWN`); it cannot enable a
+  controller the parent did not enable for it, and a child's `memory.max` above the parent's is still cut by the parent's limit.
+- It cannot see or name a cgroup above or beside its own: not another container's, not the root. Moving a process out is not possible (no
+  write access to a `cgroup.procs` of an ancestor; with `nsdelegate` the kernel also refuses to move across the namespace root).
+- It cannot remount cgroupfs (no `CAP_SYS_ADMIN`; in the guest this is not in the allowed capabilities anyway), and no other container
+  of the Pod gets any of this: delegation is by name, off by default, refused by the daemon when not allowed.
+- Without `nsdelegate` (a kernel that does not know it: the agent then logs "cgroup2 without nsdelegate") the owners, the cgroup
+  namespace and the missing capabilities still hold; the kernel's own check at the namespace boundary is missing.
+
+Not guaranteed: the container is not confined by this for **memory it does not put in a cgroup**, nor for CPU used by the kernel on its behalf. A
+child cgroup limits the processes in it. The Pod's own limits (the VM's size) are what bounds the delegated cgroup as a whole.
+A container that is root in the VM can still do whatever the guest's other restrictions (seccomp, capabilities, `no_new_privs`) allow.
+
+**Not verified in a real VM** (the unit tests use a temporary directory as the cgroup root, and the adversarial cases below were
+written down, not run): that crun accepts a cgroup directory that already exists; that the owners above survive crun's own writes; that a
+cgroup2 mount made by crun inside the cgroup namespace shows the subtree and is writable; the cases that must fail from inside the container:
+write the delegated cgroup's `memory.max`, `cpu.max` or `pids.max`; write `../cgroup.procs`; `mkdir ../x`; move a pid to another cgroup;
+enable a controller the parent has not enabled; make a child with a `memory.max` above the parent's and see it capped; remount cgroupfs.
+Manual steps: a Pod with the annotation and a container that runs these as root, on a host with `allow_cgroup_delegate: true`.

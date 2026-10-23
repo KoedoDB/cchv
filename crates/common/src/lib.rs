@@ -3,6 +3,10 @@ pub mod error;
 pub mod netlink;
 pub mod types;
 
+/// The Pod annotation that asks for a delegated cgroup subtree: a comma-separated list of container names (`io.kubernetes.cri.container-name`).
+/// The daemon refuses it unless `allow_cgroup_delegate` is on; the guest agent acts on it. See docs/sandbox-daemon.md.
+pub const CGROUP_DELEGATE_ANNOTATION: &str = "cloudhv.koedodb.com/cgroup-delegate";
+
 /// Default vsock port for the guest agent ttrpc server.
 pub const AGENT_VSOCK_PORT: u32 = 10789;
 

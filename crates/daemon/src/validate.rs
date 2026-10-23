@@ -28,6 +28,33 @@ pub fn check_id(what: &str, s: &str) -> Result<()> {
     }
 }
 
+/// The annotation that asks for a delegated cgroup subtree is refused unless the configuration allows it. The OCI spec is the one the
+/// shim read from the bundle (base64 in the request); a spec that cannot be read has no annotation to act on, and the guest agent
+/// would not find one either.
+pub fn check_cgroup_delegate(config: &DaemonConfig, config_json_b64: &str) -> Result<()> {
+    use base64::Engine;
+    if config.allow_cgroup_delegate || config_json_b64.is_empty() {
+        return Ok(());
+    }
+    let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(config_json_b64) else {
+        return Ok(());
+    };
+    let Ok(spec) = serde_json::from_slice::<serde_json::Value>(&raw) else {
+        return Ok(());
+    };
+    if spec
+        .pointer("/annotations")
+        .and_then(|a| a.get(cloudhv_common::CGROUP_DELEGATE_ANNOTATION))
+        .is_some()
+    {
+        anyhow::bail!(
+            "the annotation {} needs allow_cgroup_delegate in the daemon's configuration",
+            cloudhv_common::CGROUP_DELEGATE_ANNOTATION
+        );
+    }
+    Ok(())
+}
+
 /// A requested size: within the limits of the configuration, and one whose byte count fits. 0 means "the default".
 pub fn check_size(config: &DaemonConfig, memory_mb: u64, vcpus: u64) -> Result<()> {
     if memory_mb > config.max_memory_mb {
@@ -394,6 +421,33 @@ mod tests {
 
     fn config() -> DaemonConfig {
         serde_json::from_str(r#"{"kernel_path":"/k","rootfs_path":"/r"}"#).unwrap()
+    }
+
+    fn spec_b64(annotations: serde_json::Value) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .encode(json!({"annotations": annotations}).to_string())
+    }
+
+    #[test]
+    fn the_cgroup_delegate_annotation_is_refused_unless_allowed() {
+        let off = config();
+        let mut on = config();
+        on.allow_cgroup_delegate = true;
+        let asked = spec_b64(json!({"cloudhv.koedodb.com/cgroup-delegate": "spawner"}));
+        assert!(check_cgroup_delegate(&off, &asked).is_err());
+        assert!(check_cgroup_delegate(&on, &asked).is_ok());
+        // An empty value is still a request.
+        let empty = spec_b64(json!({"cloudhv.koedodb.com/cgroup-delegate": ""}));
+        assert!(check_cgroup_delegate(&off, &empty).is_err());
+        for fine in [
+            spec_b64(json!({"other": "x"})),
+            spec_b64(json!({})),
+            String::new(),
+        ] {
+            assert!(check_cgroup_delegate(&off, &fine).is_ok());
+        }
+        assert!(!config().allow_cgroup_delegate, "off by default");
     }
 
     #[test]
