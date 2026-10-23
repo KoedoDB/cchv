@@ -6,5 +6,5 @@
 # Needs docker. Usage: bash installer/smoke-test.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
-IMAGE="debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587"
+IMAGE="debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad"
 docker run --rm -v "$PWD/installer:/installer:ro" "$IMAGE" bash /installer/smoke-test-inner.sh

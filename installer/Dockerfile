@@ -9,7 +9,7 @@
 # update a digest: docker buildx imagetools inspect <image:tag>
 
 # --- Stage 1: Build Cloud Hypervisor from source ---
-FROM rust:1.89-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff AS ch-builder
+FROM rust:1.89-trixie@sha256:57407b378b2b6e07b48a6135a20c87cc22ea6e249c0acf6cb1833ead3cf116e9 AS ch-builder
 
 ARG TARGETARCH
 ARG CH_REPO=https://github.com/cloud-hypervisor/cloud-hypervisor.git
@@ -39,7 +39,7 @@ RUN git checkout ${CH_COMMIT} && \
     chmod 755 /opt/cloud-hypervisor
 
 # --- Stage 2: Installer image ---
-FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates && \
