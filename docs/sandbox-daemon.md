@@ -1020,43 +1020,56 @@ Pod's annotations to every container, so the guest compares the list with the co
 The handler's `pod_annotations` (`cloudhv.koedodb.com/*`) already lets the annotation through. **The daemon refuses** an AcquireSandbox or
 AddContainer request that carries the annotation unless `allow_cgroup_delegate` is `true` (default `false`).
 
-**What the guest does** (before `crun run`, for the named container):
+**What the guest does** (before `crun run`, for the named container). Two cgroups are made:
 
-1. Controllers `cpu`, `memory` and `pids` are enabled at the cgroup root at boot (`cgroup.subtree_control`), and cgroup2 is mounted with
-   `nsdelegate`. The agent makes `/sys/fs/cgroup/<container id>`: the cgroup crun then uses (the limits of the Pod and the device rules
-   are written to it by crun, as root).
-2. Owners: the directory and `cgroup.procs`, `cgroup.threads`, `cgroup.subtree_control` go to the container's uid/gid (`process.user`).
-   **Every other file** of the cgroup (`memory.max`, `memory.high`, `memory.swap.max`, `cpu.max`, `pids.max`, `cgroup.kill`, `cgroup.freeze`,
-   `cgroup.type`, ...) goes to `nobody` (65534), also when the container is root: root is the owner of root-owned files, so they must not stay root's.
-3. The container gets a cgroup namespace (its root is the delegated cgroup) and a read-write cgroup2 mount at `/sys/fs/cgroup` that
-   shows only that subtree.
-4. `CAP_CHOWN`, `CAP_DAC_OVERRIDE` and `CAP_FOWNER` are removed from all its capability sets, even if the Pod asks for them. No capability is added.
+```text
+/sys/fs/cgroup/<container id>     the parent: the Pod's limits; every file root's; the container cannot see, name or write it
+/sys/fs/cgroup/<container id>/d   the delegated child: no limits; the container's cgroup namespace root, where its process starts
+```
 
-**What the container must do.** Its first process starts in the delegated cgroup itself. The kernel does not let a cgroup that holds
+1. Controllers `cpu`, `memory` and `pids` are enabled at the cgroup root at boot, and cgroup2 is mounted with `nsdelegate`.
+2. The agent writes the Pod's limits (`memory.max`, `cpu.max`, `cpu.weight`, `pids.max`) to the **parent**, enables the controllers in the
+   parent's `cgroup.subtree_control`, and removes the limits from the spec it gives crun. crun puts the container in `<id>/d`
+   (`cgroupsPath`) and applies only the device rules (to `d`; they are inherited downward only). The kernel enforces the limit of
+   every ancestor on all its descendants, so whatever the container writes in `d` or below can lower what it may use and never raise it above the parent's.
+3. Owners in `d`: the directory and `cgroup.procs`, `cgroup.threads`, `cgroup.subtree_control` go to the container's uid/gid
+   (`process.user`); every other file of `d` goes to `nobody` (65534). The parent's files stay root's and are never changed.
+4. The container gets a cgroup namespace (its root is `d`) and a read-write cgroup2 mount at `/sys/fs/cgroup` that shows only `d`.
+5. `CAP_CHOWN`, `CAP_DAC_OVERRIDE` and `CAP_FOWNER` are removed from all its capability sets, even if the Pod asks for them. No capability is
+   added. `CAP_SETUID`/`CAP_SETGID` may stay: the limits do not depend on the container not having them.
+6. When the container is deleted the agent removes the parent too (crun removes `d`).
+
+**What the container must do.** Its first process starts in `d` itself. The kernel does not let a cgroup that holds
 processes pass controllers on, so the entrypoint first moves into a leaf (`mkdir leaf; echo $$ > leaf/cgroup.procs`), then writes
 `+cpu +memory +pids` to `cgroup.subtree_control`, then makes one child per program it starts, sets the limits and puts the child in
 (the process, or `CLONE_INTO_CGROUP`). Without `CAP_CHOWN` it cannot `chown` files for another user: make them as that user (`setfsuid`) instead.
 
 ### Security properties, and what is not guaranteed
 
-Meant to hold (by the kernel's rules for delegation plus the steps above):
+The property that matters: **the limits are on an ancestor of the container's cgroup namespace root that the container can neither see nor write.**
+It does not rest on file owners: a root container with `CAP_SETUID` can become `nobody` or any uid, and so can write any file that is
+owned by that uid and visible to it. In `d` that gives it nothing beyond lowering its own limits, because `d` has none of the platform's.
 
-- The container cannot write the limits of its own cgroup (not the owner, no `CAP_DAC_OVERRIDE`/`CAP_FOWNER`/`CAP_CHOWN`); it cannot enable a
-  controller the parent did not enable for it, and a child's `memory.max` above the parent's is still cut by the parent's limit.
-- It cannot see or name a cgroup above or beside its own: not another container's, not the root. Moving a process out is not possible (no
-  write access to a `cgroup.procs` of an ancestor; with `nsdelegate` the kernel also refuses to move across the namespace root).
-- It cannot remount cgroupfs (no `CAP_SYS_ADMIN`; in the guest this is not in the allowed capabilities anyway), and no other container
-  of the Pod gets any of this: delegation is by name, off by default, refused by the daemon when not allowed.
-- Without `nsdelegate` (a kernel that does not know it: the agent then logs "cgroup2 without nsdelegate") the owners, the cgroup
-  namespace and the missing capabilities still hold; the kernel's own check at the namespace boundary is missing.
+- A child with a `memory.max`, `cpu.max` or `pids.max` above the parent's is still capped by the parent (kernel behaviour).
+- The container cannot see or name a cgroup above or beside `d`: not the parent, not another container's, not the root. Moving a process
+  out is not possible (it has no path to any `cgroup.procs` outside; with `nsdelegate` the kernel also refuses to move across the namespace root).
+- It cannot enable a controller that the parent did not enable for `d`, and cannot remount cgroupfs (no `CAP_SYS_ADMIN`, which is not in the
+  guest's allowed capabilities anyway). No other container of the Pod gets any of this: delegation is by name, off by default, refused by the daemon when not allowed.
+- Without `nsdelegate` (a kernel that does not know it: the agent logs "cgroup2 without nsdelegate") the layout, the cgroup namespace and the
+  owners still hold; the kernel's own check at the namespace boundary is missing.
 
-Not guaranteed: the container is not confined by this for **memory it does not put in a cgroup**, nor for CPU used by the kernel on its behalf. A
-child cgroup limits the processes in it. The Pod's own limits (the VM's size) are what bounds the delegated cgroup as a whole.
-A container that is root in the VM can still do whatever the guest's other restrictions (seccomp, capabilities, `no_new_privs`) allow.
+Not guaranteed: memory the container does not put in a cgroup, or CPU the kernel uses on its behalf, is not limited by a child cgroup; the
+limit of the parent (the Pod's, the VM's size) is what bounds it as a whole. The delegated cgroup itself has no limit of its own, so one customer's
+process can use all of the Pod's share unless the supervisor limits it in a child. A container that is root in the VM can still do whatever the
+guest's other restrictions (seccomp, capabilities, `no_new_privs`) allow.
 
-**Not verified in a real VM** (the unit tests use a temporary directory as the cgroup root, and the adversarial cases below were
-written down, not run): that crun accepts a cgroup directory that already exists; that the owners above survive crun's own writes; that a
-cgroup2 mount made by crun inside the cgroup namespace shows the subtree and is writable; the cases that must fail from inside the container:
-write the delegated cgroup's `memory.max`, `cpu.max` or `pids.max`; write `../cgroup.procs`; `mkdir ../x`; move a pid to another cgroup;
-enable a controller the parent has not enabled; make a child with a `memory.max` above the parent's and see it capped; remount cgroupfs.
+**Not verified in a real VM** (the unit tests use a temporary directory as the cgroup root; the adversarial cases below were written down, not run):
+that crun accepts a cgroup directory that already exists and runs the container in `<id>/d`; that the cgroup2 mount made by crun inside the
+cgroup namespace shows `d` and is writable; that crun removes `d` and everything below it on delete. Cases that must **fail or be capped** from inside the container:
+
+- as root with `CAP_SETUID`, `setuid(65534)`, then write every file you can see: `memory.max`, `cpu.max`, `pids.max` of `d` change nothing the platform set (the real limits are above); `../cgroup.procs`, `../memory.max` do not exist;
+- `mkdir ../x`, move a pid to another cgroup, remount cgroupfs, enable a controller that was not given: all fail;
+- a child with `memory.max` above the Pod's limit: run `stress` in it and see the processes killed at the Pod's limit, not at the child's; the same for `pids.max` (fork bomb) and `cpu.max`;
+- a root container without the three capabilities cannot `chmod` or `chown` any cgroup file.
+
 Manual steps: a Pod with the annotation and a container that runs these as root, on a host with `allow_cgroup_delegate: true`.

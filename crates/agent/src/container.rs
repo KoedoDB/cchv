@@ -767,6 +767,9 @@ impl ContainerManager {
             ),
         }
 
+        // A delegated container has a parent cgroup of its own (cgdelegate.rs), which crun does not know about.
+        cgdelegate::remove_parent(container_id);
+
         let removed = self.containers.remove(container_id);
         let (pid, exit_code) = match &removed {
             Some(c) => (c.pid.unwrap_or(0), c.exit_code.unwrap_or(0)),
@@ -1222,8 +1225,7 @@ async fn prepare_inner(
     // A container the Pod's annotation names gets a cgroup subtree of its own to subdivide (cgdelegate.rs). The daemon has refused the
     // annotation unless its configuration allows it; the name must match this container, so that no other container of the Pod is given it.
     if cgdelegate::requested(&spec_value) {
-        let (uid, gid) = cgdelegate::identity(&clean);
-        cgdelegate::prepare(container_id, uid, gid).context("delegate a cgroup")?;
+        cgdelegate::prepare(container_id, &mut clean).context("delegate a cgroup")?;
         cgdelegate::apply(&mut clean);
     }
     // Whether the process has a terminal is what the task was created with, not what the JSON says (as for an exec): crun needs

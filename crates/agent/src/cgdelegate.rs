@@ -1,24 +1,31 @@
 //! A delegated cgroup subtree for one container (Pod annotation `cloudhv.koedodb.com/cgroup-delegate`, daemon key
 //! `allow_cgroup_delegate`).
 //!
-//! A container marked by name gets, inside the VM, a cgroup of its own that it may subdivide: it can make child cgroups and set
-//! `memory.max`, `cpu.max` and `pids.max` on them for the processes it starts. Nothing else changes, and the container gets no capability
-//! from this (it loses some, see [`STRIPPED_CAPS`]). What the guest does, following the kernel's rules for delegation
+//! A container marked by name gets, inside the VM, a cgroup it may subdivide: it can make child cgroups and set `memory.max`, `cpu.max`
+//! and `pids.max` on them for the processes it starts. Nothing else changes, and the container gets no capability from this (it loses
+//! some, see [`STRIPPED_CAPS`]). Two cgroups are made, following the kernel's rules for delegation
 //! (Documentation/admin-guide/cgroup-v2.rst, "Delegation"):
 //!
-//! 1. Before `crun run`, the agent makes `/sys/fs/cgroup/<id>` (the cgroup crun then uses for the container: `cgroupsPath` is `/<id>`; the
-//!    limits and the device rules stay on it and are applied by crun as root). The controllers are enabled at the root at boot, so the
-//!    interface files exist. The directory and `cgroup.procs`, `cgroup.threads`, `cgroup.subtree_control` belong to the container's
-//!    user; **every other file of it** (`memory.max`, `cpu.max`, `pids.max`, `memory.high`, `cgroup.kill`, ...) belongs to `nobody`, so
-//!    the container cannot raise the limit that the platform put on it.
-//! 2. The container is in a cgroup namespace whose root is that cgroup, and sees a cgroup2 file system that shows only it: no parent,
-//!    no sibling, no way to name a cgroup outside. The guest mounts cgroup2 with `nsdelegate`, so the kernel also treats the namespace
-//!    root as a delegation boundary (a process cannot be moved across it, from either side).
-//! 3. `CAP_CHOWN`, `CAP_DAC_OVERRIDE` and `CAP_FOWNER` are removed from a delegated container: with any of them, root in the container
-//!    could take or override the files of point 1 (a root container without them is only the owner of what is its own).
+//! ```text
+//! /sys/fs/cgroup/<id>      the PARENT: the platform's limits (memory.max, cpu.max, pids.max, cpu.weight); every file root's; the
+//!                          container cannot see it, name it or write it
+//! /sys/fs/cgroup/<id>/d    the delegated CHILD: no limits of its own; the container's cgroup namespace root, where its process starts
+//! ```
 //!
-//! The container's first process starts in the delegated cgroup itself. The kernel's "no internal processes" rule means it must move into
-//! a leaf child (`mkdir leaf; echo $$ > leaf/cgroup.procs`) before it writes `+memory` to `cgroup.subtree_control`.
+//! 1. The limits of the Pod are written by the agent to the parent, and taken out of the spec crun gets, so that crun puts the container
+//!    in `<id>/d` (`cgroupsPath`) and leaves it without limits. The kernel enforces the limit of every ancestor on all its descendants:
+//!    whatever the container writes into `d` or below it can lower what the container may use, never raise it above the parent's.
+//!    (A limit placed on `d` itself would not do: a root container with `CAP_SETUID` can become the owner of a file that is not its own.)
+//! 2. `d`'s directory and `cgroup.procs`, `cgroup.threads`, `cgroup.subtree_control` belong to the container's user; its other files
+//!    belong to `nobody`. The controllers `cpu`, `memory` and `pids` are enabled in the parent for `d`, and at the cgroup root at boot.
+//! 3. The container is in a cgroup namespace whose root is `d`, and sees a cgroup2 file system that shows only `d`: no parent, no
+//!    sibling. The guest mounts cgroup2 with `nsdelegate`, so the kernel also treats the namespace root as a delegation boundary (a
+//!    process cannot be moved across it, from either side). The device rules (eBPF) are attached by crun to `d`, which only grows down.
+//! 4. `CAP_CHOWN`, `CAP_DAC_OVERRIDE` and `CAP_FOWNER` are removed from a delegated container, so that root in it cannot override the
+//!    permissions of files that are not its own. `CAP_SETUID`/`CAP_SETGID` may stay (point 1 does not depend on them).
+//!
+//! The container's first process starts in `d` itself. The kernel's "no internal processes" rule means it must move into a leaf child
+//! (`mkdir leaf; echo $$ > leaf/cgroup.procs`) before it writes `+memory` to `cgroup.subtree_control`.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -28,6 +35,8 @@ use serde_json::{json, Value};
 
 /// Where the guest mounts the cgroup2 file system.
 pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+/// The name of the delegated child of the container's cgroup.
+pub const CHILD: &str = "d";
 /// The owner of the files the container must not write.
 pub const NOBODY: u32 = 65534;
 /// The annotation containerd sets on every container (a Pod's own annotations cannot override it) with the name from the Pod's spec.
@@ -68,34 +77,98 @@ pub fn identity(clean: &Value) -> (u32, u32) {
     (id("uid"), id("gid"))
 }
 
-/// Make the container's cgroup under `root` and hand out its files as described above. `chown` is a parameter so that the logic can be
-/// tested on a directory that is not a cgroup file system. Returns the directory.
+/// What the agent does to the cgroup file system, so that the logic can be tested on a directory that is not one.
+pub trait CgroupOps {
+    fn chown(&mut self, path: &Path, uid: u32, gid: u32) -> io::Result<()>;
+    fn write(&mut self, path: &Path, value: &str) -> io::Result<()>;
+}
+
+struct RealOps;
+
+impl CgroupOps for RealOps {
+    fn chown(&mut self, path: &Path, uid: u32, gid: u32) -> io::Result<()> {
+        std::os::unix::fs::chown(path, Some(uid), Some(gid))
+    }
+    fn write(&mut self, path: &Path, value: &str) -> io::Result<()> {
+        std::fs::write(path, value)
+    }
+}
+
+/// The platform's limits from the cleaned spec as (file of the parent, value), and taken out of the spec (the device rules stay).
+/// OCI `cpu.shares` becomes `cpu.weight` as crun converts it.
+pub fn take_limits(clean: &mut Value) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    let Some(res) = clean
+        .pointer_mut("/linux/resources")
+        .and_then(|r| r.as_object_mut())
+    else {
+        return out;
+    };
+    if let Some(m) = res
+        .remove("memory")
+        .and_then(|m| m.get("limit").and_then(|l| l.as_i64()))
+    {
+        out.push(("memory.max", m.to_string()));
+    }
+    if let Some(cpu) = res.remove("cpu") {
+        if let (Some(q), Some(p)) = (
+            cpu.get("quota").and_then(|v| v.as_i64()),
+            cpu.get("period").and_then(|v| v.as_u64()),
+        ) {
+            out.push(("cpu.max", format!("{q} {p}")));
+        }
+        if let Some(sh) = cpu.get("shares").and_then(|v| v.as_u64()) {
+            let weight = 1 + sh.clamp(2, 262144).saturating_sub(2) * 9999 / 262142;
+            out.push(("cpu.weight", weight.to_string()));
+        }
+    }
+    if let Some(p) = res
+        .remove("pids")
+        .and_then(|p| p.get("limit").and_then(|l| l.as_i64()))
+    {
+        out.push(("pids.max", p.to_string()));
+    }
+    out
+}
+
+/// Make the parent `<id>` with the limits and the delegated child `<id>/d` under `root`, and hand out the child's files as described
+/// above. Returns the child. On an error nothing is left behind. The parent's files stay as the kernel made them (root's).
 pub fn prepare_dir(
     root: &Path,
     id: &str,
     uid: u32,
     gid: u32,
-    chown: &mut dyn FnMut(&Path, u32, u32) -> io::Result<()>,
+    limits: &[(&str, String)],
+    ops: &mut dyn CgroupOps,
 ) -> Result<PathBuf> {
     // The id is a plain word already (`valid_container_id`); this is the last line against a path that leaves `root`.
     if id.is_empty() || id.contains('/') || id.starts_with('.') {
         anyhow::bail!("bad container id for a cgroup");
     }
-    let dir = root.join(id);
-    std::fs::create_dir_all(&dir).with_context(|| format!("make cgroup {}", dir.display()))?;
-    let result = hand_out(&dir, uid, gid, chown);
+    let parent = root.join(id);
+    let child = parent.join(CHILD);
+    std::fs::create_dir_all(&parent)
+        .with_context(|| format!("make cgroup {}", parent.display()))?;
+    let result = (|| -> Result<()> {
+        for (file, value) in limits {
+            ops.write(&parent.join(file), value)
+                .with_context(|| format!("write {file} of the cgroup"))?;
+        }
+        // The parent holds no process, so it may hand its controllers to `d`.
+        ops.write(&parent.join("cgroup.subtree_control"), "+cpu +memory +pids")
+            .context("enable controllers for the delegated cgroup")?;
+        std::fs::create_dir_all(&child)
+            .with_context(|| format!("make cgroup {}", child.display()))?;
+        hand_out(&child, uid, gid, ops)
+    })();
     if result.is_err() {
-        let _ = std::fs::remove_dir(&dir);
+        let _ = std::fs::remove_dir(&child);
+        let _ = std::fs::remove_dir(&parent);
     }
-    result.map(|()| dir)
+    result.map(|()| child)
 }
 
-fn hand_out(
-    dir: &Path,
-    uid: u32,
-    gid: u32,
-    chown: &mut dyn FnMut(&Path, u32, u32) -> io::Result<()>,
-) -> Result<()> {
+fn hand_out(dir: &Path, uid: u32, gid: u32, ops: &mut dyn CgroupOps) -> Result<()> {
     // Every file first (to nobody), then the three that are the container's, and the directory last.
     for entry in std::fs::read_dir(dir).context("read the cgroup")? {
         let entry = entry?;
@@ -108,17 +181,30 @@ fn hand_out(
         } else {
             (NOBODY, NOBODY)
         };
-        chown(&entry.path(), u, g).with_context(|| format!("chown {}", entry.path().display()))?;
+        ops.chown(&entry.path(), u, g)
+            .with_context(|| format!("chown {}", entry.path().display()))?;
     }
-    chown(dir, uid, gid).context("chown the cgroup directory")?;
+    ops.chown(dir, uid, gid)
+        .context("chown the cgroup directory")?;
     Ok(())
 }
 
-/// The real thing: the cgroup under [`CGROUP_ROOT`], files handed out with chown(2).
-pub fn prepare(id: &str, uid: u32, gid: u32) -> Result<PathBuf> {
-    prepare_dir(Path::new(CGROUP_ROOT), id, uid, gid, &mut |p, u, g| {
-        std::os::unix::fs::chown(p, Some(u), Some(g))
-    })
+/// The real thing, under [`CGROUP_ROOT`]. Takes the limits out of the spec crun gets and points `cgroupsPath` at the child.
+pub fn prepare(id: &str, clean: &mut Value) -> Result<PathBuf> {
+    let (uid, gid) = identity(clean);
+    let limits = take_limits(clean);
+    let dir = prepare_dir(Path::new(CGROUP_ROOT), id, uid, gid, &limits, &mut RealOps)?;
+    if let Some(l) = clean.get_mut("linux").and_then(|l| l.as_object_mut()) {
+        l.insert("cgroupsPath".into(), json!(format!("/{id}/{CHILD}")));
+    }
+    Ok(dir)
+}
+
+/// After `crun delete` has removed the child: remove the parent too (best effort; the id is a plain word).
+pub fn remove_parent(id: &str) {
+    if !id.is_empty() && !id.contains('/') && !id.starts_with('.') {
+        let _ = std::fs::remove_dir(Path::new(CGROUP_ROOT).join(id));
+    }
 }
 
 /// Change the cleaned spec of a delegated container: a cgroup namespace (its root is the container's cgroup, which `crun` has already
@@ -179,15 +265,19 @@ mod tests {
         assert!(!requested(&json!({})));
     }
 
-    /// A fake cgroup root: a directory with the files a new cgroup has, made by the test when the "kernel" is asked to mkdir.
-    fn fake_root(files: &[&str]) -> tempdir::Dir {
+    /// A fake cgroup root: a directory with the files a new cgroup has (the test makes them where the "kernel" would).
+    fn fake_root(parent_files: &[&str], child_files: &[&str]) -> tempdir::Dir {
         let root = tempdir::Dir::new();
-        let d = root.path().join("c1");
-        std::fs::create_dir_all(&d).unwrap();
-        for f in files {
-            std::fs::write(d.join(f), "").unwrap();
+        let parent = root.path().join("c1");
+        let child = parent.join(CHILD);
+        std::fs::create_dir_all(&child).unwrap();
+        for f in parent_files {
+            std::fs::write(parent.join(f), "").unwrap();
         }
-        std::fs::create_dir(d.join("child")).unwrap();
+        for f in child_files {
+            std::fs::write(child.join(f), "").unwrap();
+        }
+        std::fs::create_dir(child.join("sub")).unwrap();
         root
     }
 
@@ -209,64 +299,101 @@ mod tests {
         "pids.max",
     ];
 
-    #[test]
-    fn the_container_owns_three_files_and_the_directory_and_nothing_else() {
-        let root = fake_root(FILES);
-        let mut calls: Vec<(String, u32, u32)> = Vec::new();
-        let dir = prepare_dir(root.path(), "c1", 1000, 1001, &mut |p, u, g| {
-            calls.push((
-                p.strip_prefix(root.path()).unwrap().display().to_string(),
-                u,
-                g,
-            ));
+    #[derive(Default)]
+    struct Recorder {
+        chowns: Vec<(PathBuf, u32, u32)>,
+        writes: Vec<(PathBuf, String)>,
+        fail_chown: bool,
+    }
+
+    impl CgroupOps for Recorder {
+        fn chown(&mut self, p: &Path, u: u32, g: u32) -> io::Result<()> {
+            if self.fail_chown {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
+            self.chowns.push((p.to_path_buf(), u, g));
             Ok(())
-        })
-        .unwrap();
-        assert_eq!(dir, root.path().join("c1"));
-        let owner = |p: &str| {
-            let hit: Vec<_> = calls.iter().filter(|c| c.0 == p).collect();
-            assert_eq!(hit.len(), 1, "{p} is changed exactly once");
+        }
+        fn write(&mut self, p: &Path, v: &str) -> io::Result<()> {
+            self.writes.push((p.to_path_buf(), v.to_string()));
+            Ok(())
+        }
+    }
+
+    fn limits() -> Vec<(&'static str, String)> {
+        vec![
+            ("memory.max", "268435456".into()),
+            ("cpu.max", "100000 100000".into()),
+            ("pids.max", "512".into()),
+        ]
+    }
+
+    #[test]
+    fn the_parent_keeps_the_limits_and_is_never_handed_out() {
+        let root = fake_root(FILES, FILES);
+        let mut rec = Recorder::default();
+        let child = prepare_dir(root.path(), "c1", 1000, 1001, &limits(), &mut rec).unwrap();
+        let parent = root.path().join("c1");
+        assert_eq!(child, parent.join("d"));
+        // The limits are written to the parent, and nowhere else; so is the delegation of the controllers.
+        for (f, v) in limits() {
+            assert!(rec.writes.contains(&(parent.join(f), v)), "{f}");
+        }
+        assert!(rec.writes.contains(&(
+            parent.join("cgroup.subtree_control"),
+            "+cpu +memory +pids".into()
+        )));
+        assert!(rec.writes.iter().all(|(p, _)| p.parent() == Some(&parent)));
+        // Neither the parent nor any of its files is chowned: they stay root's, and the container never gets a path to them.
+        assert!(rec.chowns.iter().all(|(p, _, _)| p.starts_with(&child)));
+        assert!(!rec.chowns.iter().any(|(p, _, _)| *p == parent));
+    }
+
+    #[test]
+    fn the_child_has_three_files_and_the_directory_for_the_container_and_nothing_else() {
+        let root = fake_root(FILES, FILES);
+        let mut rec = Recorder::default();
+        let child = prepare_dir(root.path(), "c1", 1000, 1001, &limits(), &mut rec).unwrap();
+        let owner = |name: &str| {
+            let hit: Vec<_> = rec
+                .chowns
+                .iter()
+                .filter(|c| c.0 == child.join(name))
+                .collect();
+            assert_eq!(hit.len(), 1, "{name} is changed exactly once");
             (hit[0].1, hit[0].2)
         };
-        assert_eq!(owner("c1"), (1000, 1001));
-        for f in ["cgroup.procs", "cgroup.threads", "cgroup.subtree_control"] {
-            assert_eq!(owner(&format!("c1/{f}")), (1000, 1001), "{f}");
+        for f in DELEGATED_FILES {
+            assert_eq!(owner(f), (1000, 1001), "{f}");
         }
-        // The limit files, the ones that kill or freeze, and the type are not the container's. A root container (uid 0) is the owner
-        // of anything root-owned, so none of them may stay with root either.
-        for f in FILES.iter().filter(|f| !f.starts_with("cgroup.procs")) {
-            if DELEGATED_FILES.contains(f) {
-                continue;
-            }
-            assert_eq!(owner(&format!("c1/{f}")), (NOBODY, NOBODY), "{f}");
+        for f in FILES.iter().filter(|f| !DELEGATED_FILES.contains(f)) {
+            assert_eq!(owner(f), (NOBODY, NOBODY), "{f}");
         }
-        // The child directory is left alone, and the directory is the last thing changed.
-        assert!(!calls.iter().any(|c| c.0 == "c1/child"));
-        assert_eq!(calls.last().unwrap().0, "c1");
+        // The sub directory is left alone, and the child directory is the last thing changed.
+        assert!(!rec.chowns.iter().any(|c| c.0 == child.join("sub")));
+        let last = rec.chowns.last().unwrap();
+        assert_eq!((&last.0, last.1, last.2), (&child, 1000, 1001));
     }
 
     #[test]
-    fn a_root_container_still_gets_nobody_for_the_limit_files() {
-        let root = fake_root(FILES);
-        let mut seen = Vec::new();
-        prepare_dir(root.path(), "c1", 0, 0, &mut |p, u, _| {
-            seen.push((p.file_name().unwrap().to_string_lossy().to_string(), u));
-            Ok(())
-        })
-        .unwrap();
+    fn a_root_container_gets_nobody_for_the_child_limit_files_too() {
+        let root = fake_root(FILES, FILES);
+        let mut rec = Recorder::default();
+        prepare_dir(root.path(), "c1", 0, 0, &limits(), &mut rec).unwrap();
         for f in ["memory.max", "cpu.max", "pids.max", "memory.high"] {
-            assert!(seen.contains(&(f.to_string(), NOBODY)), "{f}");
+            let p = root.path().join("c1/d").join(f);
+            assert!(rec.chowns.contains(&(p, NOBODY, NOBODY)), "{f}");
         }
     }
 
     #[test]
-    fn a_failed_chown_removes_the_cgroup_and_reports() {
+    fn a_failure_leaves_no_cgroup_behind() {
         let root = tempdir::Dir::new();
-        let r = prepare_dir(root.path(), "c2", 0, 0, &mut |_, _, _| {
-            Err(io::Error::from(io::ErrorKind::PermissionDenied))
-        });
-        // No files in the new directory, so only the directory chown fails: the directory is removed again.
-        assert!(r.is_err());
+        let mut rec = Recorder {
+            fail_chown: true,
+            ..Default::default()
+        };
+        assert!(prepare_dir(root.path(), "c2", 0, 0, &[], &mut rec).is_err());
         assert!(!root.path().join("c2").exists());
     }
 
@@ -275,10 +402,29 @@ mod tests {
         let root = tempdir::Dir::new();
         for bad in ["", "../x", "a/b", ".hidden"] {
             assert!(
-                prepare_dir(root.path(), bad, 0, 0, &mut |_, _, _| Ok(())).is_err(),
+                prepare_dir(root.path(), bad, 0, 0, &[], &mut Recorder::default()).is_err(),
                 "{bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_limits_leave_the_spec_for_the_parent_and_the_devices_stay() {
+        let mut s = json!({"linux": {"cgroupsPath": "/c1", "resources": {
+            "memory": {"limit": 268435456}, "cpu": {"shares": 1024, "quota": 50000, "period": 100000},
+            "pids": {"limit": 64}, "devices": [{"allow": false, "access": "rwm"}]}}});
+        let got = take_limits(&mut s);
+        assert!(got.contains(&("memory.max", "268435456".to_string())));
+        assert!(got.contains(&("cpu.max", "50000 100000".to_string())));
+        assert!(got.contains(&("pids.max", "64".to_string())));
+        assert!(got.contains(&("cpu.weight", "39".to_string())), "{got:?}"); // 1024 shares, as crun converts it
+        let res = &s["linux"]["resources"];
+        assert_eq!(res.as_object().unwrap().len(), 1, "only devices is left");
+        assert!(res["devices"].is_array());
+        // No limits asked: nothing to write, and nothing breaks.
+        let mut none = json!({"linux": {"resources": {"devices": []}}});
+        assert!(take_limits(&mut none).is_empty());
+        assert!(take_limits(&mut json!({})).is_empty());
     }
 
     fn base_clean() -> Value {
