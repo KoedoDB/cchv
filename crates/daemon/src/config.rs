@@ -139,6 +139,16 @@ pub struct DaemonConfig {
     /// The most a volume made or extended by name may be, in MiB. 0 (the default): none may be made.
     #[serde(default)]
     pub volume_block_max_mib: u64,
+    /// Thin volumes (the branches: an empty database, so the disk may be over-committed): the name of a thin pool LV that EXISTS in `volume_block_vg` (Ansible makes it,
+    /// with zeroing on: `lvcreate --type thin-pool --zero y`). Empty (the default): a request for a thin volume is refused.
+    #[serde(default)]
+    pub volume_thin_pool: String,
+    /// The most a THIN volume may be (its virtual size), in MiB. 0 (the default): the same as `volume_block_max_mib`.
+    #[serde(default)]
+    pub volume_thin_max_virtual_mib: u64,
+    /// No thin volume is made or extended when the thin pool's data or metadata use is over this percent: a full pool breaks every thin volume in it.
+    #[serde(default = "default_volume_thin_max_percent")]
+    pub volume_thin_max_percent: u8,
     /// With `volume_block_vg`, a device given as `volumeDevices` must carry the tag of the pod's namespace (`cloudhv-ns=<namespace>`), or the pod is refused.
     /// True lets through a logical volume that has no `cloudhv-ns=` tag (one made by hand, before the tags): a volume of another namespace is refused either way.
     #[serde(default)]
@@ -253,6 +263,9 @@ fn default_emptydir_max_mib() -> u64 {
 }
 fn default_emptydir_reserve_mib() -> u64 {
     2048
+}
+fn default_volume_thin_max_percent() -> u8 {
+    90
 }
 fn default_volume_helper_socket() -> String {
     "/run/cloudhv/volume-helper.sock".to_string()

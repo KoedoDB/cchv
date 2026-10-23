@@ -24,6 +24,18 @@
 //!   the new part only that is zeroed again, never the data. Deleting a Project's volume is an operator's action. **`cloudhv-ready` must
 //!   not be removed by hand**: a volume without it is zeroed whole.
 //! - **A cap**: `volume_block_max_mib` is the most any one volume may be, made or extended to. 0 (the default) refuses every creation.
+//!
+//! **Thin volumes** (a branch is an empty database, so the disk may be over-committed; the main database keeps a thick volume): `ensure` with
+//! `thin: true` makes the logical volume in the thin pool `volume_thin_pool` of the same volume group (`lvcreate -T vg/pool -V <size>`; the
+//! helper never makes the pool: Ansible does). The rules above stay: the derived name, the owner tag (and `cloudhv-thin`), ready only at the
+//! end, never shrunk, never deleted. What differs:
+//!
+//! - **No zeroing.** A block of a thin volume that has not been written is not backed by anything and reads as zeros, so a new thin volume cannot
+//!   show another customer's data. That holds only if the pool zeroes the blocks it provisions (`lvcreate --zero y`, the default): with zeroing off
+//!   a first write of less than a chunk would leave the rest of the chunk as it was. The helper refuses a pool that does not zero.
+//! - **A full pool breaks every thin volume in it**, so creation (and extension) stops before: with the pool's data or metadata use over
+//!   `volume_thin_max_percent` (90 by default) the request is refused, and so is a pool that is not there.
+//! - **A volume is thick or thin for good**: a request that says thin for a volume that exists thick (or the reverse) is refused.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -42,6 +54,8 @@ pub const NS_TAG_KEY: &str = "cloudhv-ns=";
 pub const READY_TAG: &str = "cloudhv-ready";
 /// The tag of a volume that is being extended: `cloudhv-extending=<MiB the volume had>`; the part from there on is not zeroed yet.
 pub const EXTENDING_KEY: &str = "cloudhv-extending=";
+/// The tag of a thin volume the helper made (the truth is `LvInfo::is_thin`, which is LVM's; the tag is for the operator reading `lvs`).
+pub const THIN_TAG: &str = "cloudhv-thin";
 /// The longest a device-mapper name may be (`DM_NAME_LEN` is 128, with the terminator).
 const DM_NAME_MAX: usize = 127;
 
@@ -102,11 +116,18 @@ pub struct LvInfo {
     /// The device numbers; 0 for both when the volume is not active.
     pub major: u32,
     pub minor: u32,
+    /// The thin pool the volume is in (`lvs -o pool_lv`); empty for a thick volume. This is what LVM says, not a tag.
+    #[serde(default)]
+    pub pool: String,
 }
 
 impl LvInfo {
     pub fn has_tag(&self, t: &str) -> bool {
         self.tags.iter().any(|x| x == t)
+    }
+    /// Whether the volume is a thin volume (it is in a thin pool).
+    pub fn is_thin(&self) -> bool {
+        !self.pool.is_empty()
     }
     /// The size (MiB) the volume had when an extension began that has not ended, if one has not (the least, if several tags).
     pub fn extending_from(&self) -> Option<u64> {
@@ -131,6 +152,17 @@ pub trait Backend {
     fn find_dev(&self, major: u32, minor: u32) -> Result<Option<LvInfo>>;
     /// `lvcreate` of a thick volume of `size_mib` that carries `tag` from the start.
     fn create(&self, vg: &str, lv: &str, size_mib: u64, tag: &str) -> Result<()>;
+    /// `lvcreate -T vg/pool -V` of a thin volume of `size_mib` (virtual size) that carries `tags` from the start.
+    fn create_thin(
+        &self,
+        vg: &str,
+        pool: &str,
+        lv: &str,
+        size_mib: u64,
+        tags: &[&str],
+    ) -> Result<()>;
+    /// The state of the thin pool `vg/pool`: `None` if there is no thin pool of that name.
+    fn pool_state(&self, vg: &str, pool: &str) -> Result<Option<PoolState>>;
     fn extend(&self, vg: &str, lv: &str, size_mib: u64) -> Result<()>;
     fn add_tag(&self, vg: &str, lv: &str, tag: &str) -> Result<()>;
     fn del_tag(&self, vg: &str, lv: &str, tag: &str) -> Result<()>;
@@ -140,12 +172,79 @@ pub trait Backend {
     fn zero(&self, info: &LvInfo, from_mib: u64) -> Result<()>;
 }
 
+/// What LVM says of a thin pool.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PoolState {
+    /// Percent of the pool's data space in use.
+    pub data_percent: f64,
+    /// Percent of the pool's metadata space in use.
+    pub metadata_percent: f64,
+    /// Whether the pool zeroes the blocks it provisions (`lvcreate --zero y`).
+    pub zeroing: bool,
+}
+
 /// What the helper may do.
 #[derive(Debug, Clone)]
 pub struct Policy {
     pub vg: String,
     /// The largest a volume may be made or extended to. 0: none may.
     pub max_mib: u64,
+    /// The thin pool (in `vg`) that thin volumes are made in. Empty: thin volumes are refused.
+    pub thin_pool: String,
+    /// The largest a THIN volume may be (its virtual size). 0: the same as `max_mib`.
+    pub thin_max_mib: u64,
+    /// A thin volume is not made or extended when the pool's data or metadata use is over this percent.
+    pub thin_max_percent: u8,
+}
+
+impl Policy {
+    /// A policy with no thin pool (thick volumes only).
+    #[cfg(test)]
+    pub fn thick_only(vg: &str, max_mib: u64) -> Policy {
+        Policy {
+            vg: vg.to_string(),
+            max_mib,
+            thin_pool: String::new(),
+            thin_max_mib: 0,
+            thin_max_percent: 90,
+        }
+    }
+}
+
+/// The pool must be there, zero what it provisions, and not be nearly full.
+fn check_pool(b: &dyn Backend, p: &Policy) -> Result<()> {
+    if p.thin_pool.is_empty() {
+        anyhow::bail!("thin volumes are off (volume_thin_pool is empty)");
+    }
+    let Some(st) = b
+        .pool_state(&p.vg, &p.thin_pool)
+        .context("look at the thin pool")?
+    else {
+        anyhow::bail!(
+            "the thin pool {}/{} is not there (volume_thin_pool)",
+            p.vg,
+            p.thin_pool
+        );
+    };
+    if !st.zeroing {
+        anyhow::bail!(
+            "the thin pool {}/{} does not zero the blocks it provisions (made with --zero n): a first write of less than a chunk would show what the block held before",
+            p.vg,
+            p.thin_pool
+        );
+    }
+    let limit = f64::from(p.thin_max_percent);
+    if st.data_percent > limit || st.metadata_percent > limit {
+        anyhow::bail!(
+            "the thin pool {}/{} is {:.1}% full in data and {:.1}% in metadata (the limit is {}%, volume_thin_max_percent): a full pool breaks every thin volume, so no thin volume is made or extended",
+            p.vg,
+            p.thin_pool,
+            st.data_percent,
+            st.metadata_percent,
+            p.thin_max_percent
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,19 +256,35 @@ pub struct Ensured {
 
 /// The logical volume of `namespace`'s `volume`, ready to be given to a VM: made and zeroed if it is not there, finished if a creation did not end,
 /// extended if `size_mib` is more than it is. An error is a refusal (a volume of another namespace or without an owner, a size over the cap).
+/// `thin`: the volume is (or must be) a thin volume of the pool of the policy: no zeroing, and refused when the pool is nearly full.
 pub fn ensure(
     b: &dyn Backend,
     p: &Policy,
     namespace: &str,
     volume: &str,
     size_mib: u64,
+    thin: bool,
 ) -> Result<Ensured> {
     let lv = lv_name(namespace, volume).map_err(|e| anyhow::anyhow!(e))?;
     dm_name(&p.vg, &lv).map_err(|e| anyhow::anyhow!(e))?;
     if size_mib == 0 {
         anyhow::bail!("a volume of 0 MiB");
     }
-    if size_mib > p.max_mib {
+    if thin {
+        if p.thin_pool.is_empty() {
+            anyhow::bail!("thin volumes are off (volume_thin_pool is empty)");
+        }
+        let cap = if p.thin_max_mib > 0 {
+            p.thin_max_mib
+        } else {
+            p.max_mib
+        };
+        if size_mib > cap {
+            anyhow::bail!(
+                "a thin volume of {size_mib} MiB is more than volume_thin_max_virtual_mib ({cap})"
+            );
+        }
+    } else if size_mib > p.max_mib {
         anyhow::bail!(
             "a volume of {size_mib} MiB is more than volume_block_max_mib ({})",
             p.max_mib
@@ -193,11 +308,26 @@ pub fn ensure(
                     p.vg
                 );
             }
+            if i.is_thin() != thin {
+                anyhow::bail!(
+                    "the logical volume {}/{lv} is a {} volume and was asked for as a {} one: a volume is thick or thin for good",
+                    p.vg,
+                    if i.is_thin() { "thin" } else { "thick" },
+                    if thin { "thin" } else { "thick" }
+                );
+            }
             i
         }
         None => {
-            b.create(&p.vg, &lv, size_mib, &tag)
-                .context("make the logical volume")?;
+            if thin {
+                // A full pool breaks every thin volume: not one more is made when it is nearly full.
+                check_pool(b, p)?;
+                b.create_thin(&p.vg, &p.thin_pool, &lv, size_mib, &[&tag, THIN_TAG])
+                    .context("make the thin volume")?;
+            } else {
+                b.create(&p.vg, &lv, size_mib, &tag)
+                    .context("make the logical volume")?;
+            }
             created = true;
             b.find(&p.vg, &lv)
                 .context("look for the volume just made")?
@@ -206,27 +336,39 @@ pub fn ensure(
     };
     b.activate(&p.vg, &lv).context("activate the volume")?;
     if !info.has_tag(READY_TAG) {
-        // New, or a creation that did not finish: whatever is on it is not this namespace's. Zero it all, and only then say it is ready.
-        b.zero(&info, 0).context("zero the volume")?;
+        // New, or a creation that did not finish: whatever is on a THICK volume is not this namespace's. Zero it all, and only then say it is ready.
+        // A thin volume needs no zeroing: a block that was never written is not backed by anything and reads as zeros (and the pool zeroes the blocks
+        // it provisions, which `check_pool` insists on), and nothing has been given the volume before it is ready.
+        if !thin {
+            b.zero(&info, 0).context("zero the volume")?;
+        }
         b.add_tag(&p.vg, &lv, READY_TAG)
             .context("mark the volume ready")?;
     } else {
         // An extension that did not end: the part from where the volume was is not zeroed (never the data before it).
         if let Some(from) = info.extending_from() {
-            b.zero(&info, from.min(info.size_mib))
-                .context("zero the part added by an earlier extension")?;
+            if !thin {
+                b.zero(&info, from.min(info.size_mib))
+                    .context("zero the part added by an earlier extension")?;
+            }
             b.del_tag(&p.vg, &lv, &format!("{EXTENDING_KEY}{from}"))
                 .context("finish the earlier extension")?;
             info = b.find(&p.vg, &lv)?.context("the volume is gone")?;
         }
         if size_mib > info.size_mib {
+            if thin {
+                // A larger virtual size is more over-commitment: not when the pool is nearly full.
+                check_pool(b, p)?;
+            }
             let old = info.size_mib;
             let mark = format!("{EXTENDING_KEY}{old}");
             b.add_tag(&p.vg, &lv, &mark).context("mark the extension")?;
             b.extend(&p.vg, &lv, size_mib)
                 .context("extend the volume")?;
             info = b.find(&p.vg, &lv)?.context("the volume is gone")?;
-            b.zero(&info, old).context("zero the added part")?;
+            if !thin {
+                b.zero(&info, old).context("zero the added part")?;
+            }
             b.del_tag(&p.vg, &lv, &mark)
                 .context("finish the extension")?;
             extended = true;
@@ -256,6 +398,9 @@ pub enum Request {
         namespace: String,
         volume: String,
         size_mib: u64,
+        /// A thin volume (default: thick).
+        #[serde(default)]
+        thin: bool,
     },
     Tags {
         major: u32,
@@ -286,7 +431,8 @@ pub fn handle(b: &dyn Backend, p: &Policy, req: &Request) -> Response {
             namespace,
             volume,
             size_mib,
-        } => match ensure(b, p, namespace, volume, *size_mib) {
+            thin,
+        } => match ensure(b, p, namespace, volume, *size_mib, *thin) {
             Ok(e) => Response {
                 ok: true,
                 info: Some(e.info),
@@ -398,15 +544,23 @@ impl Client {
 
     /// How long to wait for `ensure`: zeroing is a write of the whole volume (50 MiB/s is assumed as a floor).
     pub fn ensure_timeout(size_mib: u64) -> Duration {
+        // A thin volume is not zeroed and answers at once, but the daemon does not know which a request is: the longer wait is only a ceiling.
         Duration::from_secs((120 + size_mib / 50).min(3600))
     }
 
-    pub fn ensure(&self, namespace: &str, volume: &str, size_mib: u64) -> Result<Ensured> {
+    pub fn ensure(
+        &self,
+        namespace: &str,
+        volume: &str,
+        size_mib: u64,
+        thin: bool,
+    ) -> Result<Ensured> {
         let r = self.call(
             &Request::Ensure {
                 namespace: namespace.to_string(),
                 volume: volume.to_string(),
                 size_mib,
+                thin,
             },
             Self::ensure_timeout(size_mib),
         )?;
@@ -449,12 +603,18 @@ pub fn run_helper(config: &crate::config::DaemonConfig) -> Result<()> {
     let policy = Policy {
         vg: config.volume_block_vg.clone(),
         max_mib: config.volume_block_max_mib,
+        thin_pool: config.volume_thin_pool.clone(),
+        thin_max_mib: config.volume_thin_max_virtual_mib,
+        thin_max_percent: config.volume_thin_max_percent,
     };
     info!(
-        "volume helper on {} for the volume group {} (volumes up to {} MiB)",
+        "volume helper on {} for the volume group {} (volumes up to {} MiB; thin pool {:?}, thin volumes up to {} MiB, refused over {}% of the pool)",
         socket.display(),
         policy.vg,
-        policy.max_mib
+        policy.max_mib,
+        policy.thin_pool,
+        if policy.thin_max_mib > 0 { policy.thin_max_mib } else { policy.max_mib },
+        policy.thin_max_percent
     );
     serve(listener, &backend, &policy)
 }
@@ -469,7 +629,7 @@ pub struct Lvm {
     pub node_dir: PathBuf,
 }
 
-const LV_FIELDS: &str = "vg_name,lv_name,lv_size,lv_tags,lv_kernel_major,lv_kernel_minor";
+const LV_FIELDS: &str = "vg_name,lv_name,lv_size,lv_tags,lv_kernel_major,lv_kernel_minor,pool_lv";
 
 impl Lvm {
     fn run(&self, tool: &str, args: &[&str], timeout: Duration) -> Result<String> {
@@ -557,10 +717,10 @@ impl Lvm {
     }
 }
 
-/// `vg|lv| 8589934592|tag1,tag2|252|3` (sizes in bytes, `-1` for the numbers of a volume that is not active).
+/// `vg|lv| 8589934592|tag1,tag2|252|3|pool` (sizes in bytes, `-1` for the numbers of a volume that is not active, the pool empty for a thick volume).
 fn parse_lvs_line(line: &str) -> Result<LvInfo> {
     let f: Vec<&str> = line.trim().split('|').collect();
-    if f.len() != 6 {
+    if f.len() != 7 {
         anyhow::bail!("lvs printed {line:?}");
     }
     let num = |s: &str| -> Result<i64> { s.trim().parse::<i64>().context("a number of lvs") };
@@ -577,7 +737,31 @@ fn parse_lvs_line(line: &str) -> Result<LvInfo> {
             .collect(),
         major: u32::try_from(major).unwrap_or(0),
         minor: u32::try_from(minor).unwrap_or(0),
+        pool: f[6].trim().to_string(),
     })
+}
+
+/// `thin-pool attr|data %|metadata %|zero`: `t` is the first character of the attributes of a thin pool; the percents are empty for a pool that is not active.
+fn parse_pool_line(line: &str) -> Result<Option<PoolState>> {
+    let f: Vec<&str> = line.trim().split('|').collect();
+    if f.len() != 4 {
+        anyhow::bail!("lvs printed {line:?} for a thin pool");
+    }
+    if !f[0].trim().starts_with('t') {
+        return Ok(None);
+    }
+    let pct = |s: &str| -> Result<f64> {
+        let s = s.trim();
+        if s.is_empty() {
+            return Ok(0.0);
+        }
+        s.parse::<f64>().context("a percent of lvs")
+    };
+    Ok(Some(PoolState {
+        data_percent: pct(f[1])?,
+        metadata_percent: pct(f[2])?,
+        zeroing: f[3].trim().eq_ignore_ascii_case("zero"),
+    }))
 }
 
 impl Backend for Lvm {
@@ -610,6 +794,55 @@ impl Backend for Lvm {
             Duration::from_secs(120),
         )
         .map(|_| ())
+    }
+
+    fn create_thin(
+        &self,
+        vg: &str,
+        pool: &str,
+        lv: &str,
+        size_mib: u64,
+        tags: &[&str],
+    ) -> Result<()> {
+        let size = format!("{size_mib}m");
+        let pool_path = format!("{vg}/{pool}");
+        let mut args: Vec<&str> = vec!["--yes"];
+        for t in tags {
+            args.push("--addtag");
+            args.push(t);
+        }
+        args.extend_from_slice(&["-T", &pool_path, "-V", &size, "-n", lv]);
+        self.run("lvcreate", &args, Duration::from_secs(120))
+            .map(|_| ())
+    }
+
+    fn pool_state(&self, vg: &str, pool: &str) -> Result<Option<PoolState>> {
+        let target = format!("{vg}/{pool}");
+        let out = self.run(
+            "lvs",
+            &[
+                "--noheadings",
+                "--separator",
+                "|",
+                "-o",
+                "lv_attr,data_percent,metadata_percent,zero",
+                &target,
+            ],
+            Duration::from_secs(60),
+        );
+        match out {
+            Ok(text) => match text.lines().find(|l| !l.trim().is_empty()) {
+                Some(l) => parse_pool_line(l),
+                None => Ok(None),
+            },
+            Err(e)
+                if format!("{e:#}").contains("Failed to find logical volume")
+                    || format!("{e:#}").contains("not found") =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn extend(&self, vg: &str, lv: &str, size_mib: u64) -> Result<()> {
@@ -705,6 +938,8 @@ mod tests {
         log: RefCell<Vec<String>>,
         /// `zero` fails
         zero_fails: bool,
+        /// The thin pool, if there is one.
+        pool: RefCell<Option<PoolState>>,
     }
 
     impl Backend for Fake {
@@ -736,8 +971,36 @@ mod tests {
                 tags: vec![tag.into()],
                 major: 252,
                 minor: 10 + n,
+                pool: String::new(),
             });
             Ok(())
+        }
+        fn create_thin(
+            &self,
+            vg: &str,
+            pool: &str,
+            lv: &str,
+            size_mib: u64,
+            tags: &[&str],
+        ) -> Result<()> {
+            self.log.borrow_mut().push(format!(
+                "create-thin {lv} {size_mib} in {pool} {}",
+                tags.join(",")
+            ));
+            let n = self.lvs.borrow().len() as u32;
+            self.lvs.borrow_mut().push(LvInfo {
+                vg: vg.into(),
+                lv: lv.into(),
+                size_mib,
+                tags: tags.iter().map(|t| t.to_string()).collect(),
+                major: 252,
+                minor: 10 + n,
+                pool: pool.into(),
+            });
+            Ok(())
+        }
+        fn pool_state(&self, _vg: &str, _pool: &str) -> Result<Option<PoolState>> {
+            Ok(self.pool.borrow().clone())
         }
         fn extend(&self, _vg: &str, lv: &str, size_mib: u64) -> Result<()> {
             self.log
@@ -778,10 +1041,24 @@ mod tests {
     }
 
     fn policy() -> Policy {
+        Policy::thick_only("vg", 10_000)
+    }
+
+    /// A policy with a thin pool `branches`, volumes up to 4000 MiB virtual, refused over 90%.
+    fn thin_policy() -> Policy {
         Policy {
-            vg: "vg".into(),
-            max_mib: 10_000,
+            thin_pool: "branches".into(),
+            thin_max_mib: 4000,
+            ..policy()
         }
+    }
+
+    fn pool(data: f64, meta: f64, zeroing: bool) -> RefCell<Option<PoolState>> {
+        RefCell::new(Some(PoolState {
+            data_percent: data,
+            metadata_percent: meta,
+            zeroing,
+        }))
     }
 
     fn other(lv: &str, tags: &[&str]) -> LvInfo {
@@ -792,6 +1069,7 @@ mod tests {
             tags: tags.iter().map(|t| t.to_string()).collect(),
             major: 252,
             minor: 99,
+            pool: String::new(),
         }
     }
 
@@ -832,7 +1110,7 @@ mod tests {
     #[test]
     fn a_new_volume_is_made_with_its_owner_tag_zeroed_and_only_then_ready() {
         let f = Fake::default();
-        let e = ensure(&f, &policy(), "p-abc-db", "data", 8192).unwrap();
+        let e = ensure(&f, &policy(), "p-abc-db", "data", 8192, false).unwrap();
         assert!(e.created && !e.extended);
         assert!(e.info.has_tag(READY_TAG));
         assert_eq!(e.info.namespaces(), vec!["p-abc-db"]);
@@ -850,9 +1128,9 @@ mod tests {
     #[test]
     fn a_volume_that_is_ready_is_left_as_it_is() {
         let f = Fake::default();
-        ensure(&f, &policy(), "p-abc-db", "data", 8192).unwrap();
+        ensure(&f, &policy(), "p-abc-db", "data", 8192, false).unwrap();
         f.log.borrow_mut().clear();
-        let e = ensure(&f, &policy(), "p-abc-db", "data", 8192).unwrap();
+        let e = ensure(&f, &policy(), "p-abc-db", "data", 8192, false).unwrap();
         assert!(!e.created && !e.extended);
         assert_eq!(
             *f.log.borrow(),
@@ -860,7 +1138,7 @@ mod tests {
             "no zero, no format"
         );
         // A smaller size does not shrink it.
-        let e = ensure(&f, &policy(), "p-abc-db", "data", 1024).unwrap();
+        let e = ensure(&f, &policy(), "p-abc-db", "data", 1024, false).unwrap();
         assert_eq!(e.info.size_mib, 8192);
     }
 
@@ -873,7 +1151,7 @@ mod tests {
             minor: 5,
             ..other("pv-p-abc-db_data", &["cloudhv-ns=p-abc-db"])
         });
-        let e = ensure(&f, &policy(), "p-abc-db", "data", 100).unwrap();
+        let e = ensure(&f, &policy(), "p-abc-db", "data", 100, false).unwrap();
         assert!(!e.created);
         assert_eq!(
             *f.log.borrow(),
@@ -891,10 +1169,10 @@ mod tests {
             zero_fails: true,
             ..Default::default()
         };
-        assert!(ensure(&f, &policy(), "p-abc-db", "data", 100).is_err());
+        assert!(ensure(&f, &policy(), "p-abc-db", "data", 100, false).is_err());
         assert!(!f.lvs.borrow()[0].has_tag(READY_TAG));
         // And the next request tries again, and does not hand it out.
-        assert!(ensure(&f, &policy(), "p-abc-db", "data", 100).is_err());
+        assert!(ensure(&f, &policy(), "p-abc-db", "data", 100, false).is_err());
     }
 
     #[test]
@@ -904,13 +1182,13 @@ mod tests {
             "pv-p-abc-db_data",
             &["cloudhv-ns=p-zzz-db", READY_TAG],
         ));
-        let e = ensure(&f, &policy(), "p-abc-db", "data", 100).unwrap_err();
+        let e = ensure(&f, &policy(), "p-abc-db", "data", 100, false).unwrap_err();
         assert!(format!("{e:#}").contains("another namespace"), "{e:#}");
         let g = Fake::default();
         g.lvs
             .borrow_mut()
             .push(other("pv-p-abc-db_data", &[READY_TAG]));
-        let e = ensure(&g, &policy(), "p-abc-db", "data", 100).unwrap_err();
+        let e = ensure(&g, &policy(), "p-abc-db", "data", 100, false).unwrap_err();
         assert!(format!("{e:#}").contains("no owner tag"), "{e:#}");
         assert!(
             f.log.borrow().is_empty() && g.log.borrow().is_empty(),
@@ -922,26 +1200,23 @@ mod tests {
             "pv-p-abc-db_data",
             &["cloudhv-ns=p-abc-db", "cloudhv-ns=p-zzz-db", READY_TAG],
         ));
-        assert!(ensure(&h, &policy(), "p-abc-db", "data", 100).is_err());
+        assert!(ensure(&h, &policy(), "p-abc-db", "data", 100, false).is_err());
     }
 
     #[test]
     fn the_size_is_capped_for_a_new_volume_and_for_an_extension() {
         let f = Fake::default();
-        assert!(ensure(&f, &policy(), "p-abc-db", "data", 10_001).is_err());
+        assert!(ensure(&f, &policy(), "p-abc-db", "data", 10_001, false).is_err());
         assert!(f.log.borrow().is_empty());
-        assert!(ensure(&f, &policy(), "p-abc-db", "data", 0).is_err());
-        let none = Policy {
-            vg: "vg".into(),
-            max_mib: 0,
-        };
+        assert!(ensure(&f, &policy(), "p-abc-db", "data", 0, false).is_err());
+        let none = Policy::thick_only("vg", 0);
         assert!(
-            ensure(&f, &none, "p-abc-db", "data", 1).is_err(),
+            ensure(&f, &none, "p-abc-db", "data", 1, false).is_err(),
             "0 refuses every creation"
         );
-        ensure(&f, &policy(), "p-abc-db", "data", 5000).unwrap();
+        ensure(&f, &policy(), "p-abc-db", "data", 5000, false).unwrap();
         assert!(
-            ensure(&f, &policy(), "p-abc-db", "data", 10_001).is_err(),
+            ensure(&f, &policy(), "p-abc-db", "data", 10_001, false).is_err(),
             "no extension over the cap"
         );
     }
@@ -949,9 +1224,9 @@ mod tests {
     #[test]
     fn a_larger_size_extends_a_ready_volume() {
         let f = Fake::default();
-        ensure(&f, &policy(), "p-abc-db", "data", 5000).unwrap();
+        ensure(&f, &policy(), "p-abc-db", "data", 5000, false).unwrap();
         f.log.borrow_mut().clear();
-        let e = ensure(&f, &policy(), "p-abc-db", "data", 8000).unwrap();
+        let e = ensure(&f, &policy(), "p-abc-db", "data", 8000, false).unwrap();
         assert!(e.extended && e.info.size_mib == 8000);
         // The new part is zeroed, and a crash in between leaves a tag that finishes it (below).
         assert_eq!(
@@ -970,7 +1245,7 @@ mod tests {
     #[test]
     fn an_extension_that_did_not_end_zeroes_the_new_part_and_never_the_data() {
         let f = Fake::default();
-        ensure(&f, &policy(), "p-abc-db", "data", 5000).unwrap();
+        ensure(&f, &policy(), "p-abc-db", "data", 5000, false).unwrap();
         // A crash after lvextend, before the zeroing: the volume is 8000 now, the tag says where the data ended.
         {
             let mut v = f.lvs.borrow_mut();
@@ -978,7 +1253,7 @@ mod tests {
             v[0].tags.push("cloudhv-extending=5000".into());
         }
         f.log.borrow_mut().clear();
-        let e = ensure(&f, &policy(), "p-abc-db", "data", 8000).unwrap();
+        let e = ensure(&f, &policy(), "p-abc-db", "data", 8000, false).unwrap();
         assert!(!e.extended);
         assert_eq!(
             *f.log.borrow(),
@@ -995,7 +1270,7 @@ mod tests {
             v[0].tags.push("cloudhv-extending=8000".into());
         }
         f.log.borrow_mut().clear();
-        ensure(&f, &policy(), "p-abc-db", "data", 8000).unwrap();
+        ensure(&f, &policy(), "p-abc-db", "data", 8000, false).unwrap();
         assert!(f
             .log
             .borrow()
@@ -1006,7 +1281,7 @@ mod tests {
     #[test]
     fn the_helper_says_what_it_knows_only_of_its_own_volume_group() {
         let f = Fake::default();
-        ensure(&f, &policy(), "p-abc-db", "data", 100).unwrap();
+        ensure(&f, &policy(), "p-abc-db", "data", 100, false).unwrap();
         let minor = f.lvs.borrow()[0].minor;
         let r = handle(&f, &policy(), &Request::Tags { major: 252, minor });
         assert!(r.ok && r.info.unwrap().lv == "pv-p-abc-db_data");
@@ -1019,10 +1294,7 @@ mod tests {
             },
         );
         assert!(r.ok && r.info.is_none());
-        let elsewhere = Policy {
-            vg: "other".into(),
-            max_mib: 1,
-        };
+        let elsewhere = Policy::thick_only("other", 1);
         let r = handle(&f, &elsewhere, &Request::Tags { major: 252, minor });
         assert!(
             r.ok && r.info.is_none(),
@@ -1036,7 +1308,23 @@ mod tests {
             r#"{"op":"ensure","namespace":"p-x-db","volume":"data","size_mib":8192}"#,
         )
         .unwrap();
-        assert!(matches!(r, Request::Ensure { size_mib: 8192, .. }));
+        assert!(matches!(
+            r,
+            Request::Ensure {
+                size_mib: 8192,
+                thin: false,
+                ..
+            }
+        ));
+        let r: Request = serde_json::from_str(
+            r#"{"op":"ensure","namespace":"p-x-db","volume":"data","size_mib":512,"thin":true}"#,
+        )
+        .unwrap();
+        assert!(matches!(r, Request::Ensure { thin: true, .. }));
+        assert!(serde_json::from_str::<Request>(
+            r#"{"op":"ensure","namespace":"p-x-db","volume":"data","size_mib":512,"thin":"yes"}"#
+        )
+        .is_err());
         let r: Request = serde_json::from_str(r#"{"op":"tags","major":252,"minor":3}"#).unwrap();
         assert!(matches!(
             r,
@@ -1052,12 +1340,285 @@ mod tests {
     #[test]
     fn the_lvs_output_is_read() {
         let i =
-            parse_lvs_line("  vg|pv-p-x-db_data|8589934592|cloudhv-ns=p-x-db,cloudhv-ready|252|3")
+            parse_lvs_line("  vg|pv-p-x-db_data|8589934592|cloudhv-ns=p-x-db,cloudhv-ready|252|3|")
                 .unwrap();
         assert_eq!((i.size_mib, i.major, i.minor), (8192, 252, 3));
         assert!(i.has_tag(READY_TAG) && i.namespaces() == vec!["p-x-db"]);
-        let off = parse_lvs_line("vg|x|1048576||-1|-1").unwrap();
+        assert!(!i.is_thin());
+        let off = parse_lvs_line("vg|x|1048576||-1|-1|").unwrap();
         assert_eq!((off.major, off.minor, off.tags.len()), (0, 0, 0));
         assert!(parse_lvs_line("vg|x|1").is_err());
+        let thin = parse_lvs_line(
+            "  vg|pv-p-x-db_data|2147483648|cloudhv-ns=p-x-db,cloudhv-thin,cloudhv-ready|252|7|branches",
+        )
+        .unwrap();
+        assert!(thin.is_thin() && thin.pool == "branches");
+    }
+
+    #[test]
+    fn the_lvs_output_of_a_thin_pool_is_read() {
+        let st = parse_pool_line("  twi-aotz--|12.50|1.20|zero")
+            .unwrap()
+            .unwrap();
+        assert_eq!(st.data_percent, 12.5);
+        assert_eq!(st.metadata_percent, 1.2);
+        assert!(st.zeroing);
+        let no_zero = parse_pool_line("twi-a-tz--|0.00|0.50|").unwrap().unwrap();
+        assert!(!no_zero.zeroing);
+        // Not a thin pool (a plain volume's attributes begin with `-`): nothing.
+        assert!(parse_pool_line("-wi-ao----|||").unwrap().is_none());
+        // A pool that is not active has no percents: read as 0, not as a failure.
+        assert_eq!(
+            parse_pool_line("twi---tz--|||zero")
+                .unwrap()
+                .unwrap()
+                .data_percent,
+            0.0
+        );
+        assert!(parse_pool_line("x|y").is_err());
+    }
+
+    // ---- thin volumes ------------------------------------------------------------------------------------------------------------------
+
+    fn thin_fake() -> Fake {
+        Fake {
+            pool: pool(10.0, 1.0, true),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_new_thin_volume_is_made_in_the_pool_with_its_tags_and_is_not_zeroed() {
+        let f = thin_fake();
+        let e = ensure(&f, &thin_policy(), "p-abc-db", "data", 2048, true).unwrap();
+        assert!(e.created && !e.extended);
+        assert!(e.info.is_thin() && e.info.pool == "branches");
+        assert!(e.info.has_tag(READY_TAG) && e.info.has_tag(THIN_TAG));
+        assert_eq!(e.info.namespaces(), vec!["p-abc-db"]);
+        assert_eq!(
+            *f.log.borrow(),
+            vec![
+                "create-thin pv-p-abc-db_data 2048 in branches cloudhv-ns=p-abc-db,cloudhv-thin",
+                "activate pv-p-abc-db_data",
+                "tag pv-p-abc-db_data cloudhv-ready",
+            ],
+            "no zero: a block never written reads as zeros"
+        );
+        // A second request leaves it as it is.
+        f.log.borrow_mut().clear();
+        let e = ensure(&f, &thin_policy(), "p-abc-db", "data", 2048, true).unwrap();
+        assert!(!e.created && !e.extended);
+        assert_eq!(*f.log.borrow(), vec!["activate pv-p-abc-db_data"]);
+    }
+
+    #[test]
+    fn a_thin_volume_is_refused_without_a_pool_with_a_missing_pool_or_one_that_does_not_zero() {
+        // No volume_thin_pool.
+        let f = thin_fake();
+        let e = ensure(&f, &policy(), "p-abc-db", "data", 100, true).unwrap_err();
+        assert!(format!("{e:#}").contains("thin volumes are off"), "{e:#}");
+        assert!(f.log.borrow().is_empty());
+        // The pool is named but is not there.
+        let g = Fake::default();
+        let e = ensure(&g, &thin_policy(), "p-abc-db", "data", 100, true).unwrap_err();
+        assert!(format!("{e:#}").contains("is not there"), "{e:#}");
+        assert!(g.log.borrow().is_empty(), "nothing was made");
+        // A pool that does not zero what it provisions would show old data after a small first write.
+        let h = Fake {
+            pool: pool(1.0, 1.0, false),
+            ..Default::default()
+        };
+        let e = ensure(&h, &thin_policy(), "p-abc-db", "data", 100, true).unwrap_err();
+        assert!(format!("{e:#}").contains("does not zero"), "{e:#}");
+        assert!(h.log.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_nearly_full_pool_stops_the_creation_of_thin_volumes() {
+        for (data, meta, ok) in [
+            (89.9, 1.0, true),
+            (90.0, 90.0, true), // the limit itself is allowed: over it is not
+            (90.1, 1.0, false),
+            (10.0, 90.1, false), // the metadata counts as much as the data
+            (100.0, 100.0, false),
+        ] {
+            let f = Fake {
+                pool: pool(data, meta, true),
+                ..Default::default()
+            };
+            let r = ensure(&f, &thin_policy(), "p-abc-db", "data", 100, true);
+            assert_eq!(r.is_ok(), ok, "data {data}% metadata {meta}%");
+            if !ok {
+                let e = format!("{:#}", r.unwrap_err());
+                assert!(e.contains("volume_thin_max_percent"), "{e}");
+                assert!(f.log.borrow().is_empty(), "nothing was made");
+            }
+        }
+        // The limit is the policy's.
+        let strict = Policy {
+            thin_max_percent: 50,
+            ..thin_policy()
+        };
+        let f = Fake {
+            pool: pool(60.0, 1.0, true),
+            ..Default::default()
+        };
+        assert!(ensure(&f, &strict, "p-abc-db", "data", 100, true).is_err());
+    }
+
+    #[test]
+    fn the_size_of_a_thin_volume_has_its_own_cap_and_a_thick_one_keeps_the_old_cap() {
+        let f = thin_fake();
+        assert!(ensure(&f, &thin_policy(), "p-abc-db", "data", 4001, true).is_err());
+        assert!(f.log.borrow().is_empty());
+        ensure(&f, &thin_policy(), "p-abc-db", "data", 4000, true).unwrap();
+        // 0 for thin_max_mib: the cap is volume_block_max_mib.
+        let same = Policy {
+            thin_max_mib: 0,
+            ..thin_policy()
+        };
+        let g = thin_fake();
+        assert!(ensure(&g, &same, "p-abc-db", "data", 10_000, true).is_ok());
+        assert!(ensure(&g, &same, "p-abc-dc", "data", 10_001, true).is_err());
+        // The thick volume of the same policy may be larger than a thin one.
+        assert!(ensure(&g, &thin_policy(), "p-abc-dd", "data", 9000, false).is_ok());
+    }
+
+    #[test]
+    fn a_volume_is_thick_or_thin_for_good() {
+        let f = thin_fake();
+        ensure(&f, &thin_policy(), "p-abc-db", "data", 100, false).unwrap();
+        f.log.borrow_mut().clear();
+        let e = ensure(&f, &thin_policy(), "p-abc-db", "data", 100, true).unwrap_err();
+        assert!(format!("{e:#}").contains("thick or thin for good"), "{e:#}");
+        assert!(f.log.borrow().is_empty(), "nothing was done to it");
+        let g = thin_fake();
+        ensure(&g, &thin_policy(), "p-abc-db", "data", 100, true).unwrap();
+        g.log.borrow_mut().clear();
+        let e = ensure(&g, &thin_policy(), "p-abc-db", "data", 100, false).unwrap_err();
+        assert!(format!("{e:#}").contains("is a thin volume"), "{e:#}");
+        assert!(g.log.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_thin_creation_that_did_not_finish_is_made_ready_without_zeroing() {
+        let f = thin_fake();
+        // A crash after lvcreate: the owner tag, the thin tag, the pool, no ready tag.
+        f.lvs.borrow_mut().push(LvInfo {
+            major: 252,
+            minor: 5,
+            pool: "branches".into(),
+            ..other("pv-p-abc-db_data", &["cloudhv-ns=p-abc-db", THIN_TAG])
+        });
+        let e = ensure(&f, &thin_policy(), "p-abc-db", "data", 100, true).unwrap();
+        assert!(!e.created && e.info.has_tag(READY_TAG));
+        assert_eq!(
+            *f.log.borrow(),
+            vec![
+                "activate pv-p-abc-db_data",
+                "tag pv-p-abc-db_data cloudhv-ready"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_thin_volume_of_another_namespace_or_without_an_owner_is_never_taken() {
+        let f = thin_fake();
+        f.lvs.borrow_mut().push(LvInfo {
+            pool: "branches".into(),
+            ..other("pv-p-abc-db_data", &["cloudhv-ns=p-zzz-db", READY_TAG])
+        });
+        let e = ensure(&f, &thin_policy(), "p-abc-db", "data", 100, true).unwrap_err();
+        assert!(format!("{e:#}").contains("another namespace"), "{e:#}");
+        let g = thin_fake();
+        g.lvs.borrow_mut().push(LvInfo {
+            pool: "branches".into(),
+            ..other("pv-p-abc-db_data", &[READY_TAG])
+        });
+        let e = ensure(&g, &thin_policy(), "p-abc-db", "data", 100, true).unwrap_err();
+        assert!(format!("{e:#}").contains("no owner tag"), "{e:#}");
+        assert!(f.log.borrow().is_empty() && g.log.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_thin_volume_is_extended_without_zeroing_and_not_when_the_pool_is_nearly_full() {
+        let f = thin_fake();
+        ensure(&f, &thin_policy(), "p-abc-db", "data", 1000, true).unwrap();
+        f.log.borrow_mut().clear();
+        let e = ensure(&f, &thin_policy(), "p-abc-db", "data", 2000, true).unwrap();
+        assert!(e.extended && e.info.size_mib == 2000);
+        assert_eq!(
+            *f.log.borrow(),
+            vec![
+                "activate pv-p-abc-db_data",
+                "tag pv-p-abc-db_data cloudhv-extending=1000",
+                "extend pv-p-abc-db_data 2000",
+                "untag pv-p-abc-db_data cloudhv-extending=1000",
+            ],
+            "the new virtual blocks are zeros: no zero"
+        );
+        // The pool fills up: no more over-commitment.
+        *f.pool.borrow_mut() = pool(95.0, 1.0, true).into_inner();
+        f.log.borrow_mut().clear();
+        let e = ensure(&f, &thin_policy(), "p-abc-db", "data", 3000, true).unwrap_err();
+        assert!(
+            format!("{e:#}").contains("volume_thin_max_percent"),
+            "{e:#}"
+        );
+        assert_eq!(
+            *f.log.borrow(),
+            vec!["activate pv-p-abc-db_data"],
+            "not extended, not tagged"
+        );
+        // The same size is no extension and needs no pool: it still answers.
+        assert!(ensure(&f, &thin_policy(), "p-abc-db", "data", 2000, true).is_ok());
+    }
+
+    #[test]
+    fn a_thin_extension_that_did_not_end_is_finished_without_zeroing() {
+        let f = thin_fake();
+        ensure(&f, &thin_policy(), "p-abc-db", "data", 1000, true).unwrap();
+        {
+            let mut v = f.lvs.borrow_mut();
+            v[0].size_mib = 2000;
+            v[0].tags.push("cloudhv-extending=1000".into());
+        }
+        f.log.borrow_mut().clear();
+        let e = ensure(&f, &thin_policy(), "p-abc-db", "data", 2000, true).unwrap();
+        assert!(!e.extended);
+        assert_eq!(
+            *f.log.borrow(),
+            vec![
+                "activate pv-p-abc-db_data",
+                "untag pv-p-abc-db_data cloudhv-extending=1000"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_thin_request_is_answered_by_the_helper_and_a_refusal_is_an_error_line() {
+        let f = thin_fake();
+        let r = handle(
+            &f,
+            &thin_policy(),
+            &Request::Ensure {
+                namespace: "p-abc-db".into(),
+                volume: "data".into(),
+                size_mib: 512,
+                thin: true,
+            },
+        );
+        assert!(r.ok && r.created && r.info.unwrap().is_thin());
+        let refused = handle(
+            &f,
+            &policy(),
+            &Request::Ensure {
+                namespace: "p-abc-dc".into(),
+                volume: "data".into(),
+                size_mib: 512,
+                thin: true,
+            },
+        );
+        assert!(!refused.ok && refused.error.unwrap().contains("thin volumes are off"));
     }
 }

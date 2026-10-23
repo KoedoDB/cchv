@@ -306,6 +306,10 @@ fn block_volumes(spec: &serde_json::Value) -> Result<Vec<serde_json::Value>, Str
             let digest = Sha256::digest(format!("pv-by-name:{ns}:{name}").as_bytes());
             let id: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
             let mut block = serde_json::json!({"id": id, "namespace": ns, "volume": name, "size_mib": size_mib});
+            // "thin": true, the last key of the annotation of a branch's database: passed on as it is, the daemon takes only a boolean.
+            if let Some(t) = e.get("thin") {
+                block["thin"] = t.clone();
+            }
             for key in ["fs", "format", "owner"] {
                 if let Some(v) = e.get(key).and_then(|v| v.as_str()) {
                     block[key] = serde_json::json!(v);
@@ -335,6 +339,11 @@ fn block_volumes(spec: &serde_json::Value) -> Result<Vec<serde_json::Value>, Str
         let digest = Sha256::digest(format!("pv:{major}:{minor}").as_bytes());
         let id: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
         let mut block = serde_json::json!({"id": id, "major": major, "minor": minor});
+        if e.get("thin").is_some() {
+            return Err(format!(
+                "block volume {device:?}: a device cannot be thin, only a volume by name can"
+            ));
+        }
         if let Some(ns) = namespace {
             block["namespace"] = serde_json::json!(ns);
         }
@@ -767,6 +776,30 @@ mod tests {
             Some("p-abc-db"),
         );
         assert!(from_spec_with(&both, &policy(&root.0, false)).is_err());
+    }
+
+    #[test]
+    fn a_thin_volume_by_name_is_passed_on_and_a_device_cannot_be_thin() {
+        let root = Tmp::new("blk-thin");
+        let none = serde_json::json!([]);
+        let entries = serde_json::json!([{"volume": "data", "size_mib": 2048, "mount": "/var/lib/postgresql", "format": "if-blank", "owner": "999:999", "thin": true}])
+            .to_string();
+        let spec = block_spec_in(entries, none.clone(), Some("p-abc-db"));
+        let got = from_spec_with(&spec, &policy(&root.0, false)).unwrap();
+        assert_eq!(got[0]["block"]["thin"], true);
+        assert_eq!(got[0]["block"]["size_mib"], 2048);
+        // Without the key there is none (the daemon's default is thick).
+        let plain =
+            serde_json::json!([{"volume": "data", "size_mib": 2048, "mount": "/x"}]).to_string();
+        let spec = block_spec_in(plain, none, Some("p-abc-db"));
+        let got = from_spec_with(&spec, &policy(&root.0, false)).unwrap();
+        assert!(got[0]["block"].get("thin").is_none());
+        // A device with a thin key is refused here already.
+        let spec = block_spec(
+            serde_json::json!([{"device": "/dev/pgdata", "mount": "/var/lib/postgresql", "thin": true}]),
+            serde_json::json!([{"path": "/dev/pgdata", "type": "b", "major": 252, "minor": 7, "fileMode": 432}]),
+        );
+        assert!(from_spec_with(&spec, &policy(&root.0, false)).is_err());
     }
 
     #[test]

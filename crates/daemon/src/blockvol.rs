@@ -71,6 +71,8 @@ pub struct BlockRequest {
 pub struct ManagedVolume {
     pub volume: String,
     pub size_mib: u64,
+    /// `"thin": true`: a thin volume of the helper's thin pool (a branch). Thick (false) without the key.
+    pub thin: bool,
 }
 
 /// `"<uid>:<gid>"`: two decimal numbers, nothing else (no sign, no space), neither the "no id" value of Linux (4294967295).
@@ -295,15 +297,28 @@ fn parse_with(
                     "a block volume of {size_mib} MiB is more than volume_block_max_mib ({max})"
                 ));
             }
+            // "thin": true or false and nothing else (a string, a number, null is an error: it is a question of whether a customer's disk is over-committed).
+            let thin = match b.get("thin") {
+                None => false,
+                Some(serde_json::Value::Bool(t)) => *t,
+                Some(other) => return Err(format!("thin {other} is not true or false")),
+            };
             (
                 0,
                 0,
                 Some(ManagedVolume {
                     volume: volume.to_string(),
                     size_mib,
+                    thin,
                 }),
             )
         } else {
+            if b.get("thin").is_some_and(|t| !t.is_null()) {
+                return Err(
+                    "a block volume that is a device cannot be thin: only a volume by name can"
+                        .into(),
+                );
+            }
             let (Some(major), Some(minor)) = (num("major"), num("minor")) else {
                 return Err("a block volume has no device numbers".into());
             };
@@ -615,8 +630,8 @@ async fn resolve(s: &Settings, b: &BlockRequest) -> Result<(u32, u32)> {
     let namespace = b.namespace.clone().context("the volume has no namespace")?;
     let client = m.client.clone();
     if let Some(v) = &b.managed {
-        let (ns, vol, size) = (namespace.clone(), v.volume.clone(), v.size_mib);
-        let got = tokio::task::spawn_blocking(move || client.ensure(&ns, &vol, size))
+        let (ns, vol, size, thin) = (namespace.clone(), v.volume.clone(), v.size_mib, v.thin);
+        let got = tokio::task::spawn_blocking(move || client.ensure(&ns, &vol, size, thin))
             .await
             .context("the call to the volume helper")??;
         let lv = crate::lvm::lv_name(&namespace, &v.volume).map_err(|e| anyhow::anyhow!(e))?;
@@ -628,6 +643,14 @@ async fn resolve(s: &Settings, b: &BlockRequest) -> Result<(u32, u32)> {
         check_owner(Some(&got.info), &namespace, false).map_err(|e| anyhow::anyhow!(e))?;
         if !got.info.has_tag(crate::lvm::READY_TAG) {
             anyhow::bail!("the helper's volume is not ready");
+        }
+        // What was asked for is what it is: a thick volume is never handed out as a thin one nor the reverse (the disk of a branch is over-committed, a main database's is not).
+        if got.info.is_thin() != v.thin {
+            anyhow::bail!(
+                "the helper's volume {want} is {} and the request was {}",
+                if got.info.is_thin() { "thin" } else { "thick" },
+                if v.thin { "thin" } else { "thick" }
+            );
         }
         if got.created || got.extended {
             info!(
@@ -975,6 +998,42 @@ mod tests {
     }
 
     #[test]
+    fn a_volume_by_name_may_be_thin_and_only_with_a_boolean() {
+        let formatting: Option<(&[String], bool)> = Some((&[], true));
+        let with = |t: serde_json::Value| {
+            let mut r = named(json!("data"), json!(2048), Some("p-abc-db"));
+            r["volumes"][0]["block"]["thin"] = t;
+            r
+        };
+        let got = parse_with(&with(json!(true)), formatting, Some(10_000), allow).unwrap();
+        assert!(got[0].managed.as_ref().unwrap().thin);
+        let got = parse_with(&with(json!(false)), formatting, Some(10_000), allow).unwrap();
+        assert!(!got[0].managed.as_ref().unwrap().thin);
+        // Not said: thick.
+        let plain = named(json!("data"), json!(2048), Some("p-abc-db"));
+        let got = parse_with(&plain, formatting, Some(10_000), allow).unwrap();
+        assert!(!got[0].managed.as_ref().unwrap().thin);
+        // Anything but true or false is an error: whether a disk is over-committed is not guessed.
+        for bad in [
+            json!("true"),
+            json!(1),
+            json!(null),
+            json!([true]),
+            json!({}),
+        ] {
+            assert!(
+                parse_with(&with(bad.clone()), formatting, Some(10_000), allow).is_err(),
+                "{bad}"
+            );
+        }
+        // A device cannot be thin.
+        let mut dev = json!({"volumes": [{"destination": "/x", "block": {"id": ID, "major": 252, "minor": 3, "thin": true}}]});
+        assert!(parse_with(&dev, formatting, Some(10_000), allow).is_err());
+        dev["volumes"][0]["block"]["thin"] = json!(false);
+        assert!(parse_with(&dev, formatting, Some(10_000), allow).is_err());
+    }
+
+    #[test]
     fn a_volume_by_name_needs_the_feature_a_namespace_and_a_size_under_the_cap() {
         let formatting: Option<(&[String], bool)> = Some((&[], true));
         let ok = named(json!("data"), json!(8192), Some("p-abc-db"));
@@ -984,7 +1043,8 @@ mod tests {
             got[0].managed,
             Some(ManagedVolume {
                 volume: "data".into(),
-                size_mib: 8192
+                size_mib: 8192,
+                thin: false
             })
         );
         assert_eq!((got[0].major, got[0].minor), (0, 0));
@@ -1041,6 +1101,7 @@ mod tests {
             tags: tags.iter().map(|t| t.to_string()).collect(),
             major: 252,
             minor: 3,
+            pool: String::new(),
         }
     }
 

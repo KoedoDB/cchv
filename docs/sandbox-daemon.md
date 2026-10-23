@@ -837,6 +837,9 @@ The daemon is root and its socket is the one door:
 | `volume_block_format_if_blank` | `false` | a volume that asks for `"format": "if-blank"` gets an ext4 made on it when its first MiB is zeros; off, the platform makes the file system before the Pod starts |
 | `volume_block_vg` | `""` | the volume group in which the volume helper makes the logical volumes of volumes asked for by name (below). Empty: that is off, and a device given as `volumeDevices` is accepted without a look at whose it is |
 | `volume_block_max_mib` | `0` | the most a volume made or extended by name may be, in MiB; 0 refuses every creation |
+| `volume_thin_pool` | `""` | the name of an EXISTING thin pool in `volume_block_vg`, for thin volumes (`"thin": true`, below). Empty: a request for a thin volume is refused. The helper never makes the pool |
+| `volume_thin_max_virtual_mib` | `0` | the most a thin volume may be (its virtual size), in MiB; 0: the same as `volume_block_max_mib` |
+| `volume_thin_max_percent` | `90` | no thin volume is made or extended when the pool's data or metadata use is over this percent |
 | `volume_block_allow_untagged` | `false` | with `volume_block_vg`, let through a `volumeDevices` logical volume that has no `cloudhv-ns=` tag (made by hand). One tagged for another namespace never goes |
 | `volume_helper_socket` | `/run/cloudhv/volume-helper.sock` | the helper's Unix socket (0600, root's) |
 | `lvm_bin_dir` | `/usr/sbin` | where the helper finds `lvs`, `lvcreate`, `lvchange`, `lvextend` and `blkdiscard` |
@@ -960,11 +963,44 @@ spec:
 - **A cap and a single writer.** `volume_block_max_mib` limits any one volume (made or extended to); 0 makes none. The helper answers one request at a time. The daemon's per-device `flock` still keeps a volume to one VM.
 - **Never deleted.** Nothing removes a logical volume: deleting a Project's volume is an operator's action (`lvremove`), taken together with the Project's backups. The helper's `tags` request
   answers only for volumes of its own volume group.
-- **Not covered here (follow-ups)**: growing the file system after an extension; a backup of the volume; removing the volume of a deleted Project; thin provisioning (the volumes are thick, as tested).
+- **Not covered here (follow-ups)**: growing the file system after an extension; a backup of the volume; removing the volume of a deleted Project. Thin volumes are below.
 - **What the helper's unit allows**: `CAP_SYS_ADMIN` (the device-mapper ioctls) and `CAP_MKNOD` (a node of its own for a volume that udev has not made, to zero it), `ProtectSystem=strict` with write access to
   `/run/cloudhv`, `/etc/lvm`, `/run/lvm` and `/run/lock/lvm` only, no network, `DevicePolicy=closed` with `/dev/mapper/control`, device-mapper and the disk classes of a host. The host needs `lvm2`
   and `util-linux` (`blkdiscard`). **The unit has not been run under systemd on a node yet**; the helper has been run against the real LVM tools in a throw-away container
   (`crates/daemon/tests/volume-helper-lvm.sh`: a volume group on a loop device; stale data under a new volume, extension, an unfinished creation and an unfinished extension, another namespace's volume, the cap).
+
+#### Thin volumes (a branch: an empty database, so the disk may be over-committed)
+
+The main database of a Project keeps a thick volume (all its space is taken when it is made, and nothing can take it away). A branch is an empty database that is mostly not there yet, so it
+is a **thin** volume of a thin pool: only what is written takes space, and more virtual space can be given out than the pool has. The entry of the annotation gets `"thin":true` as its last key
+(a thick entry has no such key and is exactly as above):
+
+```yaml
+cloudhv.koedodb.com/block-volumes: '[{"volume":"data","size_mib":2048,"mount":"/var/lib/postgresql","format":"if-blank","owner":"999:999","thin":true}]'
+```
+
+- **The same rules, with these differences.** The name is `pv-<namespace>_<volume>`, the tags are `cloudhv-ns=<namespace>`, `cloudhv-thin` (for the operator reading `lvs`; the helper goes by LVM's own `pool_lv`) and,
+  at the end, `cloudhv-ready`; it is never shrunk or deleted; a creation that did not end (the owner tag, no `cloudhv-ready`) is finished by the next request. The volume is made with
+  `lvcreate -T <vg>/<pool> -V <size>m`. The helper does **not** make the pool: Ansible does.
+- **No zeroing.** A block of a thin volume that was never written is not backed by anything and reads as zeros, so a new thin volume cannot show another customer's data (tested: the pool's space
+  held 0xFF before the pool was made; the new volume reads zeros). That holds only if the **pool zeroes the blocks it provisions** (`--zero y`, the default): with `--zero n` a first write of less
+  than a chunk leaves the rest of the chunk as it was. The helper refuses a pool that does not zero. An extension of a thin volume is not zeroed either (the new virtual blocks are zeros).
+- **A full pool breaks every thin volume in it**, which is why creation stops before it: when the pool's data **or metadata** use is over `volume_thin_max_percent` (90), no thin volume is made and
+  none is extended (a larger virtual size is more over-commitment). A volume that exists is still answered. A pool that is not there is refused too. The pool's use should be watched and the pool
+  extended well before 90% (`lvextend -L +<size> <vg>/<pool>`; `thin_pool_autoextend_*` in `lvm.conf` can do it, but needs `dmeventd`, which the helper's unit does not run: do it by hand or from monitoring).
+- **Thick or thin for good.** A request for a thin volume that exists thick (or the reverse) is an error that says so; nothing is converted.
+- **Caps.** `volume_thin_max_virtual_mib` limits one thin volume's virtual size (0: `volume_block_max_mib`); a thick volume keeps `volume_block_max_mib`.
+- **The daemon checks it again**: the helper's answer must be thin when thin was asked and thick when not (a thick volume is never handed out as a thin one nor the reverse). A device given as
+  `volumeDevices` cannot be thin, and `thin` must be `true` or `false` (anything else refuses the request; the shim refuses `thin` on a device).
+- **What the host needs for thin**: the kernel module `dm_thin_pool`, the package `thin-provisioning-tools` (`thin_check`, which LVM runs when it activates a pool), and the pool, made once, with zeroing
+  on and a metadata volume big enough for the number of volumes (`--poolmetadatasize`): for example
+  `lvcreate --type thin-pool -L 60G --poolmetadatasize 1G --chunksize 64k --zero y -n branches <vg>`. Set `volume_thin_pool` to its name. The pool is carved out of the volume group's free space, so
+  the thick volumes and `/` and `/data` have what is left.
+- Tested against the real LVM tools in a throw-away container (`crates/daemon/tests/volume-helper-lvm.sh`: the thin part makes a pool on space that held 0xFF; a new thin volume and the rest of a chunk after a small
+  first write read zeros; tags, `pool_lv`, ready; more virtual space than the pool has; thick/thin mismatch both ways; an unfinished creation; another namespace's volume and one without an owner;
+  an extension without zeroing; the pool filled to 94%, after which a new thin volume and an extension are refused and the existing volume is still answered; the caps; no pool, a missing pool,
+  a pool made with `--zero n`; thick volumes next to the pool). **Not tested**: the helper's unit under systemd on a node with a thin pool, the file system on a thin volume under load (fsync latency
+  against a thick volume), a pool that runs out of space under a writing guest, `thin_check` and repair after a power cut.
 
 - Tested on a host (Debian 13, a PostgreSQL 18 Pod in a VM of 1 GiB on a logical volume of 8 GiB): the data survives the Pod being made again; a second Pod on the same volume,
   and a volume that is not allowed, are refused; `kill -9` of the Cloud Hypervisor under `pgbench`, several times, with no broken invariant (`pg_amcheck` clean); a full disk gives
