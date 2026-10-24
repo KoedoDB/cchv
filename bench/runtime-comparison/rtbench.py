@@ -462,6 +462,27 @@ def density(rtname, n):
     return res
 
 
+def nginx_density(rtname, n):
+    """N idle nginx containers (1 CPU, 256 MiB each): what the host spends per instance. The fixed cost of a container, without a database that takes all the memory it is given."""
+    services(rtname)
+    names = [f"ndens{i}" for i in range(n)]
+    for nm in names:
+        rm(nm)
+    time.sleep(3)
+    base = memsnap_remote()
+    for nm in names:
+        start_nginx(nm, rtname)
+    time.sleep(60)
+    snap = memsnap_remote()
+    res = {"runtime": rtname, "n": n, "mem_baseline": base, "mem_after": snap,
+           "per_instance_pss_mib": round((snap["pss_mib"] - base["pss_mib"]) / n, 1), "per_instance_rss_mib": round((snap["rss_mib"] - base["rss_mib"]) / n, 1)}
+    save(f"ndensity-{rtname}-{n}", res)
+    log(rtname, "nginx density", n, res["per_instance_pss_mib"], "MiB PSS per instance")
+    for nm in names:
+        rm(nm)
+    return res
+
+
 def stopcheck(rtname):
     """Is a file that the container wrote WITHOUT fsync still there when the container has exited and another one reads the volume?"""
     services(rtname)
@@ -506,6 +527,7 @@ if __name__ == "__main__":
     for c in ("pg", "nginx"):
         p = sub.add_parser(c); p.add_argument("runtime", choices=RUNTIMES); p.add_argument("--quick", action="store_true")
     p = sub.add_parser("density"); p.add_argument("runtime", choices=RUNTIMES); p.add_argument("n", type=int)
+    p = sub.add_parser("ndensity"); p.add_argument("runtime", choices=RUNTIMES); p.add_argument("n", type=int)
     p = sub.add_parser("start"); p.add_argument("runtime", choices=RUNTIMES)
     p = sub.add_parser("stopcheck"); p.add_argument("runtime", choices=RUNTIMES)
     a = ap.parse_args()
@@ -522,6 +544,8 @@ if __name__ == "__main__":
             start_times(a.runtime)
         elif a.cmd == "stopcheck":
             stopcheck(a.runtime)
+        elif a.cmd == "ndensity":
+            nginx_density(a.runtime, a.n)
     finally:
         if a.cmd != "prepare":
             dk("rm", "-f", "pgsrv", "nginxsrv", *[f"dens{i}" for i in range(64)], check=False, timeout=300)
