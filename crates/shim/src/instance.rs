@@ -397,6 +397,11 @@ impl Instance for CloudHvInstance {
             if prev <= 1 {
                 // Last container — release VM to daemon
                 let client = DaemonClient::new(&vm_state.daemon_socket);
+                // Docker's single container is the last one and is never deleted on its own: have the guest delete it (this flushes what it wrote without fsync to the volume)
+                // before the VM is torn down. For a pod's last container (the pause container) the guest does not know the id: the call still flushes, and its error is of no interest.
+                let _ = client
+                    .delete_container(&vm_state.daemon_vm_id, &self.id)
+                    .await;
                 if let Err(e) = client.release_sandbox(&vm_state.daemon_vm_id).await {
                     info!("daemon release failed (non-fatal): {e:#}");
                 }
