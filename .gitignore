@@ -4,6 +4,8 @@
 vmlinux*
 rootfs.erofs
 cloudhv-agent
+# the guest rootfs's crun, downloaded and checked by hacks/build-guest.sh
+/guest/rootfs/rootfs-base/bin/crun
 containerd-shim-cloudhv-v1
 cloudhv-sandbox-daemon
 mkfs.erofs
