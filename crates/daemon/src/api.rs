@@ -1166,7 +1166,7 @@ async fn setup_vm_networking_inner(
     // socket (SCM_RIGHTS) and the device is brought up later, in the pod's namespace, by the daemon.
     match tap_fd {
         Some(fd) => {
-            let net_json = serde_json::json!({ "mac": &info.mac });
+            let net_json = serde_json::json!({ "mac": &info.mac, "offload_csum": true, "offload_tso": true, "offload_ufo": true });
             crate::vm_lifecycle::api_request_with_fds(
                 api_socket,
                 "PUT",
@@ -1181,6 +1181,9 @@ async fn setup_vm_networking_inner(
             let net_json = serde_json::json!({
                 "tap": &tap_name,
                 "mac": &info.mac,
+                "offload_csum": true,
+                "offload_tso": true,
+                "offload_ufo": true,
             });
             crate::vm_lifecycle::api_request_with_body(
                 api_socket,

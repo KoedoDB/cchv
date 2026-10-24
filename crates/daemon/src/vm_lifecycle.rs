@@ -125,6 +125,11 @@ pub async fn boot_vm_sized(
             net.push(serde_json::json!({
                 "tap": tap,
                 "mac": mac,
+                // Cloud Hypervisor's defaults for these are off. Without them the guest's virtio-net has no checksum or segmentation offload, and the guest's CPU does that work for
+                // every packet (bench/runtime-comparison: nginx at 100 KB and 10 MB ran at a tenth of runc).
+                "offload_csum": true,
+                "offload_tso": true,
+                "offload_ufo": true,
             }));
         }
 
