@@ -785,6 +785,11 @@ impl ContainerManager {
             warn!("container {container_id}: its mounts could not all be released");
         }
 
+        // What the container wrote and did not fsync goes to the disks now. A block volume is shared and stays mounted in this VM, so the unmount above does not flush it, and the host
+        // tears the VM down without asking the guest to (a file written without fsync was gone when the next container read the volume: bench/runtime-comparison, stopcheck).
+        #[cfg(target_os = "linux")]
+        let _ = tokio::task::spawn_blocking(nix::unistd::sync).await;
+
         // The volumes: a copy of a ConfigMap or Secret goes with its last user.
         for u in removed.map(|c| c.volumes).unwrap_or_default() {
             let key = u.key();
