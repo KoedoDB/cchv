@@ -60,9 +60,13 @@ sparse file on the host's ext4, so **cchv's volume has a loop device and the hos
   CPU: this shows in the 100 KB and 10 MB nginx rows and not in PostgreSQL. It is a property of cchv at this version, not of the method.
 - **A file written without `fsync` is not there after a normal container stop under cchv** (the VM is released without a `sync` of the volume); runc, gVisor and Kata keep it because they write
   through to the host's file system. See `stopcheck` below. A database that fsyncs is not affected. The restart times of cchv are taken after a `sync` for that reason.
-- Kata and cchv do not get the same VM from the same limits. Kata adds its defaults to the container's limits: for 2 CPUs and 2 GiB it makes a VM of 3 vCPUs and 2080 MiB, for 1 CPU and 256 MiB a VM of
-  2 vCPUs and 288 MiB (Cloud Hypervisor's own `vm.info` says so). cchv makes 2 vCPUs and 2112 MiB for the first, and for the second it hands out a ready VM of 1 vCPU and 320 MiB from its pool. The numbers of
-  CPU-bound tests (nginx with small files) are affected by that: Kata has one vCPU more.
+- **The VM is the same size for Kata and cchv in every test** (the rule is in the project's CLAUDE.md): PostgreSQL **3 vCPUs and 2080 MiB**, nginx **2 vCPUs and 320 MiB**. Kata's VM size cannot be set
+  from outside: it is the container's limits plus one vCPU and 32 MiB (the defaults of the configuration file, and the annotations for them, changed nothing; checked with Cloud Hypervisor's `vm.info`).
+  cchv makes its VM from the limits plus 64 MiB, and never with fewer vCPUs than the pool's `default_vcpus`. So `vm_limits()` in `rtbench.py` gives each runtime the limits that end in the same VM:
+  PostgreSQL: Kata `--cpus 2 -m 2048m`, cchv `--cpus 2 -m 2016m` with `default_vcpus` 3 (`RT_CCHV_VCPUS=3` for `20-start.sh`); nginx: Kata `--cpus 1 -m 288m`, cchv `--cpus 1 -m 256m` with `default_vcpus` 2.
+  The CPU limit in the guest is the same for both (2 and 1); the memory limit differs by 32 MiB, which is the price of the same VM. runc and gVisor get the plain limits (2 CPUs and 2 GiB, 1 CPU and 256 MiB).
+  `run-all.sh` resets before the PostgreSQL part and before the nginx part (the pool is sized for one of them at a time). **`rtbench.py` reads the VMM's command line (`--cpus boot=`, `--memory size=`) after the
+  start and stops when no VM of that size is running; the sizes are in every result (`vm_sizes`).**
 - Kata with Cloud Hypervisor selects its configuration by the file `runtime-rs/configuration.toml` (a symlink); the handler name and `KATA_CONF_FILE` did not select it (the second is refused unless the
   file is one that Kata ships). `12-prereqs.sh` and `rtbench_blk.py` set the symlink. **Check which VMM runs** (`pgrep -a qemu-system` / `cloud-hypervisor`) before trusting a "Cloud Hypervisor" label.
 - gVisor is not given a block device either: its data directory is a bind mount.

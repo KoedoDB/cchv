@@ -41,7 +41,7 @@ JSON
 # cchv: the daemon and the shim's configuration (the keys are those of docs/try-with-docker.md; the volume keys are the ones of docs/sandbox-daemon.md)
 sudo tee /opt/cloudhv/daemon.json >/dev/null <<JSON
 {
-  "pool_size": 3, "default_vcpus": 1, "default_memory_mb": 320,
+  "pool_size": 3, "default_vcpus": ${RT_CCHV_VCPUS:-2}, "default_memory_mb": 320,
   "cloud_hypervisor_binary": "$RT_ROOT/bin/cloud-hypervisor",
   "kernel_path": "/opt/cloudhv/vmlinux", "rootfs_path": "/opt/cloudhv/rootfs.erofs",
   "socket_path": "/run/cloudhv/daemon.sock", "state_dir": "/run/cloudhv/state",
@@ -54,7 +54,7 @@ sudo tee /opt/cloudhv/config.json >/dev/null <<JSON
 {
   "cloud_hypervisor_binary": "$RT_ROOT/bin/cloud-hypervisor",
   "kernel_path": "/opt/cloudhv/vmlinux", "rootfs_path": "/opt/cloudhv/rootfs.erofs",
-  "default_vcpus": 1, "default_memory_mb": 320,
+  "default_vcpus": ${RT_CCHV_VCPUS:-2}, "default_memory_mb": 320,
   "daemon_socket": "/run/cloudhv/daemon.sock", "mkfs_erofs_path": "/usr/bin/mkfs.erofs",
   "require_pod_cgroup": false, "erofs_cache_max_mib": 20480,
   "volume_source_roots": ["$RT_DATA/docker/containers", "$RT_DATA/docker/volumes"]

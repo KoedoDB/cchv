@@ -66,18 +66,30 @@ for rt in ORDER:
     if any(c != "-" for c in cells):
         print(f"| {LABEL[rt]} | " + " | ".join(cells) + f" | {ready} |")
 
+print("\n## Density: N idle nginx containers (1 CPU, 256 MiB limit each), host memory per instance (PSS, MiB) - the fixed cost of a runtime\n")
+print("| runtime | N=1 | N=8 | N=16 |")
+print("|---|---|---|---|")
+for rt in ORDER:
+    cells = []
+    for n in (1, 8, 16):
+        d = load(f"ndensity-{rt}-{n}")
+        cells.append(f(d["per_instance_pss_mib"], 0) if d else "-")
+    if any(c != "-" for c in cells):
+        print(f"| {LABEL[rt]} | " + " | ".join(cells) + " |")
+
 print("\n## nginx (1 CPU, 256 MiB, worker_processes 1, files in the image; wrk 2 threads, 60 s, median of 3 runs)\n")
-print("| runtime | first 200 s | idle MiB | 1 KB c50 rps | 1 KB c200 rps | 100 KB c50 rps | 100 KB c200 rps | 10 MB c50 rps | 10 MB c200 rps |")
-print("|---|---|---|---|---|---|---|---|---|")
+print("| runtime | first 200 s | idle MiB | under load MiB (after the last 10 MB run) | 1 KB c50 rps | 1 KB c200 rps | 100 KB c50 rps | 100 KB c200 rps | 10 MB c50 rps | 10 MB c200 rps |")
+print("|---|---|---|---|---|---|---|---|---|---|")
 for rt in ORDER:
     d = load(f"nginx-{rt}")
     if not d:
         continue
     idle = d["mem_idle"]["pss_mib"] - d["mem_baseline"]["pss_mib"]
+    loaded = d["mem_under_load_last"]["pss_mib"] - d["mem_baseline"]["pss_mib"] if d.get("mem_under_load_last") else None
     cells = []
     for k in ("1k.html_c50", "1k.html_c200", "100k.bin_c50", "100k.bin_c200", "10m.bin_c50", "10m.bin_c200"):
         cells.append(med(d.get(k, {}).get("rps")))
-    print(f"| {LABEL[rt]} | {f(d.get('first_200_s'), 2)} | {f(idle, 0)} | " + " | ".join(cells) + " |")
+    print(f"| {LABEL[rt]} | {f(d.get('first_200_s'), 2)} | {f(idle, 0)} | {f(loaded, 0)} | " + " | ".join(cells) + " |")
 print("\n### nginx p99 latency (ms, median) and CPU of the runtime's processes per 1000 requests (ms of CPU)\n")
 print("| runtime | 1 KB c50 | 1 KB c200 | 100 KB c50 | 100 KB c200 | 10 MB c50 | 10 MB c200 |")
 print("|---|---|---|---|---|---|---|")

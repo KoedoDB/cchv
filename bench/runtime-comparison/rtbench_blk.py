@@ -112,7 +112,7 @@ def prep_www():
 def start_nginx_blk(name, rtname):
     common = ["--device", f"{WWW_DEV}:/dev/kblk", "--cap-add", "SYS_ADMIN", "--security-opt", "seccomp=unconfined", "--security-opt", "apparmor=unconfined"]
     t0 = time.time()
-    r.dk("run", "-d", "--name", name, "--runtime", "kata-clh", "--cpus", "1", "-m", "256m", "--memory-swap", "256m", "--pids-limit", "512", *common,
+    r.dk("run", "-d", "--name", name, "--runtime", "kata-clh", "--cpus", "1", "-m", r.NGINX_KATA_MEM, "--memory-swap", r.NGINX_KATA_MEM, "--pids-limit", "512", *common,
          "--entrypoint", "/bin/sh", "rtbench-nginx", "-c", 'mount -o ro /dev/kblk /usr/share/nginx/html && exec nginx -g "daemon off;"', timeout=300)
     ip = r.container_ip(name)
     deadline = time.time() + 120

@@ -214,8 +214,52 @@ def volume_args(kind, rt, tag):
     return ["-v", f"{path}:/var/lib/postgresql"]
 
 
-def start_pg(name, rtname, tag, limits=("2", "2g")):
+# The VM of a Kata or a cchv container is the same size in every test: PostgreSQL 3 vCPUs and 2080 MiB, nginx 2 vCPUs and 320 MiB.
+# Kata makes its VM from the container's limits (+1 vCPU, +32 MiB) and cannot be told otherwise; cchv makes it from the limits (+64 MiB) and
+# never gives it fewer vCPUs than its pool's default (RT_CCHV_VCPUS in 20-start.sh: 3 for PostgreSQL, 2 for nginx). So the limits are chosen
+# per runtime so that both end in the same VM; runc and gVisor get the VM's own numbers as their limits (--cpus and -m), so that all four have the same CPUs and memory to use.
+# (Kata also sets a cgroup of its own limits inside the guest: 2 CPUs for PostgreSQL, 1 for nginx; cchv sets none. Seen with `cat /sys/fs/cgroup/cpu.max` in the guest.)
+VM_SIZE = {"pg": (3, 2080), "nginx": (2, 320)}
+PLAIN_LIMITS = {"pg": (str(VM_SIZE["pg"][0]), VM_SIZE["pg"][1]), "nginx": (str(VM_SIZE["nginx"][0]), VM_SIZE["nginx"][1])}
+
+
+def vm_limits(rtname, kind):
+    cpus, mem = PLAIN_LIMITS[kind]
+    runtime = RUNTIMES[rtname]["runtime"]
+    if runtime == "kata-clh":
+        cpus, mem = str(VM_SIZE[kind][0] - 1), VM_SIZE[kind][1] - 32   # Kata adds 1 vCPU and 32 MiB
+    elif runtime == "cloudhv":
+        cpus, mem = str(VM_SIZE[kind][0] - 1), VM_SIZE[kind][1] - 64   # cchv adds 64 MiB; the vCPUs come from the pool's default_vcpus (>= the limit)
+    return cpus, f"{mem}m"
+
+
+def vm_sizes():
+    """The VMs that are running now, as [vCPUs, memory MiB]: asked of every Cloud Hypervisor process through its API socket (vm.info; the size is not on the command line)."""
+    out = []
+    for line in sh("pgrep -a cloud-hyperviso || true", check=False).stdout.splitlines():
+        m = re.search(r"--api-socket (\S+)", line)
+        if not m:
+            continue
+        r = sh(f"sudo curl -s --max-time 5 --unix-socket {m.group(1)} http://localhost/api/v1/vm.info", check=False)
+        try:
+            cfg = json.loads(r.stdout)["config"]
+            out.append([cfg["cpus"]["boot_vcpus"], cfg["memory"]["size"] // 1048576])
+        except (ValueError, KeyError):
+            continue   # a VMM that has no VM yet
+    return sorted(out)
+
+
+def check_vm(rtname, kind):
+    """The VM that was just started must be the size VM_SIZE says (Kata and cchv; the pool's idle VMs of cchv are in the list as well). Raises when it is not: a result with VMs of different sizes is not a result."""
+    sizes = vm_sizes()
+    if RUNTIMES[rtname]["runtime"] in ("kata-clh", "cloudhv") and list(VM_SIZE[kind]) not in sizes:
+        raise RuntimeError(f"{rtname}: no VM of {VM_SIZE[kind]} (vCPUs, MiB) is running; the VMs are {sizes}")
+    return sizes
+
+
+def start_pg(name, rtname, tag, limits=None):
     rt = RUNTIMES[rtname]
+    limits = limits or vm_limits(rtname, "pg")
     args = ["run", "-d", "--name", name, "--runtime", rt["runtime"], "--cpus", limits[0], "-m", limits[1], "--memory-swap", limits[1], "--pids-limit", "2048",
             "--shm-size", "256m", "-e", "POSTGRES_HOST_AUTH_METHOD=trust"] + volume_args("pg", rt, tag) + [POSTGRES] + PG_ARGS
     t0 = time.time()
@@ -271,7 +315,7 @@ def pg(rtname, quick=False):
     tag = "pgdata" if RUNTIMES[rtname]["vol"] == "block" else rtname
     scale, t_tpcb, t_sel, t_com, reps = (100, 300, 180, 60, 3) if not quick else (10, 20, 15, 10, 1)
     result = {"runtime": rtname, "settings": {"scale": scale, "clients": 16, "jobs": 4, "tpcb_s": t_tpcb, "select_only_s": t_sel, "commit_s": t_com, "reps": reps,
-                                              "pg_args": PG_ARGS, "limits": "2 CPUs, 2 GiB"}, "host": host_state()}
+                                              "pg_args": PG_ARGS, "limits": " / ".join(vm_limits(rtname, "pg")) + " (--cpus / -m); the VM of Kata and cchv is %d vCPUs, %d MiB" % VM_SIZE["pg"]}, "host": host_state()}
     rm("pgsrv")
     time.sleep(3)
     base = memsnap_remote()
@@ -280,6 +324,7 @@ def pg(rtname, quick=False):
     t0 = start_pg("pgsrv", rtname, tag)
     first, ip = wait_query("pgsrv", t0)
     result["first_query_s"] = round(first, 2)
+    result["vm_sizes"] = check_vm(rtname, "pg")
     log(rtname, "first query after", round(first, 2), "s")
     time.sleep(10 if quick else 60)
     result["mem_idle_after_initdb"] = memsnap_remote()
@@ -352,10 +397,14 @@ def pg(rtname, quick=False):
 
 # ── nginx ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
+NGINX_KATA_MEM = "288m"   # = vm_limits("kata-clh", "nginx")
+
+
 def start_nginx(name, rtname):
     rt = RUNTIMES[rtname]
     t0 = time.time()
-    dk("run", "-d", "--name", name, "--runtime", rt["runtime"], "--cpus", "1", "-m", "256m", "--memory-swap", "256m", "--pids-limit", "512", "rtbench-nginx", timeout=300)
+    cpus, mem = vm_limits(rtname, "nginx")   # the same VM for Kata and cchv: 2 vCPUs, 320 MiB
+    dk("run", "-d", "--name", name, "--runtime", rt["runtime"], "--cpus", cpus, "-m", mem, "--memory-swap", mem, "--pids-limit", "512", "rtbench-nginx", timeout=300)
     ip = container_ip(name)
     deadline = time.time() + 120
     while time.time() < deadline:
@@ -387,12 +436,13 @@ def wrk(ip, path, conns, secs):
 def nginx(rtname, quick=False):
     services(rtname)
     secs, reps = (60, 3) if not quick else (8, 1)
-    result = {"runtime": rtname, "settings": {"seconds": secs, "reps": reps, "limits": "1 CPU, 256 MiB", "files": ["1k.html", "100k.bin", "10m.bin"], "connections": [50, 200]}, "host": host_state()}
+    result = {"runtime": rtname, "settings": {"seconds": secs, "reps": reps, "limits": " / ".join(vm_limits(rtname, "nginx")) + " (--cpus / -m); the VM of Kata and cchv is %d vCPUs, %d MiB" % VM_SIZE["nginx"], "files": ["1k.html", "100k.bin", "10m.bin"], "connections": [50, 200]}, "host": host_state()}
     rm("nginxsrv")
     time.sleep(3)
     result["mem_baseline"] = memsnap_remote()
     first, ip = start_nginx("nginxsrv", rtname)
     result["first_200_s"] = round(first, 2)
+    result["vm_sizes"] = check_vm(rtname, "nginx")
     time.sleep(5 if quick else 30)
     result["mem_idle"] = memsnap_remote()
     raws = []
@@ -442,17 +492,19 @@ def density(rtname, n):
             path = f"{DATA}/pgdens-{rtname}-{i}"
             sh(f"sudo rm -rf {path}; sudo mkdir -p {path}; sudo chown 999:999 {path}")
             args = ["-v", f"{path}:/var/lib/postgresql"]
-        dk("run", "-d", "--name", nm, "--runtime", rt["runtime"], "--cpus", "2", "-m", "2g", "--memory-swap", "2g", "--pids-limit", "2048", "--shm-size", "256m",
+        cpus, mem = vm_limits(rtname, "pg")
+        dk("run", "-d", "--name", nm, "--runtime", rt["runtime"], "--cpus", cpus, "-m", mem, "--memory-swap", mem, "--pids-limit", "2048", "--shm-size", "256m",
            "-e", "POSTGRES_HOST_AUTH_METHOD=trust", *args, POSTGRES, *PG_ARGS, timeout=300)
     ready = []
     for nm in names:
         wait_query(nm, time.time(), timeout=300)
         ready.append(round(time.time() - t0, 1))
     time.sleep(60)
+    vms = check_vm(rtname, "pg")
     snap = memsnap_remote()
     with open("/proc/meminfo") as f:
         mi = {l.split(":")[0]: int(l.split()[1]) for l in f}
-    res = {"runtime": rtname, "n": n, "all_ready_s": ready[-1], "mem_baseline": base, "mem_after": snap,
+    res = {"runtime": rtname, "n": n, "all_ready_s": ready[-1], "vm_sizes": vms, "mem_baseline": base, "mem_after": snap,
            "per_instance_pss_mib": round((snap["pss_mib"] - base["pss_mib"]) / n, 1), "per_instance_rss_mib": round((snap["rss_mib"] - base["rss_mib"]) / n, 1),
            "host_mem_available_mib": round(mi["MemAvailable"] / 1024.0, 0)}
     save(f"density-{rtname}-{n}", res)
@@ -463,7 +515,7 @@ def density(rtname, n):
 
 
 def nginx_density(rtname, n):
-    """N idle nginx containers (1 CPU, 256 MiB each): what the host spends per instance. The fixed cost of a container, without a database that takes all the memory it is given."""
+    """N idle nginx containers (limits: vm_limits(rtname, "nginx")): what the host spends per instance. The fixed cost of a container, without a database that takes all the memory it is given."""
     services(rtname)
     names = [f"ndens{i}" for i in range(n)]
     for nm in names:
@@ -473,8 +525,9 @@ def nginx_density(rtname, n):
     for nm in names:
         start_nginx(nm, rtname)
     time.sleep(60)
+    vms = check_vm(rtname, "nginx")
     snap = memsnap_remote()
-    res = {"runtime": rtname, "n": n, "mem_baseline": base, "mem_after": snap,
+    res = {"runtime": rtname, "n": n, "vm_sizes": vms, "mem_baseline": base, "mem_after": snap,
            "per_instance_pss_mib": round((snap["pss_mib"] - base["pss_mib"]) / n, 1), "per_instance_rss_mib": round((snap["rss_mib"] - base["rss_mib"]) / n, 1)}
     save(f"ndensity-{rtname}-{n}", res)
     log(rtname, "nginx density", n, res["per_instance_pss_mib"], "MiB PSS per instance")
@@ -504,16 +557,17 @@ def start_times(rtname):
     services(rtname)
     res = {"runtime": rtname, "pg_first_query_s": [], "nginx_first_200_s": []}
     tag = "pgdata" if RUNTIMES[rtname]["vol"] == "block" else rtname
-    for _ in range(5):
+    phase = os.environ.get("RT_PHASE", "")   # "pg" or "nginx": the cchv daemon's pool is sized for one of them at a time (20-start.sh)
+    for _ in range(5 if phase != "nginx" else 0):
         rm("pgsrv"); time.sleep(2)
         t0 = start_pg("pgsrv", rtname, tag)
         res["pg_first_query_s"].append(round(wait_query("pgsrv", t0)[0], 2))
         rm("pgsrv")
-    for _ in range(5):
+    for _ in range(5 if phase != "pg" else 0):
         rm("nginxsrv"); time.sleep(2)
         res["nginx_first_200_s"].append(round(start_nginx("nginxsrv", rtname)[0], 2))
         rm("nginxsrv")
-    save(f"start-{rtname}", res)
+    save(f"start-{rtname}" + (f"-{phase}" if phase else ""), res)
     return res
 
 
