@@ -2,6 +2,7 @@
 # Takes the benchmark off the host: units, the second Docker and its data, the runtimes, the loop-device volume group, the firewall rule, the bridge, and puts the CPU governor back.
 # The results (in the user's home) and these scripts stay. Packages installed by 12-prereqs.sh stay (erofs-utils is small); remove them by hand if you want.
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "$here/env.sh"
+[ -z "$RT_BINDS" ] || { echo "RT_CONF is moved (a host with its own cchv): clean up by hand; this script removes /opt/kata and the volume group rtvg"; exit 1; }
 "$here/21-stop.sh" 2>/dev/null
 sudo pkill -f 'containerd-shim.* -namespace rtbench' 2>/dev/null; sudo pkill -x cloud-hyperviso 2>/dev/null; sudo pkill -x virtiofsd 2>/dev/null; sleep 1
 sudo systemctl reset-failed 'rtbench-*' 2>/dev/null

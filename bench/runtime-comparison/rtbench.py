@@ -13,7 +13,11 @@ Results go to $RT_RESULTS (default ~/rtbench-results/<date>), one JSON file per 
 import argparse, json, os, re, statistics, subprocess, sys, time
 
 ROOT = "/opt/rtbench"
-DATA = "/var/lib/rtbench"
+VG = os.environ.get("RT_VG", "rtvg")         # the volume group of the database volumes, and the prefix of the logical volumes in it (see env.sh)
+LVP = os.environ.get("RT_LVP", "")
+CRUN = os.environ.get("RT_CRUN", "/run/cloudhv")
+BINDS = os.environ.get("RT_BINDS", "")
+DATA = os.environ.get("RT_DATA", "/var/lib/rtbench")
 SOCK = "unix:///run/rtbench/docker.sock"
 DOCKER = ["sudo", f"{ROOT}/docker/docker", "-H", SOCK]
 RESULTS = os.environ.get("RT_RESULTS") or os.path.expanduser("~/rtbench-results/" + time.strftime("%Y%m%d"))
@@ -77,8 +81,8 @@ def services(rtname):
     active = sh("systemctl is-active rtbench-cchv-daemon", check=False).stdout.strip() == "active"
     if rtname == "cloudhv" and not active:
         kill_stale_vms()
-        sh("sudo find /run/cloudhv/state -mindepth 1 -delete", check=False)
-        sh("sudo systemctl reset-failed rtbench-cchv-daemon 2>/dev/null; sudo systemd-run --unit=rtbench-cchv-daemon --property=Restart=no -E CLOUDHV_MEMORY_RESTORE_MODE=Copy -E RUST_LOG=info "
+        sh(f"sudo find {CRUN}/state -mindepth 1 -delete", check=False)
+        sh("sudo systemctl reset-failed rtbench-cchv-daemon 2>/dev/null; sudo systemd-run --unit=rtbench-cchv-daemon --property=Restart=no {BINDS} -E CLOUDHV_MEMORY_RESTORE_MODE=Copy -E RUST_LOG=info "
            f"{ROOT}/bin/cloudhv-sandbox-daemon /opt/cloudhv/daemon.json", check=False)
         for _ in range(60):
             if "pool initialized" in sh("sudo journalctl -u rtbench-cchv-daemon -o cat --no-pager", check=False).stdout:
@@ -203,7 +207,7 @@ def container_ip(name):
 def volume_args(kind, rt, tag):
     """The data volume of a PostgreSQL container for each runtime."""
     if rt["vol"] == "block":
-        dev = {"pgdata": "/dev/rtvg/pgdata"}.get(tag, f"/dev/rtvg/{tag}")
+        dev = f"/dev/{VG}/{LVP}{tag}"
         sh(f"sudo blkdiscard -f --zeroout {dev}")
         return ["--device", f"{dev}:/dev/pgdata", "--annotation", "cloudhv.koedodb.com/block-volumes=" + BLOCK]
     if rt["vol"] == "loop":
@@ -485,9 +489,9 @@ def density(rtname, n):
     for i, nm in enumerate(names):
         if rt["vol"] == "block":
             lv = f"dens{i}"
-            sh(f"sudo lvs rtvg/{lv} >/dev/null 2>&1 || sudo lvcreate -y -L 1G -n {lv} rtvg >/dev/null")
-            sh(f"sudo blkdiscard -f --zeroout /dev/rtvg/{lv}")
-            args = ["--device", f"/dev/rtvg/{lv}:/dev/pgdata", "--annotation", "cloudhv.koedodb.com/block-volumes=" + BLOCK]
+            sh(f"sudo lvs {VG}/{LVP}{lv} >/dev/null 2>&1 || sudo lvcreate -y -L 1G -n {LVP}{lv} {VG} >/dev/null")
+            sh(f"sudo blkdiscard -f --zeroout /dev/{VG}/{LVP}{lv}")
+            args = ["--device", f"/dev/{VG}/{LVP}{lv}:/dev/pgdata", "--annotation", "cloudhv.koedodb.com/block-volumes=" + BLOCK]
         else:
             path = f"{DATA}/pgdens-{rtname}-{i}"
             sh(f"sudo rm -rf {path}; sudo mkdir -p {path}; sudo chown 999:999 {path}")

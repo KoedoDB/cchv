@@ -38,15 +38,15 @@ def ensure_image():
     r.dk("build", "-q", "--network", "host", "-t", IMAGE, ctx, timeout=900)
 
 
-LV = "kblk"
-DEV = f"/dev/rtvg/{LV}"
+LV = os.environ.get("RT_LVP", "") + ("kblk" if r.VG == "rtvg" else "pgdata")   # in a real group Kata and cchv share the one 8 GiB volume (one run at a time, zeroed before each)
+DEV = f"/dev/{r.VG}/{LV}"
 ENTRY = ('blkid -o value -s TYPE /dev/kblk >/dev/null 2>&1 || mkfs.ext4 -q -F /dev/kblk; mkdir -p /var/lib/postgresql; '
          'mount -o noatime /dev/kblk /var/lib/postgresql && exec docker-entrypoint.sh "$@"')
 DIRECT = False
 
 
 def ensure_lv():
-    r.sh(f"sudo lvs rtvg/{LV} >/dev/null 2>&1 || sudo lvcreate -y -L 8G -n {LV} rtvg >/dev/null")
+    r.sh(f"sudo lvs {r.VG}/{LV} >/dev/null 2>&1 || sudo lvcreate -y -L 8G -n {LV} {r.VG} >/dev/null")
 
 
 def wipe():
@@ -84,15 +84,15 @@ def probe():
     r.save("probe-kata-clh-blk", out)
 
 
-WWW_LV = "kblkwww"
-WWW_DEV = f"/dev/rtvg/{WWW_LV}"
+WWW_LV = os.environ.get("RT_LVP", "") + "kblkwww"
+WWW_DEV = f"/dev/{r.VG}/{WWW_LV}"
 
 
 def prep_www():
     ensure_image()
     """An ext4 on a block device, made inside a Kata container (the device hot-plugged as virtio-blk) and filled with the three files of the nginx benchmark: the bytes are those of the
     image `rtbench-nginx` (copied out of it with docker cp), so every runtime serves the same files. The files are read back by a second container and compared."""
-    r.sh(f"sudo lvs rtvg/{WWW_LV} >/dev/null 2>&1 || sudo lvcreate -y -L 1G -n {WWW_LV} rtvg >/dev/null")
+    r.sh(f"sudo lvs {r.VG}/{WWW_LV} >/dev/null 2>&1 || sudo lvcreate -y -L 1G -n {WWW_LV} {r.VG} >/dev/null")
     r.sh(f"sudo blkdiscard -f --zeroout {WWW_DEV}")
     src = f"{r.DATA}/www-src"
     r.sh(f"sudo rm -rf {src}; sudo mkdir -p {src}")

@@ -18,12 +18,12 @@ for rt in runc runsc kata-clh cloudhv; do
   step python3 "$here/rtbench.py" nginx $rt
 done
 RT_CCHV_VCPUS=3 "$here/22-reset.sh" >/dev/null 2>&1; python3 "$here/rtbench.py" prepare >/dev/null 2>&1
-step python3 "$here/rtbench.py" pg runc-loop          # the control: runc on the same loop-device volume cchv gets
+[ "$RT_LOOP_CONTROL" = 1 ] && step python3 "$here/rtbench.py" pg runc-loop   # the control: runc on the same loop-device volume cchv gets (only where the group is on a loop device)
 for rt in runc runsc kata-clh cloudhv; do
   RT_CCHV_VCPUS=3 "$here/22-reset.sh" >/dev/null 2>&1; python3 "$here/rtbench.py" prepare >/dev/null 2>&1
-  for n in 1 8 16; do step python3 "$here/rtbench.py" density $rt $n; done
+  for n in $RT_DENSITY_NS; do step python3 "$here/rtbench.py" density $rt $n; done
   RT_CCHV_VCPUS=2 "$here/22-reset.sh" >/dev/null 2>&1; python3 "$here/rtbench.py" prepare >/dev/null 2>&1
-  for n in 1 8 16; do step python3 "$here/rtbench.py" ndensity $rt $n; done
+  for n in $RT_DENSITY_NS; do step python3 "$here/rtbench.py" ndensity $rt $n; done
 done
 "$here/50-environment.sh" "$RT_RESULTS" >/dev/null
 echo "=== $(date +%T) done"
