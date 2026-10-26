@@ -1,6 +1,6 @@
 //! What a binary was built from, for `--version` (the values come from `build.rs`).
 
-/// Our version: the release tag (`v0.16.0-koedodb.1`) for a release build, `git describe` for any other.
+/// Our version: the release tag (`v0.3.1`) for a release build, `git describe` for any other.
 pub const VERSION: &str = env!("CLOUDHV_BUILD_VERSION");
 /// The commit that was built.
 pub const COMMIT: &str = env!("CLOUDHV_BUILD_COMMIT");

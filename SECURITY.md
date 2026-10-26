@@ -27,7 +27,7 @@ the project is and how far it has been checked: **it is experimental and has not
 
 ## Supported versions
 
-Only the latest tag (`v0.17.0-koedodb.N`) is supported.
+Only the latest release is supported.
 
 ## How we look for problems
 
