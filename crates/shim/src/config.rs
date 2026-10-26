@@ -48,6 +48,10 @@ pub struct ShimLimits {
     #[serde(default = "default_erofs_cache_max_mib")]
     pub erofs_cache_max_mib: u64,
 
+    /// Where the images are kept (an absolute path): the daemon's `erofs_cache_dir`, which must be the same.
+    #[serde(default = "default_erofs_cache_dir")]
+    pub erofs_cache_dir: String,
+
     /// Where `mkfs.erofs` is (an absolute path). Default: `/usr/local/bin/mkfs.erofs`, then `/usr/sbin/mkfs.erofs`.
     #[serde(default)]
     pub mkfs_erofs_path: Option<String>,
@@ -95,6 +99,9 @@ fn default_max_memory_mb() -> u64 {
 fn default_erofs_cache_max_mib() -> u64 {
     4096
 }
+fn default_erofs_cache_dir() -> String {
+    cloudhv_common::DEFAULT_EROFS_CACHE_DIR.to_string()
+}
 fn default_mkfs_timeout_secs() -> u64 {
     300
 }
@@ -132,8 +139,14 @@ pub fn load_shim_limits(path: Option<&str>) -> Result<ShimLimits> {
     let config_path = path.unwrap_or(DEFAULT_CONFIG_PATH);
     let data = std::fs::read_to_string(config_path)
         .with_context(|| format!("failed to read config from {config_path}"))?;
-    serde_json::from_str(&data)
-        .with_context(|| format!("failed to parse the shim's limits in {config_path}"))
+    let limits: ShimLimits = serde_json::from_str(&data)
+        .with_context(|| format!("failed to parse the shim's limits in {config_path}"))?;
+    anyhow::ensure!(
+        Path::new(&limits.erofs_cache_dir).is_absolute(),
+        "erofs_cache_dir must be an absolute path, not {:?}",
+        limits.erofs_cache_dir
+    );
+    Ok(limits)
 }
 
 #[cfg(test)]
@@ -164,6 +177,7 @@ mod tests {
         assert_eq!(none.max_memory_mb, 16384);
         assert_eq!(none.max_vcpus, 0);
         assert_eq!(none.erofs_cache_max_mib, 4096);
+        assert_eq!(none.erofs_cache_dir, "/var/lib/cloud-hypervisor/erofs-cache");
         assert_eq!(none.mkfs_erofs_timeout_secs, 300);
         assert!(none.require_pod_cgroup);
         assert!(none

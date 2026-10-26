@@ -1,7 +1,7 @@
 //! The cache of erofs images of container root file systems.
 //!
 //! A container's rootfs is turned into an erofs image once and kept (`<key>.erofs`) so that the pods of one image share it. The
-//! images are the customers' and are built in RAM-backed `/run`, so the cache has to be safe and bounded:
+//! images are the customers' and are kept on the disk (`erofs_cache_dir`, `/var/lib/cloud-hypervisor/erofs-cache` by default), so the cache has to be safe and bounded:
 //!
 //! - the directory is root's and not listable (0711: the daemon's rootless Cloud Hypervisors must be able to reach a file they have
 //!   an ACL for, but cannot list the names); every file is 0600 from the moment it is created (the build runs with umask 077), and
@@ -94,6 +94,11 @@ pub fn prepare(cfg: &CacheConfig, rootfs: &Path, key: &str) -> Result<(PathBuf, 
     // 0600 already (umask 077 in the build); say it again, then publish a finished file.
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
         .map_err(|e| format!("chmod erofs: {e}"))?;
+    // On the disk a rename can reach it before the data does: after a power cut the final name could hold an empty or half-written image,
+    // which the next pod would take for a finished one. So the data is flushed first, then published.
+    File::open(&tmp)
+        .and_then(|f| f.sync_all())
+        .map_err(|e| format!("sync erofs: {e}"))?;
     std::fs::rename(&tmp, &cache_path).map_err(|e| format!("rename erofs: {e}"))?;
     guard.disarm();
     Ok((cache_path, lease))

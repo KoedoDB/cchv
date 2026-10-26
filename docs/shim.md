@@ -8,7 +8,8 @@ runtime config (`/opt/cloudhv/config.json`); every field below is optional.
 |---|---|---|
 | `max_memory_mb` | 16384 | The largest VM (the pod's memory limit plus the guest's 64 MiB) the shim starts. A pod asking for more does not start. The pod's limit is its own to set, and the scheduler counts only requests. |
 | `max_vcpus` | 0 (host CPUs) | The most vCPUs of a VM. A higher CPU limit gets this many (its cgroup quota limits the time anyway). Combined with `max_default_vcpus` (the smaller non-zero one). |
-| `erofs_cache_max_mib` | 4096 | Size of the cache of erofs images in `/run/cloudhv/erofs-cache`. Images nobody uses are evicted, oldest first; one a running sandbox uses never is. If the cache is full of images in use, or the rootfs alone is bigger than the cache, the container does not start. |
+| `erofs_cache_dir` | `/var/lib/cloud-hypervisor/erofs-cache` | Where the shim keeps the erofs images (an absolute path; on the disk). Must be the same as the daemon's `erofs_cache_dir`. |
+| `erofs_cache_max_mib` | 4096 | Size of the cache of erofs images in `erofs_cache_dir`. Images nobody uses are evicted, oldest first; one a running sandbox uses never is. If the cache is full of images in use, or the rootfs alone is bigger than the cache, the container does not start. |
 | `mkfs_erofs_path` | `/usr/local/bin/mkfs.erofs`, then `/usr/sbin/mkfs.erofs` | Absolute path of `mkfs.erofs`. |
 | `mkfs_erofs_timeout_secs` | 300 | `mkfs.erofs` (and what it started) is killed after this long. |
 | `emptydir_default_mib` | 1024 | The size of the disk of an emptyDir that is not `medium: Memory` (see below). The kubelet does not tell the runtime a volume's `sizeLimit`, so every such emptyDir gets this. 0: they stay in the guest's memory, like `medium: Memory`. |

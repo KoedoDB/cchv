@@ -82,7 +82,7 @@ pub struct DaemonConfig {
     pub max_snapshots: usize,
 
     /// Where the shim keeps the container images (erofs). The daemon accepts an image path only inside this directory, and with
-    /// `ch_rootless` gives a VM read access to nothing else outside its own snapshot. Must be the shim's `EROFS_CACHE_DIR`.
+    /// `ch_rootless` gives a VM read access to nothing else outside its own snapshot. Must be the shim's `erofs_cache_dir`.
     #[serde(default = "default_erofs_cache_dir")]
     pub erofs_cache_dir: String,
 
@@ -292,7 +292,7 @@ fn default_ch_memory_overhead_mib() -> u64 {
 }
 
 fn default_erofs_cache_dir() -> String {
-    "/run/cloudhv/erofs-cache".to_string()
+    cloudhv_common::DEFAULT_EROFS_CACHE_DIR.to_string()
 }
 fn default_max_memory_mb() -> u64 {
     65_536

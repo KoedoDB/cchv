@@ -30,7 +30,6 @@ pub fn epoch_ms() -> u128 {
         .as_millis()
 }
 
-const EROFS_CACHE_DIR: &str = "/run/cloudhv/erofs-cache";
 const CRI_CONTAINER_TYPE: &str = "/annotations/io.kubernetes.cri.container-type";
 const CRI_SANDBOX_ID: &str = "/annotations/io.kubernetes.cri.sandbox-id";
 
@@ -717,7 +716,7 @@ impl CloudHvInstance {
         // (mkfs.erofs for seconds), so it runs off the runtime's threads.
         let t_erofs = std::time::Instant::now();
         let cache = CacheConfig {
-            dir: PathBuf::from(EROFS_CACHE_DIR),
+            dir: PathBuf::from(&limits.erofs_cache_dir),
             max_bytes: limits.erofs_cache_max_mib.saturating_mul(1024 * 1024),
             mkfs_candidates: limits.mkfs_candidates(),
             mkfs_timeout: Duration::from_secs(limits.mkfs_erofs_timeout_secs),

@@ -846,7 +846,7 @@ The daemon is root and its socket is the one door:
 | `disk_direct` | `true` | open the hot-plugged disks (emptyDirs on disk, persistent volumes) with O_DIRECT: the guest has its own page cache and the host does not cache every block a second time (about 260 MiB less charged to a database Pod of 1 GiB, no loss of write speed in our test) |
 | `vm_balloon` | `false` | give each VM a balloon with free page reporting, so its resident memory follows what the guest uses |
 | `allow_cgroup_delegate` | `false` | accept the Pod annotation `cloudhv.koedodb.com/cgroup-delegate` (a container with a cgroup subtree of its own to subdivide); with `false` a request carrying it is refused |
-| `erofs_cache_dir` | `/run/cloudhv/erofs-cache` | where the shim keeps the images; must be the shim's `EROFS_CACHE_DIR` |
+| `erofs_cache_dir` | `/var/lib/cloud-hypervisor/erofs-cache` | where the shim keeps the images; must be the shim's `erofs_cache_dir`. The directory is on the disk (it was under `/run`, in memory, before v0.4.0): the daemon's unit has `StateDirectory=cloud-hypervisor` so that it can write there under `ProtectSystem=strict` |
 | `emptydir_dir` | `/var/lib/cloudhv/emptydir` | where the disks of emptyDirs are made (the host's disk, not `/run`); empty turns them off and a request for one is refused. See "emptyDir disks" |
 | `emptydir_max_mib`, `emptydir_reserve_mib` | `16384`, `2048` | the largest disk a request may ask for; a disk is refused when the free space of `emptydir_dir` is below `size/4 + reserve` |
 | `mke2fs_path` | `/usr/sbin/mke2fs` | makes the file system on the file (falls back to `/sbin`, `/usr/bin`, `/usr/local/bin`; it must be e2fsprogs', not BusyBox's, which makes ext2 only) |

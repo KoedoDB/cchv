@@ -115,7 +115,7 @@ memory including pool VMs.
 
 | Directory | Contents |
 |-----------|----------|
-| `/run/cloudhv/erofs-cache/` | Content-addressed erofs images (flock-serialized) |
+| `/var/lib/cloud-hypervisor/erofs-cache/` | Content-addressed erofs images (flock-serialized); `erofs_cache_dir` in the shim's and the daemon's configuration (on the disk, it was in `/run` before v0.4.0) |
 | `/run/cloudhv/daemon/` | Base snapshot, pool VM state, warm workload snapshots |
 
 ### Notes

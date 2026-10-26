@@ -228,7 +228,8 @@ cd guest/rootfs && sudo bash build-rootfs.sh ../../target/x86_64-unknown-linux-m
 # Install binaries
 sudo install -m 755 target/release/containerd-shim-cloudhv-v1 /usr/local/bin/
 sudo install -m 755 target/release/cloudhv-sandbox-daemon /usr/local/bin/
-sudo mkdir -p /opt/cloudhv /run/cloudhv/erofs-cache /run/cloudhv/daemon
+sudo mkdir -p /opt/cloudhv /run/cloudhv/daemon
+sudo install -d -m 711 /var/lib/cloud-hypervisor /var/lib/cloud-hypervisor/erofs-cache
 sudo cp guest/kernel/vmlinux guest/rootfs/rootfs.erofs /opt/cloudhv/
 
 # Shim config (see docs/configuration.md for full reference)

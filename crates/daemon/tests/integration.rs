@@ -231,7 +231,7 @@ fn test_pool_drain_and_sync_restore() {
 fn erofs_path() -> String {
     std::env::var("EROFS_PATH").unwrap_or_else(|_| {
         // Find the first erofs in the cache, or use http-echo if available
-        let cache_dir = "/run/cloudhv/erofs-cache";
+        let cache_dir = cloudhv_common::DEFAULT_EROFS_CACHE_DIR;
         if let Ok(entries) = std::fs::read_dir(cache_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();

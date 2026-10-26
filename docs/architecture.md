@@ -67,7 +67,7 @@ The daemon serves VMs to shims via a Unix socket API at `/run/cloudhv/daemon.soc
 Thin containerd shim v2 (~1,300 lines). When `daemon_socket` is configured, the shim delegates VM lifecycle to the daemon and handles only:
 
 - **TAP networking** — creates TAP device in the pod's network namespace, sets up TC redirect rules, flushes the pod IP from the veth.
-- **erofs conversion** — converts container rootfs to erofs images, cached at `/run/cloudhv/erofs-cache/<hash>.erofs`. Uses flock serialization with retry for concurrent builds.
+- **erofs conversion** — converts container rootfs to erofs images, cached at `/var/lib/cloud-hypervisor/erofs-cache/<hash>.erofs` (`erofs_cache_dir`). Uses flock serialization with retry for concurrent builds.
 - **Daemon RPCs** — `AcquireSandbox` (get a pre-booted VM), `AddContainer` (hot-plug disk + RunContainer), `ReleaseSandbox` (destroy VM).
 - **Container lifecycle** — logs, kill, wait, state.
 
@@ -125,7 +125,7 @@ up already running.
 ## Container Rootfs Delivery
 
 The shim converts container rootfs to erofs images, cached at
-`/run/cloudhv/erofs-cache/<hash>.erofs`. The cache key is an FNV-1a hash
+`/var/lib/cloud-hypervisor/erofs-cache/<hash>.erofs` (`erofs_cache_dir`; on the disk, flushed before it is published). The cache key is an FNV-1a hash
 of the image's content digest, resolved via `containerd-client` gRPC.
 This makes the key content-addressed and immune to tag mutation.
 

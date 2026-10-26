@@ -25,6 +25,12 @@ pub const DEFAULT_MEMORY_MB: u64 = 320;
 /// Runtime state directory on the host.
 pub const RUNTIME_STATE_DIR: &str = "/run/cloudhv";
 
+/// Where the shim keeps the erofs images of the containers' root file systems, and the only place the daemon takes an image from
+/// (`erofs_cache_dir` in the shim's and in the daemon's configuration; the two must be the same). On the disk, under the state
+/// directory of the platform: the cache is bounded by `erofs_cache_max_mib` and survives a restart, and it does not pin that much
+/// of the host's memory (a host has no swap, and tmpfs pages are in no pod's cgroup).
+pub const DEFAULT_EROFS_CACHE_DIR: &str = "/var/lib/cloud-hypervisor/erofs-cache";
+
 /// Default path to the Cloud Hypervisor binary.
 pub const DEFAULT_CH_BINARY: &str = "/usr/local/bin/cloud-hypervisor";
 
