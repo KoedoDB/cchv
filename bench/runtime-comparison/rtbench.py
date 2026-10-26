@@ -86,7 +86,7 @@ def services(rtname):
     if rtname == "cloudhv" and not active:
         kill_stale_vms()
         sh(f"sudo find {CRUN}/state -mindepth 1 -delete", check=False)
-        sh("sudo systemctl reset-failed rtbench-cchv-daemon 2>/dev/null; sudo systemd-run --unit=rtbench-cchv-daemon --property=Restart=no {BINDS} -E CLOUDHV_MEMORY_RESTORE_MODE=Copy -E RUST_LOG=info "
+        sh(f"sudo systemctl reset-failed rtbench-cchv-daemon 2>/dev/null; sudo systemd-run --unit=rtbench-cchv-daemon --property=Restart=no {BINDS} -E CLOUDHV_MEMORY_RESTORE_MODE=Copy -E RUST_LOG=info "
            f"{ROOT}/bin/cloudhv-sandbox-daemon /opt/cloudhv/daemon.json", check=False)
         for _ in range(60):
             if "pool initialized" in sh("sudo journalctl -u rtbench-cchv-daemon -o cat --no-pager", check=False).stdout:

@@ -139,7 +139,7 @@ mv -f "$HOST/opt/cloudhv/config.json.new" "$HOST/opt/cloudhv/config.json"
 log "Writing daemon config..."
 cat > "$HOST/opt/cloudhv/daemon.json.new" << DAEMON
 {
-  "pool_size": 3,
+  "pool_size": 0,
   "kernel_path": "/opt/cloudhv/vmlinux",
   "rootfs_path": "/opt/cloudhv/rootfs.erofs",
   "kernel_args": "${KERNEL_CONSOLE} root=/dev/vda rw init=/init net.ifnames=0",

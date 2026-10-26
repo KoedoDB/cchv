@@ -1,5 +1,5 @@
 {
-  "pool_size": 3,
+  "pool_size": 0,
   "cloud_hypervisor_binary": "/usr/bin/cloud-hypervisor",
   "kernel_path": "/opt/cloudhv/guest/vmlinux",
   "rootfs_path": "/opt/cloudhv/guest/rootfs.erofs",

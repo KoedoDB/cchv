@@ -223,7 +223,7 @@ Two watches over the VMs handed to pods:
   The host going down takes every VM with it (the registry is in `/run`).
 
 Pool sizing:
-  - pool_size: target idle VMs (default: 3)
+  - pool_size: target idle VMs (default: 0: none, a VM is restored from the base snapshot when a pod needs one)
   - max_pool_size: hard cap on idle VMs (default: 10)
   - If pool is empty: synchronous restore from base snapshot (blocking)
   - replenish_delay_ms: wait before spawning replacement (default: 100)
@@ -410,7 +410,7 @@ message StatusResponse {
 
 ```json
 {
-  "pool_size": 3,
+  "pool_size": 0,
   "max_pool_size": 10,
   "replenish_delay_ms": 100,
   "vm_idle_timeout_secs": 300,

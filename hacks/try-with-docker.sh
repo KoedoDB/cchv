@@ -144,7 +144,7 @@ inside 'apk add --no-cache erofs-utils >/dev/null'
 state="/run/cloudhv/state-$(date +%s)"
 docker exec -i "$NAME" sh -c 'cat > /opt/cloudhv/daemon.json' <<EOF
 {
-  "pool_size": 3,
+  "pool_size": 0,
   "default_vcpus": 1,
   "default_memory_mb": 320,
   "cloud_hypervisor_binary": "/usr/local/bin/cloud-hypervisor",

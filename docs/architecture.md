@@ -54,7 +54,7 @@
 Long-running systemd daemon on each node. Manages:
 
 - **Base snapshot** — created once at startup from a cold-booted VM (kernel + agent, no containers). Reused across daemon restarts if kernel/rootfs mtime unchanged.
-- **VM pool** — maintains `pool_size` (default: 3) pre-booted VMs restored from the base snapshot using CH v51 OnDemand restore (~25ms each, ~6 MB idle RSS via userfaultfd). When the pool is empty, synchronous restore serves as fallback.
+- **VM pool** — maintains `pool_size` (default: 0) pre-booted VMs restored from the base snapshot using CH v51 OnDemand restore (~25ms each, ~6 MB idle RSS via userfaultfd). When the pool is empty, synchronous restore serves as fallback.
 - **Shadow VM snapshots** — on first `AcquireSandbox` for an unknown image, the daemon spawns a shadow VM in the background: restore from base → hot-plug rootfs → `RunContainer` → wait `warmup_duration_secs` → pause → snapshot → destroy. Subsequent acquires for the same image restore from the warm snapshot. Shadow VMs have no networking and no impact on live pods.
 - **Image key** — content digest from containerd's gRPC image service, immune to tag mutation (e.g., `:latest` re-push).
 - **Active VM tracking** — the daemon tracks all acquired VMs for proper lifecycle management. `ReleaseSandbox` destroys the VM; pool is replenished asynchronously.

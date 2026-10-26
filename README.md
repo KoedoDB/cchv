@@ -250,7 +250,7 @@ EOF
 # Daemon config
 sudo tee /opt/cloudhv/daemon.json > /dev/null <<EOF
 {
-  "pool_size": 3,
+  "pool_size": 0,
   "max_pool_size": 10,
   "default_vcpus": 1,
   "default_memory_mb": 320,

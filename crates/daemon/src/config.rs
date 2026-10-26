@@ -363,7 +363,7 @@ fn default_ch_uid_count() -> u32 {
     60_000
 }
 fn default_pool_size() -> usize {
-    3
+    0
 }
 fn default_max_pool_size() -> usize {
     10

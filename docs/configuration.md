@@ -53,7 +53,7 @@ The sandbox daemon loads its configuration from `/opt/cloudhv/daemon.json`.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `pool_size` | `3` | Target number of pre-booted idle VMs |
+| `pool_size` | `0` | Target number of pre-booted idle VMs. 0: none; a pod gets a VM restored from the base snapshot when it starts (about 40-60 ms). Each idle pool VM holds about 48 MiB (Copy restore), so 3 of them cost about 140 MiB for a start that is about 80 ms faster (nginx, first answer: 0.92 s with 3, 1.00 s with 0) |
 | `max_pool_size` | `10` | Hard cap on idle pool VMs |
 | `default_vcpus` | `1` | vCPUs per pool VM |
 | `default_memory_mb` | `320` | Memory per pool VM in MiB |
@@ -70,7 +70,7 @@ The sandbox daemon loads its configuration from `/opt/cloudhv/daemon.json`.
 
 ```json
 {
-  "pool_size": 3,
+  "pool_size": 0,
   "max_pool_size": 10,
   "default_vcpus": 1,
   "default_memory_mb": 320,
