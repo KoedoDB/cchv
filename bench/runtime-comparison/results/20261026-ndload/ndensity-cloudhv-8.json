@@ -1,0 +1,204 @@
+{
+ "runtime": "cloudhv",
+ "n": 8,
+ "vm_sizes": [
+  [
+   2,
+   320
+  ],
+  [
+   2,
+   320
+  ],
+  [
+   2,
+   320
+  ],
+  [
+   2,
+   320
+  ],
+  [
+   2,
+   320
+  ],
+  [
+   2,
+   320
+  ],
+  [
+   2,
+   320
+  ],
+  [
+   2,
+   320
+  ],
+  [
+   2,
+   320
+  ],
+  [
+   2,
+   320
+  ],
+  [
+   2,
+   320
+  ]
+ ],
+ "mem_baseline": {
+  "rss_mib": 387.8984375,
+  "pss_mib": 347.1337890625,
+  "cpu_ticks": 198,
+  "processes": 18,
+  "by_comm": {
+   "cloud-hyperviso": [
+    3,
+    142.6
+   ],
+   "cloudhv-sandbox": [
+    5,
+    7.6
+   ],
+   "containerd": [
+    1,
+    56.7
+   ],
+   "containerd-shim": [
+    2,
+    21.8
+   ],
+   "dockerd": [
+    1,
+    93.3
+   ],
+   "python3": [
+    2,
+    18.8
+   ],
+   "run-ndload.sh": [
+    1,
+    0.8
+   ],
+   "sleep": [
+    2,
+    2.7
+   ],
+   "sudo": [
+    1,
+    2.8
+   ]
+  }
+ },
+ "mem_after": {
+  "rss_mib": 1063.4296875,
+  "pss_mib": 927.1279296875,
+  "cpu_ticks": 1928,
+  "processes": 50,
+  "by_comm": {
+   "cloud-hyperviso": [
+    11,
+    680.9
+   ],
+   "cloudhv-sandbox": [
+    13,
+    9.3
+   ],
+   "containerd": [
+    1,
+    60.6
+   ],
+   "containerd-shim": [
+    10,
+    50.5
+   ],
+   "dockerd": [
+    1,
+    97.7
+   ],
+   "exe": [
+    8,
+    3.2
+   ],
+   "python3": [
+    2,
+    18.8
+   ],
+   "run-ndload.sh": [
+    1,
+    0.7
+   ],
+   "sleep": [
+    2,
+    2.7
+   ],
+   "sudo": [
+    1,
+    2.7
+   ]
+  }
+ },
+ "per_instance_pss_mib": 72.5,
+ "per_instance_rss_mib": 84.4,
+ "mem_under_load": {
+  "rss_mib": 1421.03515625,
+  "pss_mib": 1078.689453125,
+  "cpu_ticks": 21095,
+  "processes": 74,
+  "by_comm": {
+   "cloud-hyperviso": [
+    11,
+    682.4
+   ],
+   "cloudhv-sandbox": [
+    13,
+    9.3
+   ],
+   "containerd": [
+    1,
+    60.6
+   ],
+   "containerd-shim": [
+    10,
+    50.9
+   ],
+   "docker": [
+    8,
+    123.9
+   ],
+   "dockerd": [
+    1,
+    98.1
+   ],
+   "exe": [
+    8,
+    3.2
+   ],
+   "python3": [
+    2,
+    18.9
+   ],
+   "run-ndload.sh": [
+    1,
+    0.7
+   ],
+   "sleep": [
+    2,
+    2.4
+   ],
+   "sudo": [
+    9,
+    13.8
+   ],
+   "wrk": [
+    8,
+    14.6
+   ]
+  }
+ },
+ "per_instance_pss_under_load_mib": 91.4,
+ "per_instance_rss_under_load_mib": 129.1,
+ "load_rps_total": 76209.0,
+ "load_clients_answered": 8
+}

@@ -539,8 +539,20 @@ def nginx_density(rtname, n):
     snap = memsnap_remote()
     res = {"runtime": rtname, "n": n, "vm_sizes": vms, "mem_baseline": base, "mem_after": snap,
            "per_instance_pss_mib": round((snap["pss_mib"] - base["pss_mib"]) / n, 1), "per_instance_rss_mib": round((snap["rss_mib"] - base["rss_mib"]) / n, 1)}
+    # The same N containers under load: one wrk per container at the same time (1 KB file), the memory read in the middle of the load.
+    ips = [container_ip(nm) for nm in names]
+    procs = [subprocess.Popen(DOCKER + ["exec", "wrkc", "wrk", "-t1", "-c16", "-d40s", f"http://{ip}/1k.html"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) for ip in ips]
+    time.sleep(25)
+    load = memsnap_remote()
+    outs = [p.communicate(timeout=120)[0] for p in procs]
+    rps = [float(m.group(1)) for m in (re.search(r"Requests/sec:\s+([0-9.]+)", o) for o in outs) if m]
+    res["mem_under_load"] = load
+    res["per_instance_pss_under_load_mib"] = round((load["pss_mib"] - base["pss_mib"]) / n, 1)
+    res["per_instance_rss_under_load_mib"] = round((load["rss_mib"] - base["rss_mib"]) / n, 1)
+    res["load_rps_total"] = round(sum(rps), 0)
+    res["load_clients_answered"] = len(rps)
     save(f"ndensity-{rtname}-{n}", res)
-    log(rtname, "nginx density", n, res["per_instance_pss_mib"], "MiB PSS per instance")
+    log(rtname, "nginx density", n, res["per_instance_pss_mib"], "MiB PSS per instance idle,", res["per_instance_pss_under_load_mib"], "under load,", res["load_rps_total"], "rps total")
     for nm in names:
         rm(nm)
     return res

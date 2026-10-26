@@ -100,7 +100,7 @@ def prep_www():
     r.dk("create", "--name", "wwwsrc", "rtbench-nginx")
     r.dk("cp", "wwwsrc:/usr/share/nginx/html/.", src)
     r.dk("rm", "-f", "wwwsrc")
-    common = ["--runtime", "kata-clh", "--device", f"{WWW_DEV}:/dev/kblk", "--cap-add", "SYS_ADMIN", "--security-opt", "seccomp=unconfined", "--security-opt", "apparmor=unconfined"]
+    common = ["--runtime", "kata-clh", "--cpus", "1", "-m", "288m", "--memory-swap", "288m", "--device", f"{WWW_DEV}:/dev/kblk", "--cap-add", "SYS_ADMIN", "--security-opt", "seccomp=unconfined", "--security-opt", "apparmor=unconfined"]
     out = r.dk("run", "--rm", *common, "-v", f"{src}:/src:ro", "--entrypoint", "/bin/sh", IMAGE, "-c",
                "mkfs.ext4 -q -F /dev/kblk && mount /dev/kblk /mnt && cp -a /src/. /mnt/ && sync && umount /mnt && echo prepared").stdout.strip()
     want = r.sh(f"cd {src} && sudo sha256sum 1k.html 100k.bin 10m.bin").stdout
@@ -112,7 +112,8 @@ def prep_www():
 def start_nginx_blk(name, rtname):
     common = ["--device", f"{WWW_DEV}:/dev/kblk", "--cap-add", "SYS_ADMIN", "--security-opt", "seccomp=unconfined", "--security-opt", "apparmor=unconfined"]
     t0 = time.time()
-    r.dk("run", "-d", "--name", name, "--runtime", "kata-clh", "--cpus", "1", "-m", r.NGINX_KATA_MEM, "--memory-swap", r.NGINX_KATA_MEM, "--pids-limit", "512", *common,
+    cpus, mem = r.vm_limits(rtname, "nginx")   # the same VM as cchv's and the virtio-fs run's: 2 vCPUs, 320 MiB (checked by r.check_vm)
+    r.dk("run", "-d", "--name", name, "--runtime", "kata-clh", "--cpus", cpus, "-m", mem, "--memory-swap", mem, "--pids-limit", "512", *common,
          "--entrypoint", "/bin/sh", "rtbench-nginx", "-c", 'mount -o ro /dev/kblk /usr/share/nginx/html && exec nginx -g "daemon off;"', timeout=300)
     ip = r.container_ip(name)
     deadline = time.time() + 120
@@ -133,6 +134,19 @@ def nginx_blk(direct):
     print("prepared:", prep_www())
     r.nginx.__globals__["start_nginx"] = start_nginx_blk
     return r.nginx(name)
+
+
+def ndensity_blk(direct, n):
+    """N idle nginx containers on the block device, then under load (rtbench.nginx_density): the memory one instance costs, without virtio-fs."""
+    global DIRECT
+    DIRECT = direct
+    set_kata_config(direct)
+    name = "kata-clh-blk" + ("-direct" if direct else "")
+    r.RUNTIMES[name] = {"runtime": "kata-clh", "vol": "kblk"}
+    r.services("kata-clh")
+    print("prepared:", prep_www())
+    r.nginx_density.__globals__["start_nginx"] = start_nginx_blk
+    return r.nginx_density(name, n)
 
 
 def pg(direct):
@@ -156,6 +170,11 @@ if __name__ == "__main__":
             nginx_blk("--direct" in sys.argv)
         finally:
             r.dk("rm", "-f", "nginxsrv", check=False, timeout=300)
+    elif len(sys.argv) > 2 and sys.argv[1] == "ndensity":
+        try:
+            ndensity_blk("--direct" in sys.argv, int(sys.argv[2]))
+        finally:
+            r.dk("rm", "-f", *[f"ndens{i}" for i in range(int(sys.argv[2]))], check=False, timeout=300)
     elif len(sys.argv) > 1 and sys.argv[1] == "pg":
         try:
             pg("--direct" in sys.argv)

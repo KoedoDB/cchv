@@ -1,0 +1,188 @@
+{
+ "runtime": "kata-clh",
+ "n": 8,
+ "vm_sizes": [
+  [
+   2,
+   320
+  ],
+  [
+   2,
+   320
+  ],
+  [
+   2,
+   320
+  ],
+  [
+   2,
+   320
+  ],
+  [
+   2,
+   320
+  ],
+  [
+   2,
+   320
+  ],
+  [
+   2,
+   320
+  ],
+  [
+   2,
+   320
+  ]
+ ],
+ "mem_baseline": {
+  "rss_mib": 225.95703125,
+  "pss_mib": 200.978515625,
+  "cpu_ticks": 153,
+  "processes": 11,
+  "by_comm": {
+   "cloudhv-sandbox": [
+    1,
+    2.3
+   ],
+   "containerd": [
+    1,
+    57.0
+   ],
+   "containerd-shim": [
+    2,
+    22.2
+   ],
+   "dockerd": [
+    1,
+    94.7
+   ],
+   "python3": [
+    2,
+    18.7
+   ],
+   "run-ndload-kata": [
+    1,
+    0.6
+   ],
+   "sleep": [
+    2,
+    2.8
+   ],
+   "sudo": [
+    1,
+    2.7
+   ]
+  }
+ },
+ "mem_after": {
+  "rss_mib": 1762.62890625,
+  "pss_mib": 1422.87109375,
+  "cpu_ticks": 2246,
+  "processes": 43,
+  "by_comm": {
+   "cloud-hyperviso": [
+    8,
+    1080.7
+   ],
+   "cloudhv-sandbox": [
+    1,
+    2.3
+   ],
+   "containerd": [
+    1,
+    60.9
+   ],
+   "containerd-shim": [
+    10,
+    85.5
+   ],
+   "dockerd": [
+    1,
+    97.6
+   ],
+   "python3": [
+    2,
+    18.8
+   ],
+   "run-ndload-kata": [
+    1,
+    0.6
+   ],
+   "sleep": [
+    2,
+    2.8
+   ],
+   "sudo": [
+    1,
+    2.7
+   ],
+   "virtiofsd": [
+    16,
+    70.9
+   ]
+  }
+ },
+ "per_instance_pss_mib": 152.7,
+ "per_instance_rss_mib": 192.1,
+ "mem_under_load": {
+  "rss_mib": 2118.11328125,
+  "pss_mib": 1571.34765625,
+  "cpu_ticks": 20614,
+  "processes": 67,
+  "by_comm": {
+   "cloud-hyperviso": [
+    8,
+    1081.4
+   ],
+   "cloudhv-sandbox": [
+    1,
+    2.3
+   ],
+   "containerd": [
+    1,
+    60.9
+   ],
+   "containerd-shim": [
+    10,
+    87.1
+   ],
+   "docker": [
+    8,
+    122.8
+   ],
+   "dockerd": [
+    1,
+    97.8
+   ],
+   "python3": [
+    2,
+    18.9
+   ],
+   "run-ndload-kata": [
+    1,
+    0.6
+   ],
+   "sleep": [
+    2,
+    2.4
+   ],
+   "sudo": [
+    9,
+    13.8
+   ],
+   "virtiofsd": [
+    16,
+    71.9
+   ],
+   "wrk": [
+    8,
+    11.5
+   ]
+  }
+ },
+ "per_instance_pss_under_load_mib": 171.3,
+ "per_instance_rss_under_load_mib": 236.5,
+ "load_rps_total": 12612.0,
+ "load_clients_answered": 8
+}
