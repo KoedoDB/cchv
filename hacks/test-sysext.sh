@@ -49,6 +49,13 @@ fi
 cp containerd-cloudhypervisor.raw sysext-bakery
 cd sysext-bakery
 
+# The bakery boots the Flatcar *alpha* channel (lib/boot.sh). Alpha's "current" points at 4860.0.0, whose files are not on the download CDN
+# (404, 2026-10-26), so the test never reached a VM. A release we test on is a stable one: the channel is replaced here, in the pinned copy.
+# The check below fails the test if the bakery's line is not the one we expect (a new pin has to be looked at).
+FLATCAR_CHANNEL="${FLATCAR_CHANNEL:-stable}"
+grep -q 'https://alpha.release.flatcar-linux.net/${arch}-usr/current/' lib/boot.sh || { echo "ERROR: lib/boot.sh of the bakery has no alpha download line to replace"; exit 1; }
+sed -i "s#https://alpha.release.flatcar-linux.net/#https://${FLATCAR_CHANNEL}.release.flatcar-linux.net/#" lib/boot.sh
+
 echo "Running the test (includes Flatcar image download)"
 coproc flatcar { ./bakery.sh boot containerd-cloudhypervisor.raw 2>&1; }
 read_until "${flatcar[0]}" "localhost login:"
