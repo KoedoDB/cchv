@@ -395,20 +395,6 @@ async fn handle_acquire(
     };
     let terminal = terminal_from_request(request);
 
-    // The key of the warm snapshot is made here, from the content of the image. The one the caller sends is not used: with it, a pod
-    // could be given the warm guest of another pod's image.
-    let image_key = if erofs_path.is_empty() {
-        String::new()
-    } else {
-        match crate::imagekey::content_key(erofs_path).await {
-            Ok(k) => k,
-            Err(e) => return error("image", format!("{e:#}")),
-        }
-    };
-    if let Some(sent) = request.get("image_key").and_then(|v| v.as_str()) {
-        log::debug!("image_key sent {sent:?} not used; the image's own is {image_key}");
-    }
-
     // A pod whose limits ask for a VM of another size than the pool's (and the warm snapshots') cannot be served from them: their
     // memory and CPUs are those of the snapshot. Such a pod gets a VM of its own size, booted for it.
     if is_other_size(config, want_memory, want_vcpus) {
@@ -433,6 +419,21 @@ async fn handle_acquire(
             want_vcpus,
         )
         .await;
+    }
+
+    // The key of the warm snapshot is made here, from the content of the image (the one the caller sends is not used: with it, a pod could be
+    // given the warm guest of another pod's image). Only for a pod that can be served from the pool or a warm snapshot: a pod of another size
+    // (above) does not use it, and hashing a PostgreSQL image (451 MB) was about 2 s of its start (measured 2026-10-26).
+    let image_key = if erofs_path.is_empty() {
+        String::new()
+    } else {
+        match crate::imagekey::content_key(erofs_path).await {
+            Ok(k) => k,
+            Err(e) => return error("image", format!("{e:#}")),
+        }
+    };
+    if let Some(sent) = request.get("image_key").and_then(|v| v.as_str()) {
+        log::debug!("image_key sent {sent:?} not used; the image's own is {image_key}");
     }
 
     // Check for warm workload snapshot

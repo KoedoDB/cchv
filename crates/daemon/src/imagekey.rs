@@ -46,6 +46,7 @@ fn content_key_blocking(path: &Path) -> Result<String> {
     if let Some(k) = CACHE.lock().unwrap().as_ref().and_then(|c| c.get(&key)) {
         return Ok(k.clone());
     }
+    let started = std::time::Instant::now();
     let mut file = std::fs::File::from(fd);
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
@@ -58,6 +59,7 @@ fn content_key_blocking(path: &Path) -> Result<String> {
     }
     let digest = hasher.finalize();
     let hex: String = digest.iter().take(16).map(|b| format!("{b:02x}")).collect();
+    log::info!("hashed {} ({} bytes) in {} ms", path.display(), st.st_size, started.elapsed().as_millis());
     let mut cache = CACHE.lock().unwrap();
     let map = cache.get_or_insert_with(HashMap::new);
     if map.len() >= CACHE_MAX {
