@@ -1,0 +1,12 @@
+governor: performance (was powersave)
+written /home/ops/rtbench-results/20261027-authrest/environment.txt
+=== 15:20:03 runc
+database ready 172.29.0.4
+15:22:03 runc auth+rest 8 pairs: 18.4 MiB idle, 76.5 MiB under load per VM; states ['running oom=false restarts=0']
+=== 15:22:15 kata-clh
+database ready 172.29.0.4
+15:24:25 kata-clh auth+rest 8 pairs: 164.7 MiB idle, 209.2 MiB under load per VM; states ['running oom=false restarts=0']
+=== 15:24:39 cloudhv
+database ready 172.29.0.4
+15:27:41 cloudhv auth+rest 8 pairs: 92.2 MiB idle, 135.0 MiB under load per VM; states ['running oom=false restarts=0']
+=== 15:27:48 done

@@ -1,0 +1,285 @@
+{
+ "runtime": "runc",
+ "n_pairs": 8,
+ "vms": 16,
+ "vm_sizes": [],
+ "limits": [
+  "2",
+  "320m"
+ ],
+ "all_up_s": 5.0,
+ "mem_baseline": {
+  "rss_mib": 333.99609375,
+  "pss_mib": 248.0810546875,
+  "cpu_ticks": 190,
+  "processes": 22,
+  "by_comm": {
+   "cloudhv-sandbox": [
+    1,
+    2.3
+   ],
+   "containerd": [
+    1,
+    58.3
+   ],
+   "containerd-shim": [
+    3,
+    28.0
+   ],
+   "dockerd": [
+    1,
+    95.4
+   ],
+   "postgres": [
+    9,
+    41.9
+   ],
+   "python3": [
+    2,
+    16.8
+   ],
+   "run-authrest.sh": [
+    1,
+    0.7
+   ],
+   "sleep": [
+    2,
+    1.7
+   ],
+   "sudo": [
+    1,
+    2.7
+   ],
+   "tee": [
+    1,
+    0.2
+   ]
+  }
+ },
+ "mem_idle": {
+  "rss_mib": 1200.7265625,
+  "pss_mib": 542.939453125,
+  "cpu_ticks": 541,
+  "processes": 70,
+  "by_comm": {
+   "auth": [
+    8,
+    111.8
+   ],
+   "cloudhv-sandbox": [
+    1,
+    2.3
+   ],
+   "containerd": [
+    1,
+    63.4
+   ],
+   "containerd-shim": [
+    19,
+    138.1
+   ],
+   "dockerd": [
+    1,
+    101.8
+   ],
+   "postgres": [
+    25,
+    66.7
+   ],
+   "postgrest": [
+    8,
+    36.7
+   ],
+   "python3": [
+    2,
+    16.8
+   ],
+   "run-authrest.sh": [
+    1,
+    0.7
+   ],
+   "sleep": [
+    2,
+    1.6
+   ],
+   "sudo": [
+    1,
+    2.8
+   ],
+   "tee": [
+    1,
+    0.2
+   ]
+  }
+ },
+ "mem_load": {
+  "rss_mib": 4082.31640625,
+  "pss_mib": 1472.3798828125,
+  "cpu_ticks": 20450,
+  "processes": 182,
+  "by_comm": {
+   "auth": [
+    8,
+    140.6
+   ],
+   "cloudhv-sandbox": [
+    1,
+    2.3
+   ],
+   "containerd": [
+    1,
+    63.4
+   ],
+   "containerd-shim": [
+    19,
+    138.7
+   ],
+   "docker": [
+    16,
+    226.7
+   ],
+   "dockerd": [
+    1,
+    104.5
+   ],
+   "postgres": [
+    89,
+    208.7
+   ],
+   "postgrest": [
+    8,
+    430.5
+   ],
+   "python3": [
+    2,
+    17.0
+   ],
+   "run-authrest.sh": [
+    1,
+    0.6
+   ],
+   "sleep": [
+    2,
+    1.0
+   ],
+   "sudo": [
+    17,
+    24.0
+   ],
+   "tee": [
+    1,
+    0.2
+   ],
+   "wrk": [
+    16,
+    114.1
+   ]
+  }
+ },
+ "per_vm_pss_idle_mib": 18.4,
+ "per_vm_pss_load_mib": 76.5,
+ "per_vm_rss_idle_mib": 54.2,
+ "per_vm_rss_load_mib": 234.3,
+ "auth": [
+  {
+   "rps": 7.54,
+   "requests": 302,
+   "non2xx": 0
+  },
+  {
+   "rps": 7.76,
+   "requests": 311,
+   "non2xx": 0
+  },
+  {
+   "rps": 7.84,
+   "requests": 314,
+   "non2xx": 0
+  },
+  {
+   "rps": 7.41,
+   "requests": 297,
+   "non2xx": 0
+  },
+  {
+   "rps": 8.07,
+   "requests": 323,
+   "non2xx": 0
+  },
+  {
+   "rps": 7.57,
+   "requests": 303,
+   "non2xx": 0
+  },
+  {
+   "rps": 7.56,
+   "requests": 303,
+   "non2xx": 0
+  },
+  {
+   "rps": 7.64,
+   "requests": 306,
+   "non2xx": 0
+  }
+ ],
+ "rest": [
+  {
+   "rps": 196.53,
+   "requests": 7878,
+   "non2xx": 0
+  },
+  {
+   "rps": 186.3,
+   "requests": 7454,
+   "non2xx": 0
+  },
+  {
+   "rps": 192.57,
+   "requests": 7705,
+   "non2xx": 0
+  },
+  {
+   "rps": 186.7,
+   "requests": 7485,
+   "non2xx": 0
+  },
+  {
+   "rps": 179.44,
+   "requests": 7187,
+   "non2xx": 0
+  },
+  {
+   "rps": 192.64,
+   "requests": 7707,
+   "non2xx": 0
+  },
+  {
+   "rps": 187.68,
+   "requests": 7523,
+   "non2xx": 0
+  },
+  {
+   "rps": 178.75,
+   "requests": 7153,
+   "non2xx": 0
+  }
+ ],
+ "states": {
+  "ar-auth0": "running oom=false restarts=0",
+  "ar-rest0": "running oom=false restarts=0",
+  "ar-auth1": "running oom=false restarts=0",
+  "ar-rest1": "running oom=false restarts=0",
+  "ar-auth2": "running oom=false restarts=0",
+  "ar-rest2": "running oom=false restarts=0",
+  "ar-auth3": "running oom=false restarts=0",
+  "ar-rest3": "running oom=false restarts=0",
+  "ar-auth4": "running oom=false restarts=0",
+  "ar-rest4": "running oom=false restarts=0",
+  "ar-auth5": "running oom=false restarts=0",
+  "ar-rest5": "running oom=false restarts=0",
+  "ar-auth6": "running oom=false restarts=0",
+  "ar-rest6": "running oom=false restarts=0",
+  "ar-auth7": "running oom=false restarts=0",
+  "ar-rest7": "running oom=false restarts=0"
+ }
+}

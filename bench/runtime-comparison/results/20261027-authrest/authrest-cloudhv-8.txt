@@ -1,0 +1,143 @@
+Running 40s test @ http://172.29.0.5:9999
+  1 threads and 4 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   812.68ms  198.44ms   1.33s    64.80%
+    Req/Sec     6.77      4.79    20.00     88.67%
+  196 requests in 40.04s, 435.61KB read
+Requests/sec:      4.90
+Transfer/sec:     10.88KB
+
+Running 40s test @ http://172.29.0.7:9999
+  1 threads and 4 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   821.82ms  235.54ms   1.43s    70.83%
+    Req/Sec     6.72      4.94    30.00     88.59%
+  192 requests in 40.05s, 426.74KB read
+Requests/sec:      4.79
+Transfer/sec:     10.65KB
+
+Running 40s test @ http://172.29.0.9:9999
+  1 threads and 4 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   820.82ms  213.20ms   1.51s    66.84%
+    Req/Sec     6.44      4.75    30.00     91.67%
+  193 requests in 40.05s, 428.97KB read
+Requests/sec:      4.82
+Transfer/sec:     10.71KB
+
+Running 40s test @ http://172.29.0.11:9999
+  1 threads and 4 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   847.32ms  182.60ms   1.33s    67.74%
+    Req/Sec     6.31      4.50    20.00     89.05%
+  186 requests in 40.05s, 413.37KB read
+Requests/sec:      4.64
+Transfer/sec:     10.32KB
+
+Running 40s test @ http://172.29.0.13:9999
+  1 threads and 4 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   899.50ms  220.25ms   1.68s    72.00%
+    Req/Sec     6.10      4.72    30.00     88.64%
+  175 requests in 40.04s, 388.89KB read
+Requests/sec:      4.37
+Transfer/sec:      9.71KB
+
+Running 40s test @ http://172.29.0.15:9999
+  1 threads and 4 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   730.03ms  172.60ms   1.28s    73.27%
+    Req/Sec     7.12      4.55    30.00     83.91%
+  217 requests in 40.04s, 482.38KB read
+Requests/sec:      5.42
+Transfer/sec:     12.05KB
+
+Running 40s test @ http://172.29.0.17:9999
+  1 threads and 4 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   744.00ms  165.65ms   1.31s    72.77%
+    Req/Sec     7.13      4.86    20.00     81.21%
+  213 requests in 40.06s, 473.47KB read
+Requests/sec:      5.32
+Transfer/sec:     11.82KB
+
+Running 40s test @ http://172.29.0.19:9999
+  1 threads and 4 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   888.07ms  208.53ms   1.58s    69.27%
+    Req/Sec     6.18      4.49    30.00     89.55%
+  179 requests in 40.05s, 397.77KB read
+Requests/sec:      4.47
+Transfer/sec:      9.93KB
+
+Running 40s test @ http://172.29.0.6:3000/items?limit=20
+  1 threads and 8 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    27.46ms   35.06ms 615.85ms   95.36%
+    Req/Sec   346.69     96.83   707.00     74.81%
+  13714 requests in 40.03s, 39.45MB read
+Requests/sec:    342.58
+Transfer/sec:      0.99MB
+
+Running 40s test @ http://172.29.0.8:3000/items?limit=20
+  1 threads and 8 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    24.41ms   21.17ms 378.86ms   87.53%
+    Req/Sec   364.37     88.04   660.00     69.60%
+  14452 requests in 40.04s, 41.57MB read
+Requests/sec:    360.97
+Transfer/sec:      1.04MB
+
+Running 40s test @ http://172.29.0.10:3000/items?limit=20
+  1 threads and 8 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    25.13ms   31.29ms 514.82ms   94.42%
+    Req/Sec   380.30     91.94   620.00     69.19%
+  15007 requests in 40.03s, 43.16MB read
+Requests/sec:    374.92
+Transfer/sec:      1.08MB
+
+Running 40s test @ http://172.29.0.12:3000/items?limit=20
+  1 threads and 8 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    30.39ms   59.82ms 800.00ms   98.29%
+    Req/Sec   356.16     94.66   710.00     71.25%
+  13951 requests in 40.02s, 40.13MB read
+Requests/sec:    348.58
+Transfer/sec:      1.00MB
+
+Running 40s test @ http://172.29.0.14:3000/items?limit=20
+  1 threads and 8 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    22.86ms   18.40ms 275.51ms   81.12%
+    Req/Sec   389.12     96.15   727.00     67.34%
+  15450 requests in 40.03s, 44.44MB read
+Requests/sec:    385.95
+Transfer/sec:      1.11MB
+
+Running 40s test @ http://172.29.0.16:3000/items?limit=20
+  1 threads and 8 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    24.66ms   26.81ms 493.06ms   93.12%
+    Req/Sec   371.65     92.82   757.00     74.81%
+  14707 requests in 40.03s, 42.30MB read
+Requests/sec:    367.41
+Transfer/sec:      1.06MB
+
+Running 40s test @ http://172.29.0.18:3000/items?limit=20
+  1 threads and 8 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    24.24ms   30.12ms 482.32ms   94.49%
+    Req/Sec   392.39     97.19   810.00     70.96%
+  15493 requests in 40.03s, 44.56MB read
+Requests/sec:    387.01
+Transfer/sec:      1.11MB
+
+Running 40s test @ http://172.29.0.20:3000/items?limit=20
+  1 threads and 8 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    27.26ms   41.38ms 640.86ms   97.14%
+    Req/Sec   365.15     94.26   666.00     66.33%
+  14371 requests in 40.03s, 41.34MB read
+Requests/sec:    359.00
+Transfer/sec:      1.03MB
