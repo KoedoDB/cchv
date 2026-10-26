@@ -26,6 +26,15 @@ pub struct RuntimeConfig {
     #[serde(default = "default_memory_mb")]
     pub default_memory_mb: u64,
 
+    /// The least memory in MiB of the VM of a pod that has a memory limit (the limit plus the guest's own needs, but not less than this).
+    /// A pod whose VM is not `default_memory_mb` big does not come from the pool: its VM is started for it (about 0.4 s).
+    #[serde(default = "default_min_memory_mb")]
+    pub min_memory_mb: u64,
+
+    /// What the guest needs besides the containers (kernel, agent, crun, the page cache of the rootfs) in MiB: added to the pod's memory limit.
+    #[serde(default = "default_guest_overhead_mb")]
+    pub guest_overhead_mb: u64,
+
     /// vsock port for the guest agent
     #[serde(default = "default_vsock_port")]
     pub vsock_port: u32,
@@ -74,6 +83,12 @@ fn default_vcpus() -> u32 {
 }
 fn default_memory_mb() -> u64 {
     crate::DEFAULT_MEMORY_MB
+}
+fn default_min_memory_mb() -> u64 {
+    crate::MIN_MEMORY_MB
+}
+fn default_guest_overhead_mb() -> u64 {
+    crate::GUEST_OVERHEAD_MB
 }
 fn default_vsock_port() -> u32 {
     crate::AGENT_VSOCK_PORT

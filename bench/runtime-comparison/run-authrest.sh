@@ -5,8 +5,14 @@ export RT_RESULTS="${1:?results dir}"; work="${2:?workdir}"; export AR_AUTH_IMAG
 mkdir -p "$RT_RESULTS"; exec > >(tee -a "$RT_RESULTS/run.log") 2>&1
 "$here/40-governor.sh"; "$here/50-environment.sh" "$RT_RESULTS"
 cd "$here"
-for rt in runc kata-clh cloudhv; do
+for rt in $(echo "${AR_RUNTIMES:-runc,kata-clh,cloudhv}" | tr , " "); do
   RT_CCHV_VCPUS=2 "$here/22-reset.sh" >/dev/null 2>&1; python3 rtbench.py prepare >/dev/null 2>&1
+  if [ "${RT_CCHV_OVERHEAD:-64}" != 64 ]; then   # cchv's VM = the pod's limit + guest_overhead_mb (config.json, written again by the reset)
+    sudo python3 -c "
+import json
+p='$RT_CONF/config.json'; c=json.load(open(p)); c['guest_overhead_mb']=int('${RT_CCHV_OVERHEAD}'); c['min_memory_mb']=0
+json.dump(c,open(p,'w'),indent=1)"
+  fi
   echo "=== $(date +%T) $rt"
   python3 rtbench_authrest.py prepare "$work" || { echo "!!! prepare failed"; continue; }
   python3 rtbench_authrest.py run $rt 8 "$work" || echo "!!! failed: $rt"

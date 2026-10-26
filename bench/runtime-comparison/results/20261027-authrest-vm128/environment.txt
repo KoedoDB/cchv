@@ -1,0 +1,128 @@
+date: 2026-10-26T15:45:38Z
+kernel: 6.12.113+deb13-amd64
+CPU(s):                                  8
+Model name:                              Intel(R) Xeon(R) CPU E3-1270 v6 @ 3.80GHz
+Thread(s) per core:                      2
+Core(s) per socket:                      4
+CPU(s) scaling MHz:                      97%
+CPU max MHz:                             4200.0000
+CPU min MHz:                             800.0000
+L3 cache:                                8 MiB (1 instance)
+Mem:           31787        2771        7201        1463       23733       29016
+governor: performance
+--- mitigations
+gather_data_sampling: Mitigation: Microcode
+indirect_target_selection: Not affected
+itlb_multihit: KVM: Mitigation: Split huge pages
+l1tf: Mitigation: PTE Inversion; VMX: conditional cache flushes, SMT vulnerable
+mds: Mitigation: Clear CPU buffers; SMT vulnerable
+meltdown: Mitigation: PTI
+mmio_stale_data: Mitigation: Clear CPU buffers; SMT vulnerable
+reg_file_data_sampling: Not affected
+retbleed: Mitigation: IBRS
+spec_rstack_overflow: Not affected
+spec_store_bypass: Mitigation: Speculative Store Bypass disabled via prctl
+spectre_v1: Mitigation: usercopy/swapgs barriers and __user pointer sanitization
+spectre_v2: Mitigation: IBRS; IBPB: conditional; STIBP: conditional; RSB filling; PBRSB-eIBRS: Not affected; BHI: Not affected
+srbds: Mitigation: Microcode
+tsa: Not affected
+tsx_async_abort: Mitigation: TSX disabled
+vmscape: Mitigation: IBPB before exit to userspace
+--- disks
+nvme0n1 419.2G INTEL SSDPE2MX450G7    0
+nvme1n1 419.2G INTEL SSDPE2MX450G7    0
+/dev/md3 on / type ext4 (rw,relatime)
+Personalities : [raid1] [raid0] [raid6] [raid5] [raid4] [raid10] 
+md5 : active raid1 nvme1n1p5[1] nvme0n1p5[0]
+      405860352 blocks super 1.2 [2/2] [UU]
+      bitmap: 3/4 pages [12KB], 65536KB chunk
+--- versions
+docker 29.9.2 containerd v2.4.2 runc 1.5.2
+runsc version release-20261019.0
+4.3.1
+/home/ops/rtbench-src/50-environment.sh: line 15: /opt/kata/bin/cloud-hypervisor: Permission denied
+Kata Containers containerd shim (Rust): id: io.containerd.kata.v2, version: 4.3.1, commit: 03cf2ec06a5d302f23af811744f6bcea49988bfb
+cloud-hypervisor v54.0
+cchv v0.4.1: 4f4f98a3d661 cloud-hypervisor;20da980a1819 cloudhv-sandbox-daemon;b97a94721d31 containerd-shim-cloudhv-v1;e4e6186420b7 rootfs.erofs;fc749f8de849 stage.sha;d89964eac295 vmlinux;
+--- images
+postgres@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
+nginx@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de
+alpine@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+--- kata (guest kernel and config in use)
+kernel = "/opt/kata/share/kata-containers/vmlinux.container"
+image = "/opt/kata/share/kata-containers/kata-containers.img"
+kernel_params = "cgroup_no_v1=all systemd.unified_cgroup_hierarchy=1"
+default_vcpus = 0
+default_memory = 64
+shared_fs = "virtio-fs"
+virtio_fs_daemon = "/opt/kata/libexec/virtiofsd"
+block_device_driver = "virtio-blk-pci"
+sandbox_cgroup_only = true
+--- cchv daemon.json
+{
+  "pool_size": 3,
+  "max_pool_size": 10,
+  "max_active_vms": 1024,
+  "default_vcpus": 1,
+  "default_memory_mb": 320,
+  "cloud_hypervisor_binary": "/usr/local/bin/cloud-hypervisor",
+  "kernel_path": "/opt/cloudhv/vmlinux",
+  "rootfs_path": "/opt/cloudhv/rootfs.erofs",
+  "kernel_args": "console=hvc0 root=/dev/vda rw init=/init net.ifnames=0",
+  "socket_path": "/run/cloudhv/daemon.sock",
+  "state_dir": "/run/cloudhv/daemon",
+  "warmup_duration_secs": 30,
+  "max_snapshots": 100,
+  "ch_rootless": true,
+  "ch_require_cgroup": true,
+  "mke2fs_path": "/usr/sbin/mke2fs",
+  "emptydir_dir": "/data/cloudhv/emptydir",
+  "vm_balloon": true,
+  "serial_console": true,
+  "disk_direct": true,
+  "volume_block_prefixes": ["vg-pv--"],
+  "volume_block_format_if_blank": true,
+  "volume_block_vg": "vg",
+  "volume_block_max_mib": 65536,
+  "volume_block_allow_untagged": true,
+  "volume_helper_socket": "/run/cloudhv/volume-helper.sock",
+  "lvm_bin_dir": "/usr/sbin"
+}
+--- cchv config.json
+{
+  "cloud_hypervisor_binary": "/usr/local/bin/cloud-hypervisor",
+  "kernel_path": "/opt/cloudhv/vmlinux",
+  "rootfs_path": "/opt/cloudhv/rootfs.erofs",
+  "kernel_args": "console=ttyS0 root=/dev/vda rw init=/init net.ifnames=0",
+  "default_vcpus": 1,
+  "default_memory_mb": 320,
+  "max_containers_per_vm": 5,
+  "daemon_socket": "/run/cloudhv/daemon.sock",
+  "require_pod_cgroup": true
+}
+--- dockerd
+{
+  "features": {"containerd-snapshotter": true},
+  "data-root": "/data/rtbench/docker",
+  "exec-root": "/run/rtbench/docker",
+  "pidfile": "/run/rtbench/docker.pid",
+  "hosts": ["unix:///run/rtbench/docker.sock"],
+  "bridge": "rtbench0",
+  "fixed-cidr": "172.29.0.0/16",
+  "containerd": "/run/rtbench/containerd.sock",
+  "containerd-namespace": "rtbench",
+  "containerd-plugins-namespace": "rtbench-plugins",
+  "iptables": false,
+  "ip6tables": false,
+  "ip-forward": false,
+  "ip-masq": false,
+  "userland-proxy": false,
+  "exec-opts": ["native.cgroupdriver=cgroupfs"],
+  "cgroup-parent": "rtbench",
+  "default-runtime": "runc",
+  "runtimes": {
+    "runsc": {"path": "/opt/rtbench/gvisor/runsc"},
+    "kata-clh": {"runtimeType": "io.containerd.kata-clh-runtime-rs.v2"},
+    "cloudhv": {"runtimeType": "io.containerd.cloudhv.v1"}
+  }
+}

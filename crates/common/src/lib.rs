@@ -21,6 +21,10 @@ pub const DEFAULT_VCPUS: u32 = 1;
 
 /// Default guest memory in MiB.
 pub const DEFAULT_MEMORY_MB: u64 = 320;
+/// The least memory of the VM of a pod that has a memory limit (see `min_memory_mb`). Kata's default VM is 64 MiB; this is the limit + the guest's 64 MiB for a 64 MiB pod.
+pub const MIN_MEMORY_MB: u64 = 128;
+/// What the guest needs besides the pod's containers: its kernel, the agent, crun, the page cache of the rootfs. Added to the pod's memory limit (see `guest_overhead_mb`).
+pub const GUEST_OVERHEAD_MB: u64 = 64;
 
 /// Runtime state directory on the host.
 pub const RUNTIME_STATE_DIR: &str = "/run/cloudhv";

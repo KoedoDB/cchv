@@ -598,6 +598,8 @@ impl CloudHvInstance {
         let size = vm_size(
             sandbox_spec.limits,
             config.default_memory_mb,
+            config.min_memory_mb,
+            config.guest_overhead_mb,
             config.default_vcpus,
             max_vcpus,
         );

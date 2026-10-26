@@ -237,7 +237,7 @@ def vm_limits(rtname, kind):
     if runtime == "kata-clh":
         cpus, mem = str(VM_SIZE[kind][0] - 1), VM_SIZE[kind][1] - 32   # Kata adds 1 vCPU and 32 MiB
     elif runtime == "cloudhv":
-        cpus, mem = str(VM_SIZE[kind][0] - 1), VM_SIZE[kind][1] - 64   # cchv adds 64 MiB; the vCPUs come from the pool's default_vcpus (>= the limit)
+        cpus, mem = str(VM_SIZE[kind][0] - 1), VM_SIZE[kind][1] - int(os.environ.get("RT_CCHV_OVERHEAD", "64"))   # cchv adds 64 MiB (guest_overhead_mb; 0 in a run that sets it so in the config); the vCPUs come from the pool's default_vcpus (>= the limit)
     return cpus, f"{mem}m"
 
 

@@ -12,8 +12,9 @@ The CPU limit is the VM's vCPU count minus one (see vm_limits), not the 100 mill
 import json, os, re, subprocess, sys, time
 import rtbench as r
 
-r.VM_SIZE["authrest"] = (2, 320)
-r.PLAIN_LIMITS["authrest"] = ("2", 320)
+VM_MIB = int(os.environ.get("AR_VM_MIB", "320"))   # 320: the pool's default, which is what cchv v0.4.1 gives a pod of any small limit; 128: a pod of 64 MiB (+ 64 MiB of the guest)
+r.VM_SIZE["authrest"] = (2, VM_MIB)
+r.PLAIN_LIMITS["authrest"] = ("2", VM_MIB)
 HOME = os.path.expanduser("~")
 HARDENED = ["--user", "10001:10001", "--read-only", "--tmpfs", "/tmp", "--cap-drop", "ALL", "--security-opt", "no-new-privileges"]
 ROOT_PUBLIC = None   # the images are pulled by digest from the IMAGE lines the caller passes in the environment
@@ -123,7 +124,7 @@ def run(rtname, n, workdir):
            "per_vm_pss_idle_mib": round((idle["pss_mib"] - base["pss_mib"]) / (2 * n), 1), "per_vm_pss_load_mib": round((load["pss_mib"] - base["pss_mib"]) / (2 * n), 1),
            "per_vm_rss_idle_mib": round((idle["rss_mib"] - base["rss_mib"]) / (2 * n), 1), "per_vm_rss_load_mib": round((load["rss_mib"] - base["rss_mib"]) / (2 * n), 1),
            "auth": auth_stats, "rest": rest_stats, "states": states}
-    r.save(f"authrest-{rtname}-{n}", res, "\n".join(outs))
+    r.save(f"authrest-{rtname}-{n}" + ("" if VM_MIB == 320 else f"-vm{VM_MIB}"), res, "\n".join(outs))
     r.log(rtname, "auth+rest", n, "pairs:", res["per_vm_pss_idle_mib"], "MiB idle,", res["per_vm_pss_load_mib"], "MiB under load per VM; states", sorted(set(states.values())))
     for nm in names:
         r.rm(nm)

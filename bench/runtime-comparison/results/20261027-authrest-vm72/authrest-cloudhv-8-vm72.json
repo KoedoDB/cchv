@@ -1,0 +1,366 @@
+{
+ "runtime": "cloudhv",
+ "n_pairs": 8,
+ "vms": 16,
+ "vm_sizes": [
+  [
+   2,
+   72
+  ],
+  [
+   2,
+   72
+  ],
+  [
+   2,
+   72
+  ],
+  [
+   2,
+   72
+  ],
+  [
+   2,
+   72
+  ],
+  [
+   2,
+   72
+  ],
+  [
+   2,
+   72
+  ],
+  [
+   2,
+   72
+  ],
+  [
+   2,
+   72
+  ],
+  [
+   2,
+   72
+  ],
+  [
+   2,
+   72
+  ],
+  [
+   2,
+   72
+  ],
+  [
+   2,
+   72
+  ],
+  [
+   2,
+   72
+  ],
+  [
+   2,
+   72
+  ],
+  [
+   2,
+   72
+  ],
+  [
+   2,
+   320
+  ],
+  [
+   2,
+   320
+  ],
+  [
+   2,
+   320
+  ]
+ ],
+ "limits": [
+  "1",
+  "72m"
+ ],
+ "all_up_s": 17.9,
+ "mem_baseline": {
+  "rss_mib": 507.671875,
+  "pss_mib": 400.6845703125,
+  "cpu_ticks": 582,
+  "processes": 29,
+  "by_comm": {
+   "cloud-hyperviso": [
+    3,
+    142.9
+   ],
+   "cloudhv-sandbox": [
+    5,
+    7.6
+   ],
+   "containerd": [
+    1,
+    59.6
+   ],
+   "containerd-shim": [
+    3,
+    26.9
+   ],
+   "dockerd": [
+    1,
+    97.9
+   ],
+   "postgres": [
+    9,
+    43.6
+   ],
+   "python3": [
+    2,
+    16.8
+   ],
+   "run-authrest.sh": [
+    1,
+    0.7
+   ],
+   "sleep": [
+    2,
+    1.6
+   ],
+   "sudo": [
+    1,
+    2.7
+   ],
+   "tee": [
+    1,
+    0.3
+   ]
+  }
+ },
+ "mem_idle": {
+  "rss_mib": 2213.32421875,
+  "pss_mib": 1711.154296875,
+  "cpu_ticks": 7397,
+  "processes": 109,
+  "by_comm": {
+   "cloud-hyperviso": [
+    19,
+    1359.3
+   ],
+   "cloudhv-sandbox": [
+    21,
+    10.9
+   ],
+   "containerd": [
+    1,
+    61.8
+   ],
+   "containerd-shim": [
+    19,
+    84.6
+   ],
+   "dockerd": [
+    1,
+    100.3
+   ],
+   "exe": [
+    16,
+    5.2
+   ],
+   "postgres": [
+    25,
+    66.9
+   ],
+   "python3": [
+    2,
+    17.2
+   ],
+   "run-authrest.sh": [
+    1,
+    0.6
+   ],
+   "sleep": [
+    2,
+    1.4
+   ],
+   "sudo": [
+    1,
+    2.6
+   ],
+   "tee": [
+    1,
+    0.3
+   ]
+  }
+ },
+ "mem_load": {
+  "rss_mib": 3689.60546875,
+  "pss_mib": 2104.26953125,
+  "cpu_ticks": 27123,
+  "processes": 197,
+  "by_comm": {
+   "cloud-hyperviso": [
+    19,
+    1373.7
+   ],
+   "cloudhv-sandbox": [
+    21,
+    11.0
+   ],
+   "containerd": [
+    1,
+    61.5
+   ],
+   "containerd-shim": [
+    19,
+    84.5
+   ],
+   "docker": [
+    16,
+    226.2
+   ],
+   "dockerd": [
+    1,
+    102.6
+   ],
+   "exe": [
+    16,
+    5.2
+   ],
+   "postgres": [
+    65,
+    128.0
+   ],
+   "python3": [
+    2,
+    17.3
+   ],
+   "run-authrest.sh": [
+    1,
+    0.6
+   ],
+   "sleep": [
+    2,
+    0.9
+   ],
+   "sudo": [
+    17,
+    23.9
+   ],
+   "tee": [
+    1,
+    0.2
+   ],
+   "wrk": [
+    16,
+    68.6
+   ]
+  }
+ },
+ "per_vm_pss_idle_mib": 81.9,
+ "per_vm_pss_load_mib": 106.5,
+ "per_vm_rss_idle_mib": 106.6,
+ "per_vm_rss_load_mib": 198.9,
+ "auth": [
+  {
+   "rps": 0.0,
+   "requests": 0,
+   "non2xx": 0
+  },
+  {
+   "rps": 0.0,
+   "requests": 0,
+   "non2xx": 0
+  },
+  {
+   "rps": 0.0,
+   "requests": 0,
+   "non2xx": 0
+  },
+  {
+   "rps": 0.0,
+   "requests": 0,
+   "non2xx": 0
+  },
+  {
+   "rps": 0.0,
+   "requests": 0,
+   "non2xx": 0
+  },
+  {
+   "rps": 0.0,
+   "requests": 0,
+   "non2xx": 0
+  },
+  {
+   "rps": 0.0,
+   "requests": 0,
+   "non2xx": 0
+  },
+  {
+   "rps": 0.0,
+   "requests": 0,
+   "non2xx": 0
+  }
+ ],
+ "rest": [
+  {
+   "rps": 221.62,
+   "requests": 8873,
+   "non2xx": 0
+  },
+  {
+   "rps": 248.76,
+   "requests": 9961,
+   "non2xx": 0
+  },
+  {
+   "rps": 225.13,
+   "requests": 9011,
+   "non2xx": 0
+  },
+  {
+   "rps": 238.36,
+   "requests": 9546,
+   "non2xx": 0
+  },
+  {
+   "rps": 238.13,
+   "requests": 9533,
+   "non2xx": 0
+  },
+  {
+   "rps": 233.11,
+   "requests": 9333,
+   "non2xx": 0
+  },
+  {
+   "rps": 232.49,
+   "requests": 9308,
+   "non2xx": 0
+  },
+  {
+   "rps": 250.47,
+   "requests": 10026,
+   "non2xx": 0
+  }
+ ],
+ "states": {
+  "ar-auth0": "running oom=false restarts=0",
+  "ar-rest0": "running oom=false restarts=0",
+  "ar-auth1": "running oom=false restarts=0",
+  "ar-rest1": "running oom=false restarts=0",
+  "ar-auth2": "running oom=false restarts=0",
+  "ar-rest2": "running oom=false restarts=0",
+  "ar-auth3": "running oom=false restarts=0",
+  "ar-rest3": "running oom=false restarts=0",
+  "ar-auth4": "running oom=false restarts=0",
+  "ar-rest4": "running oom=false restarts=0",
+  "ar-auth5": "running oom=false restarts=0",
+  "ar-rest5": "running oom=false restarts=0",
+  "ar-auth6": "running oom=false restarts=0",
+  "ar-rest6": "running oom=false restarts=0",
+  "ar-auth7": "running oom=false restarts=0",
+  "ar-rest7": "running oom=false restarts=0"
+ }
+}

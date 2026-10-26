@@ -1,0 +1,163 @@
+Running 40s test @ http://172.29.0.5:9999
+  1 threads and 4 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     0.00us    0.00us   0.00us    -nan%
+    Req/Sec     0.00      0.00     0.00    100.00%
+  5 requests in 40.06s, 1.64KB read
+  Socket errors: connect 0, read 0, write 0, timeout 5
+  Non-2xx or 3xx responses: 5
+Requests/sec:      0.12
+Transfer/sec:      41.82B
+
+Running 40s test @ http://172.29.0.7:9999
+  1 threads and 4 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     0.00us    0.00us   0.00us    -nan%
+    Req/Sec     1.00      0.82     2.00     50.00%
+  4 requests in 40.06s, 1.31KB read
+  Socket errors: connect 0, read 0, write 0, timeout 4
+  Non-2xx or 3xx responses: 4
+Requests/sec:      0.10
+Transfer/sec:      33.45B
+
+Running 40s test @ http://172.29.0.9:9999
+  1 threads and 4 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     0.00us    0.00us   0.00us    -nan%
+    Req/Sec     0.00      0.00     0.00    100.00%
+  4 requests in 40.05s, 1.31KB read
+  Socket errors: connect 0, read 0, write 0, timeout 4
+  Non-2xx or 3xx responses: 4
+Requests/sec:      0.10
+Transfer/sec:      33.46B
+
+Running 40s test @ http://172.29.0.11:9999
+  1 threads and 4 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     0.00us    0.00us   0.00us    -nan%
+    Req/Sec     0.00      0.00     0.00      -nan%
+  0 requests in 40.06s, 0.00B read
+Requests/sec:      0.00
+Transfer/sec:       0.00B
+
+Running 40s test @ http://172.29.0.13:9999
+  1 threads and 4 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     0.00us    0.00us   0.00us    -nan%
+    Req/Sec     0.25      0.50     1.00     75.00%
+  4 requests in 40.05s, 1.31KB read
+  Socket errors: connect 0, read 0, write 0, timeout 4
+  Non-2xx or 3xx responses: 4
+Requests/sec:      0.10
+Transfer/sec:      33.46B
+
+Running 40s test @ http://172.29.0.15:9999
+  1 threads and 4 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     0.00us    0.00us   0.00us    -nan%
+    Req/Sec     0.00      0.00     0.00      -nan%
+  0 requests in 40.05s, 0.00B read
+Requests/sec:      0.00
+Transfer/sec:       0.00B
+
+Running 40s test @ http://172.29.0.17:9999
+  1 threads and 4 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     0.00us    0.00us   0.00us    -nan%
+    Req/Sec     0.60      1.34     3.00     80.00%
+  5 requests in 40.06s, 1.64KB read
+  Socket errors: connect 0, read 0, write 0, timeout 5
+  Non-2xx or 3xx responses: 5
+Requests/sec:      0.12
+Transfer/sec:      41.81B
+
+Running 40s test @ http://172.29.0.19:9999
+  1 threads and 4 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     0.00us    0.00us   0.00us    -nan%
+    Req/Sec     0.25      0.50     1.00     75.00%
+  4 requests in 40.06s, 1.31KB read
+  Socket errors: connect 0, read 0, write 0, timeout 4
+  Non-2xx or 3xx responses: 4
+Requests/sec:      0.10
+Transfer/sec:      33.45B
+
+Running 40s test @ http://172.29.0.6:3000/items?limit=20
+  1 threads and 8 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   604.75ms  647.45ms   2.00s    78.89%
+    Req/Sec    18.51     57.93   410.00     96.39%
+  220 requests in 40.05s, 647.97KB read
+  Socket errors: connect 0, read 0, write 0, timeout 21
+Requests/sec:      5.49
+Transfer/sec:     16.18KB
+
+Running 40s test @ http://172.29.0.8:3000/items?limit=20
+  1 threads and 8 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   578.63ms  617.94ms   1.97s    79.90%
+    Req/Sec    13.10     32.84   292.00     93.75%
+  245 requests in 40.06s, 721.60KB read
+  Socket errors: connect 0, read 0, write 0, timeout 46
+Requests/sec:      6.12
+Transfer/sec:     18.01KB
+
+Running 40s test @ http://172.29.0.10:3000/items?limit=20
+  1 threads and 8 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   464.37ms  530.74ms   1.97s    79.67%
+    Req/Sec    20.89     48.38   240.00     95.45%
+  137 requests in 40.06s, 403.51KB read
+  Socket errors: connect 0, read 0, write 0, timeout 14
+Requests/sec:      3.42
+Transfer/sec:     10.07KB
+
+Running 40s test @ http://172.29.0.12:3000/items?limit=20
+  1 threads and 8 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   490.53ms  591.28ms   2.00s    77.42%
+    Req/Sec    25.11     69.80   390.00     94.44%
+  267 requests in 40.05s, 786.40KB read
+  Socket errors: connect 0, read 0, write 0, timeout 19
+Requests/sec:      6.67
+Transfer/sec:     19.63KB
+
+Running 40s test @ http://172.29.0.14:3000/items?limit=20
+  1 threads and 8 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   588.40ms  540.31ms   1.94s    48.02%
+    Req/Sec    19.46     48.91   320.00     96.15%
+  235 requests in 40.05s, 692.15KB read
+  Socket errors: connect 0, read 0, write 0, timeout 8
+Requests/sec:      5.87
+Transfer/sec:     17.28KB
+
+Running 40s test @ http://172.29.0.16:3000/items?limit=20
+  1 threads and 8 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   315.95ms  381.01ms   1.61s    77.94%
+    Req/Sec    34.29     58.04   230.00     90.32%
+  141 requests in 40.07s, 415.29KB read
+  Socket errors: connect 0, read 0, write 0, timeout 5
+Requests/sec:      3.52
+Transfer/sec:     10.36KB
+
+Running 40s test @ http://172.29.0.18:3000/items?limit=20
+  1 threads and 8 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   301.32ms  467.28ms   1.98s    85.25%
+    Req/Sec    37.19     94.73   550.00     91.38%
+  259 requests in 40.06s, 762.84KB read
+  Socket errors: connect 0, read 0, write 0, timeout 15
+Requests/sec:      6.47
+Transfer/sec:     19.04KB
+
+Running 40s test @ http://172.29.0.20:3000/items?limit=20
+  1 threads and 8 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   498.65ms  477.83ms   1.95s    75.76%
+    Req/Sec    17.68     38.02   262.00     93.55%
+  229 requests in 40.05s, 674.48KB read
+  Socket errors: connect 0, read 0, write 0, timeout 31
+Requests/sec:      5.72
+Transfer/sec:     16.84KB

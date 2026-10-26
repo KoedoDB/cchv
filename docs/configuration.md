@@ -13,6 +13,8 @@ The shim loads its configuration from `/opt/cloudhv/config.json` at startup.
 | `default_vcpus` | `1` | Boot vCPUs per VM |
 | `max_default_vcpus` | `0` | Max vCPUs when no CPU limit (0 = host CPU count) |
 | `default_memory_mb` | `320` | Boot memory in MiB |
+| `min_memory_mb` | `128` | The least memory of the VM of a pod that has a memory limit (the limit + `guest_overhead_mb`, but not less). A VM that is not `default_memory_mb` big is started for the pod; it does not come from the pool |
+| `guest_overhead_mb` | `64` | What the guest needs besides the pod's containers (kernel, agent, crun, page cache of the rootfs), added to the pod's memory limit. Measured: Auth runs in a VM of 72 MiB, not in 64 |
 | `max_containers_per_vm` | `5` | Max containers sharing a VM |
 | `hotplug_memory_mb` | `0` | Hotpluggable memory (0 = disabled) |
 | `hotplug_method` | `acpi` | `acpi` or `virtio-mem` |

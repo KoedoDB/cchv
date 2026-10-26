@@ -4,9 +4,8 @@
 //! Until this existed every VM had the daemon's default size (320 MiB, 1 vCPU) whatever the pod asked for: a pod with a limit
 //! of 512 MiB and 2 CPUs saw 112 MB and one CPU.
 
-/// What the guest needs besides the pod's containers: its kernel, the agent, crun, the page cache of the rootfs. Added to the pod's
-/// memory limit. (An empty guest uses about 40 MiB; the rest is a margin.)
-pub const GUEST_OVERHEAD_MB: u64 = 64;
+/// What the guest needs besides the pod's containers (see `cloudhv_common::GUEST_OVERHEAD_MB`; the config's `guest_overhead_mb`).
+pub use cloudhv_common::GUEST_OVERHEAD_MB;
 
 /// The size of a pod's VM. A field of 0 means "the daemon's default".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -25,21 +24,22 @@ pub struct PodLimits {
     pub cpu_period: Option<u64>,
 }
 
-/// The VM for a pod with these limits. `default_memory_mb` and `default_vcpus` are what a pod without limits gets (and the least a pod
-/// with small limits gets); `max_vcpus` caps the CPUs (the host's). A pod whose size equals the default returns the default, so the
-/// daemon can serve it from its pool.
+/// The VM for a pod with these limits. `default_memory_mb` and `default_vcpus` are what a pod without limits gets; a pod with a memory
+/// limit gets the limit plus the guest's needs, but not less than `min_memory_mb`; a pod with small CPU limits gets at least
+/// `default_vcpus`. `max_vcpus` caps the CPUs (the host's). A pod whose size equals the default returns the default, so the daemon can
+/// serve it from its pool (any other size is a VM started for the pod).
 pub fn vm_size(
     limits: PodLimits,
     default_memory_mb: u64,
+    min_memory_mb: u64,
+    guest_overhead_mb: u64,
     default_vcpus: u32,
     max_vcpus: u32,
 ) -> VmSize {
     let memory_mb = match limits.memory_bytes {
         Some(bytes) if bytes > 0 => {
             let pod_mb = bytes.div_ceil(1024 * 1024);
-            pod_mb
-                .saturating_add(GUEST_OVERHEAD_MB)
-                .max(default_memory_mb)
+            pod_mb.saturating_add(guest_overhead_mb).max(min_memory_mb)
         }
         _ => default_memory_mb,
     };
@@ -96,7 +96,7 @@ mod tests {
 
     #[test]
     fn a_pod_with_no_limits_gets_the_default() {
-        let s = vm_size(PodLimits::default(), 128, 1, 8);
+        let s = vm_size(PodLimits::default(), 128, 128, GUEST_OVERHEAD_MB, 1, 8);
         assert_eq!(
             s,
             VmSize {
@@ -110,13 +110,13 @@ mod tests {
             cpu_quota: Some(0),
             cpu_period: Some(100_000),
         };
-        assert_eq!(vm_size(zero, 128, 1, 8), s);
+        assert_eq!(vm_size(zero, 128, 128, GUEST_OVERHEAD_MB, 1, 8), s);
     }
 
     #[test]
     fn the_vm_holds_the_pods_memory_limit_and_the_guests_own_needs() {
         // The pod asked for 512 MiB and 2 CPUs (the case that saw 112 MB and one CPU).
-        let s = vm_size(limits(512, 200_000), 128, 1, 8);
+        let s = vm_size(limits(512, 200_000), 128, 128, GUEST_OVERHEAD_MB, 1, 8);
         assert_eq!(
             s,
             VmSize {
@@ -127,9 +127,36 @@ mod tests {
     }
 
     #[test]
-    fn a_small_limit_is_not_made_smaller_than_the_default() {
+    fn a_small_limit_is_not_made_smaller_than_the_minimum() {
+        // a 64 MiB pod (what the Control Plane gives Auth and PostgREST): 64 + the guest's 64, not the default of 320
         assert_eq!(
-            vm_size(limits(32, 10_000), 128, 1, 8),
+            vm_size(limits(64, 10_000), 320, 128, GUEST_OVERHEAD_MB, 1, 8),
+            VmSize {
+                memory_mb: 128,
+                vcpus: 1
+            }
+        );
+        // under the minimum the minimum is the VM
+        assert_eq!(
+            vm_size(limits(16, 10_000), 320, 128, GUEST_OVERHEAD_MB, 1, 8).memory_mb,
+            128
+        );
+        // above it the limit makes the VM, below the default too
+        assert_eq!(
+            vm_size(limits(200, 10_000), 320, 128, GUEST_OVERHEAD_MB, 1, 8).memory_mb,
+            264
+        );
+        // no limit at all: the default
+        assert_eq!(
+            vm_size(PodLimits::default(), 320, 128, GUEST_OVERHEAD_MB, 1, 8).memory_mb,
+            320
+        );
+    }
+
+    #[test]
+    fn a_small_limit_gets_the_minimum_when_it_is_the_default() {
+        assert_eq!(
+            vm_size(limits(32, 10_000), 128, 128, GUEST_OVERHEAD_MB, 1, 8),
             VmSize {
                 memory_mb: 128,
                 vcpus: 1
@@ -139,10 +166,16 @@ mod tests {
 
     #[test]
     fn a_part_of_a_cpu_is_rounded_up_to_a_whole_one_and_the_host_caps_them() {
-        assert_eq!(vm_size(limits(256, 150_000), 128, 1, 8).vcpus, 2);
-        assert_eq!(vm_size(limits(256, 50_000), 128, 1, 8).vcpus, 1);
         assert_eq!(
-            vm_size(limits(256, 3_200_000), 128, 1, 8).vcpus,
+            vm_size(limits(256, 150_000), 128, 128, GUEST_OVERHEAD_MB, 1, 8).vcpus,
+            2
+        );
+        assert_eq!(
+            vm_size(limits(256, 50_000), 128, 128, GUEST_OVERHEAD_MB, 1, 8).vcpus,
+            1
+        );
+        assert_eq!(
+            vm_size(limits(256, 3_200_000), 128, 128, GUEST_OVERHEAD_MB, 1, 8).vcpus,
             8,
             "32 CPUs asked on a host of 8"
         );
@@ -155,25 +188,28 @@ mod tests {
             cpu_quota: None,
             cpu_period: None,
         };
-        assert_eq!(vm_size(l, 128, 1, 8).memory_mb, 301 + GUEST_OVERHEAD_MB);
+        assert_eq!(
+            vm_size(l, 128, 128, GUEST_OVERHEAD_MB, 1, 8).memory_mb,
+            301 + GUEST_OVERHEAD_MB
+        );
     }
 
     #[test]
     fn a_vm_bigger_than_the_host_allows_is_refused() {
-        let ok = vm_size(limits(1024, 100_000), 128, 1, 8);
+        let ok = vm_size(limits(1024, 100_000), 128, 128, GUEST_OVERHEAD_MB, 1, 8);
         assert!(check_size(ok, 16384).is_ok());
         // 4 TiB, and a limit so large that adding the guest's share would overflow.
         let tib = PodLimits {
             memory_bytes: Some(4 * 1024 * 1024 * 1024 * 1024),
             ..PodLimits::default()
         };
-        let e = check_size(vm_size(tib, 128, 1, 8), 16384).unwrap_err();
+        let e = check_size(vm_size(tib, 128, 128, GUEST_OVERHEAD_MB, 1, 8), 16384).unwrap_err();
         assert!(e.contains("max_memory_mb"), "{e}");
         let huge = PodLimits {
             memory_bytes: Some(u64::MAX),
             ..PodLimits::default()
         };
-        assert!(check_size(vm_size(huge, 128, 1, 8), 16384).is_err());
+        assert!(check_size(vm_size(huge, 128, 128, GUEST_OVERHEAD_MB, 1, 8), 16384).is_err());
         // exactly the maximum is allowed
         let edge = VmSize {
             memory_mb: 16384,
