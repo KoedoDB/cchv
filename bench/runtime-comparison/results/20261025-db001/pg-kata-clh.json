@@ -1,0 +1,460 @@
+{
+ "runtime": "kata-clh",
+ "settings": {
+  "scale": 100,
+  "clients": 16,
+  "jobs": 4,
+  "tpcb_s": 300,
+  "select_only_s": 180,
+  "commit_s": 60,
+  "reps": 3,
+  "pg_args": [
+   "-c",
+   "shared_buffers=512MB",
+   "-c",
+   "max_wal_size=4GB",
+   "-c",
+   "listen_addresses=*",
+   "-c",
+   "fsync=on",
+   "-c",
+   "synchronous_commit=on"
+  ],
+  "limits": "2 / 2048m (--cpus / -m); the VM of Kata and cchv is 3 vCPUs, 2080 MiB"
+ },
+ "host": {
+  "loadavg1": 1.38,
+  "host_docker_running_containers": "0"
+ },
+ "mem_baseline": {
+  "rss_mib": 235.92578125,
+  "pss_mib": 207.16015625,
+  "cpu_ticks": 507,
+  "processes": 13,
+  "by_comm": {
+   "bash": [
+    1,
+    0.6
+   ],
+   "cloudhv-sandbox": [
+    1,
+    2.3
+   ],
+   "containerd": [
+    1,
+    55.3
+   ],
+   "containerd-shim": [
+    2,
+    23.2
+   ],
+   "dockerd": [
+    1,
+    100.6
+   ],
+   "python3": [
+    2,
+    18.7
+   ],
+   "run-all.sh": [
+    1,
+    0.7
+   ],
+   "sleep": [
+    2,
+    2.7
+   ],
+   "sudo": [
+    1,
+    2.9
+   ],
+   "tee": [
+    1,
+    0.2
+   ]
+  }
+ },
+ "first_query_s": 4.41,
+ "vm_sizes": [
+  [
+   3,
+   2080
+  ]
+ ],
+ "mem_idle_after_initdb": {
+  "rss_mib": 674.06640625,
+  "pss_mib": 538.716796875,
+  "cpu_ticks": 1240,
+  "processes": 17,
+  "by_comm": {
+   "bash": [
+    1,
+    0.6
+   ],
+   "cloud-hyperviso": [
+    1,
+    249.5
+   ],
+   "cloudhv-sandbox": [
+    1,
+    2.3
+   ],
+   "containerd": [
+    1,
+    52.7
+   ],
+   "containerd-shim": [
+    3,
+    49.9
+   ],
+   "dockerd": [
+    1,
+    100.6
+   ],
+   "python3": [
+    2,
+    18.6
+   ],
+   "run-all.sh": [
+    1,
+    0.7
+   ],
+   "sleep": [
+    2,
+    2.7
+   ],
+   "sudo": [
+    1,
+    2.9
+   ],
+   "tee": [
+    1,
+    0.2
+   ],
+   "virtiofsd": [
+    2,
+    58.0
+   ]
+  }
+ },
+ "cgroup_idle_mib": 346.91796875,
+ "restart_first_query_s": [
+  1.56,
+  1.53,
+  1.56
+ ],
+ "pgbench_init_s": 22.1,
+ "mem_under_load": {
+  "rss_mib": 4252.89453125,
+  "pss_mib": 2357.32421875,
+  "cpu_ticks": 37361,
+  "processes": 20,
+  "by_comm": {
+   "bash": [
+    1,
+    0.6
+   ],
+   "cloud-hyperviso": [
+    1,
+    1146.1
+   ],
+   "cloudhv-sandbox": [
+    1,
+    2.3
+   ],
+   "containerd": [
+    1,
+    56.7
+   ],
+   "containerd-shim": [
+    3,
+    51.3
+   ],
+   "docker": [
+    1,
+    34.1
+   ],
+   "dockerd": [
+    1,
+    99.1
+   ],
+   "pgbench": [
+    1,
+    6.3
+   ],
+   "python3": [
+    2,
+    18.8
+   ],
+   "run-all.sh": [
+    1,
+    0.7
+   ],
+   "sleep": [
+    2,
+    2.0
+   ],
+   "sudo": [
+    2,
+    4.4
+   ],
+   "tee": [
+    1,
+    0.2
+   ],
+   "virtiofsd": [
+    2,
+    934.6
+   ]
+  }
+ },
+ "cgroup_under_load_mib": 5002.3359375,
+ "tpcb": {
+  "runs": [
+   {
+    "tps": 2953.260069,
+    "latency_avg_ms": 5.413,
+    "n_transactions": 885983,
+    "p50_ms": 3.704,
+    "p99_ms": 35.519,
+    "p999_ms": 41.012,
+    "failed": 0,
+    "rc": 0
+   },
+   {
+    "tps": 2892.61116,
+    "latency_avg_ms": 5.527,
+    "n_transactions": 867775,
+    "p50_ms": 3.744,
+    "p99_ms": 35.811,
+    "p999_ms": 48.622,
+    "failed": 0,
+    "rc": 0
+   },
+   {
+    "tps": 2863.833124,
+    "latency_avg_ms": 5.583,
+    "n_transactions": 859145,
+    "p50_ms": 3.796,
+    "p99_ms": 35.804,
+    "p999_ms": 39.649,
+    "failed": 0,
+    "rc": 0
+   }
+  ],
+  "tps": {
+   "median": 2892.61116,
+   "min": 2863.833124,
+   "max": 2953.260069,
+   "n": 3,
+   "values": [
+    2953.260069,
+    2892.61116,
+    2863.833124
+   ]
+  },
+  "p99_ms": {
+   "median": 35.804,
+   "min": 35.519,
+   "max": 35.811,
+   "n": 3,
+   "values": [
+    35.519,
+    35.811,
+    35.804
+   ]
+  },
+  "latency_avg_ms": {
+   "median": 5.527,
+   "min": 5.413,
+   "max": 5.583,
+   "n": 3,
+   "values": [
+    5.413,
+    5.527,
+    5.583
+   ]
+  }
+ },
+ "select": {
+  "runs": [
+   {
+    "tps": 17178.263794,
+    "latency_avg_ms": 0.928,
+    "n_transactions": 3092355,
+    "p50_ms": 0.582,
+    "p99_ms": 3.77,
+    "p999_ms": 33.929,
+    "failed": 0,
+    "rc": 0
+   },
+   {
+    "tps": 19463.195883,
+    "latency_avg_ms": 0.819,
+    "n_transactions": 3504009,
+    "p50_ms": 0.492,
+    "p99_ms": 2.599,
+    "p999_ms": 34.944,
+    "failed": 0,
+    "rc": 0
+   },
+   {
+    "tps": 19799.497412,
+    "latency_avg_ms": 0.805,
+    "n_transactions": 3564063,
+    "p50_ms": 0.483,
+    "p99_ms": 2.498,
+    "p999_ms": 35.171,
+    "failed": 0,
+    "rc": 0
+   }
+  ],
+  "tps": {
+   "median": 19463.195883,
+   "min": 17178.263794,
+   "max": 19799.497412,
+   "n": 3,
+   "values": [
+    17178.263794,
+    19463.195883,
+    19799.497412
+   ]
+  },
+  "p99_ms": {
+   "median": 2.599,
+   "min": 2.498,
+   "max": 3.77,
+   "n": 3,
+   "values": [
+    3.77,
+    2.599,
+    2.498
+   ]
+  },
+  "latency_avg_ms": {
+   "median": 0.819,
+   "min": 0.805,
+   "max": 0.928,
+   "n": 3,
+   "values": [
+    0.928,
+    0.819,
+    0.805
+   ]
+  }
+ },
+ "commit": {
+  "runs": [
+   {
+    "tps": 4050.527624,
+    "latency_avg_ms": 0.244,
+    "n_transactions": 243020,
+    "p50_ms": 0.23,
+    "p99_ms": 0.438,
+    "p999_ms": 1.739,
+    "failed": 0,
+    "rc": 0
+   },
+   {
+    "tps": 4040.348954,
+    "latency_avg_ms": 0.245,
+    "n_transactions": 242410,
+    "p50_ms": 0.231,
+    "p99_ms": 0.426,
+    "p999_ms": 1.645,
+    "failed": 0,
+    "rc": 0
+   },
+   {
+    "tps": 4007.592164,
+    "latency_avg_ms": 0.247,
+    "n_transactions": 240444,
+    "p50_ms": 0.233,
+    "p99_ms": 0.457,
+    "p999_ms": 1.673,
+    "failed": 0,
+    "rc": 0
+   }
+  ],
+  "tps": {
+   "median": 4040.348954,
+   "min": 4007.592164,
+   "max": 4050.527624,
+   "n": 3,
+   "values": [
+    4050.527624,
+    4040.348954,
+    4007.592164
+   ]
+  },
+  "p99_ms": {
+   "median": 0.438,
+   "min": 0.426,
+   "max": 0.457,
+   "n": 3,
+   "values": [
+    0.438,
+    0.426,
+    0.457
+   ]
+  },
+  "latency_avg_ms": {
+   "median": 0.245,
+   "min": 0.244,
+   "max": 0.247,
+   "n": 3,
+   "values": [
+    0.244,
+    0.245,
+    0.247
+   ]
+  }
+ },
+ "pg_test_fsync_raw": "5 seconds per test\nO_DIRECT supported on this platform for open_datasync and open_sync.\n\nCompare file sync methods using one 8kB write:\n(in \"wal_sync_method\" preference order, except fdatasync is Linux's default)\n        open_datasync                      4962.952 ops/sec     201 usecs/op\n        fdatasync                          5135.125 ops/sec     195 usecs/op\n        fsync                              4358.595 ops/sec     229 usecs/op\n        fsync_writethrough                              n/a\n        open_sync                          4524.329 ops/sec     221 usecs/op\n\nCompare file sync methods using two 8kB writes:\n(in \"wal_sync_method\" preference order, except fdatasync is Linux's default)\n        open_datasync                      4730.894 ops/sec     211 usecs/op\n        fdatasync                          3889.934 ops/sec     257 usecs/op\n        fsync                              3452.107 ops/sec     290 usecs/op\n        fsync_writethrough                              n/a\n        open_sync                          3214.347 ops/sec     311 usecs/op\n\nCompare open_sync with different write sizes:\n(This is designed to compare the cost of writing 16kB in different write\nopen_sync sizes.)\n         1 * 16kB open_sync write          3513.935 ops/sec     285 usecs/op\n         2 *  8kB open_sync writes         4057.233 ops/sec     246 usecs/op\n         4 *  4kB open_sync writes         2735.795 ops/sec     366 usecs/op\n         8 *  2kB open_sync writes          819.591 ops/sec    1220 usecs/op\n        16 *  1kB open_sync writes          283.984 ops/sec    3521 usecs/op\n\nTest if fsync on non-write file descriptor is honored:\n(If the times are similar, fsync() can sync data written on a different\ndescriptor.)\n        write, fsync, close                2909.477 ops/sec     344 usecs/op\n        write, close, fsync                3150.083 ops/sec     317 usecs/op\n\nNon-sync'ed 8kB writes:\n        write                             52525.505 ops/sec      19 usecs/op\n",
+ "pg_test_fsync": {
+  "open_datasync": [
+   {
+    "ops_s": 4962.952,
+    "us_per_op": 201
+   },
+   {
+    "ops_s": 4730.894,
+    "us_per_op": 211
+   }
+  ],
+  "fdatasync": [
+   {
+    "ops_s": 5135.125,
+    "us_per_op": 195
+   },
+   {
+    "ops_s": 3889.934,
+    "us_per_op": 257
+   }
+  ],
+  "fsync": [
+   {
+    "ops_s": 4358.595,
+    "us_per_op": 229
+   },
+   {
+    "ops_s": 3452.107,
+    "us_per_op": 290
+   }
+  ],
+  "open_sync": [
+   {
+    "ops_s": 4524.329,
+    "us_per_op": 221
+   },
+   {
+    "ops_s": 3214.347,
+    "us_per_op": 311
+   }
+  ]
+ },
+ "host_after": {
+  "loadavg1": 2.78,
+  "host_docker_running_containers": "0"
+ }
+}

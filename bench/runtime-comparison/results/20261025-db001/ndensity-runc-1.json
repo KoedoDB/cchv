@@ -1,0 +1,107 @@
+{
+ "runtime": "runc",
+ "n": 1,
+ "vm_sizes": [],
+ "mem_baseline": {
+  "rss_mib": 228.4375,
+  "pss_mib": 199.615234375,
+  "cpu_ticks": 157,
+  "processes": 13,
+  "by_comm": {
+   "bash": [
+    1,
+    0.6
+   ],
+   "cloudhv-sandbox": [
+    1,
+    2.3
+   ],
+   "containerd": [
+    1,
+    58.5
+   ],
+   "containerd-shim": [
+    2,
+    21.7
+   ],
+   "dockerd": [
+    1,
+    91.1
+   ],
+   "python3": [
+    2,
+    18.7
+   ],
+   "run-all.sh": [
+    1,
+    0.7
+   ],
+   "sleep": [
+    2,
+    2.8
+   ],
+   "sudo": [
+    1,
+    2.9
+   ],
+   "tee": [
+    1,
+    0.2
+   ]
+  }
+ },
+ "mem_after": {
+  "rss_mib": 254.59375,
+  "pss_mib": 216.3173828125,
+  "cpu_ticks": 176,
+  "processes": 16,
+  "by_comm": {
+   "bash": [
+    1,
+    0.6
+   ],
+   "cloudhv-sandbox": [
+    1,
+    2.3
+   ],
+   "containerd": [
+    1,
+    62.0
+   ],
+   "containerd-shim": [
+    3,
+    27.1
+   ],
+   "dockerd": [
+    1,
+    91.1
+   ],
+   "nginx": [
+    2,
+    7.9
+   ],
+   "python3": [
+    2,
+    18.7
+   ],
+   "run-all.sh": [
+    1,
+    0.7
+   ],
+   "sleep": [
+    2,
+    2.8
+   ],
+   "sudo": [
+    1,
+    2.9
+   ],
+   "tee": [
+    1,
+    0.2
+   ]
+  }
+ },
+ "per_instance_pss_mib": 16.7,
+ "per_instance_rss_mib": 26.2
+}

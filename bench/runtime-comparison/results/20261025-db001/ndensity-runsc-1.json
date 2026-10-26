@@ -1,0 +1,115 @@
+{
+ "runtime": "runsc",
+ "n": 1,
+ "vm_sizes": [],
+ "mem_baseline": {
+  "rss_mib": 225.53515625,
+  "pss_mib": 196.8857421875,
+  "cpu_ticks": 147,
+  "processes": 13,
+  "by_comm": {
+   "bash": [
+    1,
+    0.6
+   ],
+   "cloudhv-sandbox": [
+    1,
+    2.3
+   ],
+   "containerd": [
+    1,
+    54.0
+   ],
+   "containerd-shim": [
+    2,
+    20.2
+   ],
+   "dockerd": [
+    1,
+    94.5
+   ],
+   "python3": [
+    2,
+    18.6
+   ],
+   "run-all.sh": [
+    1,
+    0.7
+   ],
+   "sleep": [
+    2,
+    2.9
+   ],
+   "sudo": [
+    1,
+    2.9
+   ],
+   "tee": [
+    1,
+    0.2
+   ]
+  }
+ },
+ "mem_after": {
+  "rss_mib": 324.76171875,
+  "pss_mib": 281.9970703125,
+  "cpu_ticks": 179,
+  "processes": 38,
+  "by_comm": {
+   "bash": [
+    1,
+    0.6
+   ],
+   "cloudhv-sandbox": [
+    1,
+    2.3
+   ],
+   "containerd": [
+    1,
+    58.5
+   ],
+   "containerd-shim": [
+    3,
+    27.2
+   ],
+   "dockerd": [
+    1,
+    95.1
+   ],
+   "exe": [
+    1,
+    16.0
+   ],
+   "gvisor_sentry": [
+    22,
+    56.8
+   ],
+   "python3": [
+    2,
+    18.6
+   ],
+   "run-all.sh": [
+    1,
+    0.7
+   ],
+   "runsc-fd-parkin": [
+    1,
+    0.0
+   ],
+   "sleep": [
+    2,
+    2.9
+   ],
+   "sudo": [
+    1,
+    2.9
+   ],
+   "tee": [
+    1,
+    0.2
+   ]
+  }
+ },
+ "per_instance_pss_mib": 85.1,
+ "per_instance_rss_mib": 99.2
+}

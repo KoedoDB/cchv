@@ -1,0 +1,13 @@
+{
+ "runtime": "kata-clh",
+ "no_sync_file_survives_container_exit": [
+  false,
+  false,
+  false
+ ],
+ "fsync_file_survives_container_exit": [
+  false,
+  false,
+  false
+ ]
+}

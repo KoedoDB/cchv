@@ -1,0 +1,4 @@
+cchv re-measured on 2026-10-26 with release v0.4.1 (guest kernel 6.18.58, files checked against the release checksums). The other runtimes (runc, runsc, kata-clh) are in ../20261025-db001.
+Kata 4.3.1 used its own guest kernel 6.18.56 (kept as it is, the operator decided); cchv used 6.18.58.
+VM sizes (checked with vm.info by rtbench.py, in vm_sizes of every result): PostgreSQL 3 vCPU / 2080 MiB, nginx 2 vCPU / 320 MiB, the same as Kata.
+Density counts: 1 and 8 (the volume group has about 6 GiB free).

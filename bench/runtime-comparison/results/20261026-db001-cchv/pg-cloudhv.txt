@@ -1,0 +1,258 @@
+== tpcb rep 1
+pgbench (18.6 (Debian 18.6-1.pgdg13+2))
+transaction type: <builtin: TPC-B (sort of)>
+scaling factor: 100
+query mode: simple
+number of clients: 16
+number of threads: 4
+maximum number of tries: 1
+duration: 300 s
+number of transactions actually processed: 962095
+number of failed transactions: 0 (0.000%)
+latency average = 4.984 ms
+latency stddev = 6.808 ms
+initial connection time = 12.666 ms
+tps = 3206.929168 (without initial connection time)
+statement latencies in milliseconds and failures:
+         0.001           0 \set aid random(1, 100000 * :scale)
+         0.000           0 \set bid random(1, 1 * :scale)
+         0.000           0 \set tid random(1, 10 * :scale)
+         0.000           0 \set delta random(-5000, 5000)
+         0.303           0 BEGIN;
+         0.654           0 UPDATE pgbench_accounts SET abalance = abalance + :delta WHERE aid = :aid;
+         0.573           0 SELECT abalance FROM pgbench_accounts WHERE aid = :aid;
+         0.569           0 UPDATE pgbench_tellers SET tbalance = tbalance + :delta WHERE tid = :tid;
+         0.666           0 UPDATE pgbench_branches SET bbalance = bbalance + :delta WHERE bid = :bid;
+         0.477           0 INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES (:tid, :bid, :aid, :delta, CURRENT_TIMESTAMP);
+         1.739           0 END;
+starting vacuum...end.
+progress: 30.0 s, 3066.8 tps, lat 5.210 ms stddev 6.391, 0 failed
+progress: 60.0 s, 3143.2 tps, lat 5.085 ms stddev 6.841, 0 failed
+progress: 90.0 s, 3229.5 tps, lat 4.949 ms stddev 7.269, 0 failed
+progress: 120.0 s, 3217.0 tps, lat 4.969 ms stddev 7.076, 0 failed
+progress: 150.0 s, 3220.3 tps, lat 4.964 ms stddev 6.965, 0 failed
+progress: 180.0 s, 3218.5 tps, lat 4.966 ms stddev 7.355, 0 failed
+progress: 210.0 s, 3276.0 tps, lat 4.879 ms stddev 6.196, 0 failed
+progress: 240.0 s, 3211.8 tps, lat 4.977 ms stddev 6.702, 0 failed
+progress: 270.0 s, 3244.7 tps, lat 4.926 ms stddev 6.569, 0 failed
+progress: 300.0 s, 3241.5 tps, lat 4.931 ms stddev 6.613, 0 failed
+
+== tpcb rep 2
+pgbench (18.6 (Debian 18.6-1.pgdg13+2))
+transaction type: <builtin: TPC-B (sort of)>
+scaling factor: 100
+query mode: simple
+number of clients: 16
+number of threads: 4
+maximum number of tries: 1
+duration: 300 s
+number of transactions actually processed: 950070
+number of failed transactions: 0 (0.000%)
+latency average = 5.048 ms
+latency stddev = 7.054 ms
+initial connection time = 16.041 ms
+tps = 3166.780095 (without initial connection time)
+statement latencies in milliseconds and failures:
+         0.001           0 \set aid random(1, 100000 * :scale)
+         0.000           0 \set bid random(1, 1 * :scale)
+         0.000           0 \set tid random(1, 10 * :scale)
+         0.000           0 \set delta random(-5000, 5000)
+         0.304           0 BEGIN;
+         0.661           0 UPDATE pgbench_accounts SET abalance = abalance + :delta WHERE aid = :aid;
+         0.577           0 SELECT abalance FROM pgbench_accounts WHERE aid = :aid;
+         0.573           0 UPDATE pgbench_tellers SET tbalance = tbalance + :delta WHERE tid = :tid;
+         0.670           0 UPDATE pgbench_branches SET bbalance = bbalance + :delta WHERE bid = :bid;
+         0.483           0 INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES (:tid, :bid, :aid, :delta, CURRENT_TIMESTAMP);
+         1.776           0 END;
+starting vacuum...end.
+progress: 30.0 s, 3095.3 tps, lat 5.160 ms stddev 7.305, 0 failed
+progress: 60.0 s, 2979.4 tps, lat 5.365 ms stddev 8.064, 0 failed
+progress: 90.0 s, 3173.9 tps, lat 5.038 ms stddev 7.582, 0 failed
+progress: 120.0 s, 3159.4 tps, lat 5.060 ms stddev 7.284, 0 failed
+progress: 150.0 s, 3242.8 tps, lat 4.930 ms stddev 6.423, 0 failed
+progress: 180.0 s, 3195.1 tps, lat 5.003 ms stddev 6.650, 0 failed
+progress: 210.0 s, 3184.7 tps, lat 5.018 ms stddev 6.810, 0 failed
+progress: 240.0 s, 3232.8 tps, lat 4.946 ms stddev 6.566, 0 failed
+progress: 270.0 s, 3195.2 tps, lat 5.003 ms stddev 7.226, 0 failed
+progress: 300.0 s, 3210.1 tps, lat 4.980 ms stddev 6.542, 0 failed
+
+== tpcb rep 3
+pgbench (18.6 (Debian 18.6-1.pgdg13+2))
+transaction type: <builtin: TPC-B (sort of)>
+scaling factor: 100
+query mode: simple
+number of clients: 16
+number of threads: 4
+maximum number of tries: 1
+duration: 300 s
+number of transactions actually processed: 941713
+number of failed transactions: 0 (0.000%)
+latency average = 5.093 ms
+latency stddev = 6.652 ms
+initial connection time = 15.184 ms
+tps = 3138.687887 (without initial connection time)
+statement latencies in milliseconds and failures:
+         0.001           0 \set aid random(1, 100000 * :scale)
+         0.000           0 \set bid random(1, 1 * :scale)
+         0.000           0 \set tid random(1, 10 * :scale)
+         0.000           0 \set delta random(-5000, 5000)
+         0.308           0 BEGIN;
+         0.667           0 UPDATE pgbench_accounts SET abalance = abalance + :delta WHERE aid = :aid;
+         0.592           0 SELECT abalance FROM pgbench_accounts WHERE aid = :aid;
+         0.583           0 UPDATE pgbench_tellers SET tbalance = tbalance + :delta WHERE tid = :tid;
+         0.682           0 UPDATE pgbench_branches SET bbalance = bbalance + :delta WHERE bid = :bid;
+         0.492           0 INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES (:tid, :bid, :aid, :delta, CURRENT_TIMESTAMP);
+         1.766           0 END;
+starting vacuum...end.
+progress: 30.0 s, 3079.8 tps, lat 5.186 ms stddev 6.567, 0 failed
+progress: 60.0 s, 3130.8 tps, lat 5.106 ms stddev 6.280, 0 failed
+progress: 90.0 s, 3038.0 tps, lat 5.262 ms stddev 6.948, 0 failed
+progress: 120.0 s, 3150.6 tps, lat 5.073 ms stddev 6.641, 0 failed
+progress: 150.0 s, 3153.0 tps, lat 5.069 ms stddev 7.083, 0 failed
+progress: 180.0 s, 3202.1 tps, lat 4.991 ms stddev 6.134, 0 failed
+progress: 210.0 s, 3171.7 tps, lat 5.041 ms stddev 6.893, 0 failed
+progress: 240.0 s, 3134.2 tps, lat 5.101 ms stddev 6.754, 0 failed
+progress: 270.0 s, 3149.3 tps, lat 5.076 ms stddev 7.087, 0 failed
+progress: 300.0 s, 3180.4 tps, lat 5.025 ms stddev 6.034, 0 failed
+
+== select rep 1
+pgbench (18.6 (Debian 18.6-1.pgdg13+2))
+transaction type: <builtin: select only>
+scaling factor: 100
+query mode: simple
+number of clients: 16
+number of threads: 4
+maximum number of tries: 1
+duration: 180 s
+number of transactions actually processed: 3431786
+number of failed transactions: 0 (0.000%)
+latency average = 0.836 ms
+latency stddev = 3.006 ms
+initial connection time = 16.023 ms
+tps = 19065.083978 (without initial connection time)
+statement latencies in milliseconds and failures:
+         0.001           0 \set aid random(1, 100000 * :scale)
+         0.835           0 SELECT abalance FROM pgbench_accounts WHERE aid = :aid;
+starting vacuum...end.
+progress: 30.0 s, 16748.5 tps, lat 0.951 ms stddev 3.014, 0 failed
+progress: 60.0 s, 19136.2 tps, lat 0.833 ms stddev 2.987, 0 failed
+progress: 90.0 s, 19605.2 tps, lat 0.813 ms stddev 2.993, 0 failed
+progress: 120.0 s, 19917.7 tps, lat 0.800 ms stddev 2.994, 0 failed
+progress: 150.0 s, 19660.5 tps, lat 0.811 ms stddev 3.024, 0 failed
+progress: 180.0 s, 19324.1 tps, lat 0.825 ms stddev 3.021, 0 failed
+
+== select rep 2
+pgbench (18.6 (Debian 18.6-1.pgdg13+2))
+transaction type: <builtin: select only>
+scaling factor: 100
+query mode: simple
+number of clients: 16
+number of threads: 4
+maximum number of tries: 1
+duration: 180 s
+number of transactions actually processed: 3543577
+number of failed transactions: 0 (0.000%)
+latency average = 0.810 ms
+latency stddev = 2.997 ms
+initial connection time = 16.113 ms
+tps = 19685.542691 (without initial connection time)
+statement latencies in milliseconds and failures:
+         0.001           0 \set aid random(1, 100000 * :scale)
+         0.809           0 SELECT abalance FROM pgbench_accounts WHERE aid = :aid;
+starting vacuum...end.
+progress: 30.0 s, 19383.5 tps, lat 0.822 ms stddev 3.015, 0 failed
+progress: 60.0 s, 19686.4 tps, lat 0.810 ms stddev 3.002, 0 failed
+progress: 90.0 s, 19711.1 tps, lat 0.809 ms stddev 3.008, 0 failed
+progress: 120.0 s, 19596.9 tps, lat 0.813 ms stddev 3.009, 0 failed
+progress: 150.0 s, 19893.1 tps, lat 0.801 ms stddev 2.990, 0 failed
+progress: 180.0 s, 19847.7 tps, lat 0.803 ms stddev 2.956, 0 failed
+
+== select rep 3
+pgbench (18.6 (Debian 18.6-1.pgdg13+2))
+transaction type: <builtin: select only>
+scaling factor: 100
+query mode: simple
+number of clients: 16
+number of threads: 4
+maximum number of tries: 1
+duration: 180 s
+number of transactions actually processed: 3517538
+number of failed transactions: 0 (0.000%)
+latency average = 0.816 ms
+latency stddev = 3.010 ms
+initial connection time = 14.752 ms
+tps = 19543.298576 (without initial connection time)
+statement latencies in milliseconds and failures:
+         0.001           0 \set aid random(1, 100000 * :scale)
+         0.815           0 SELECT abalance FROM pgbench_accounts WHERE aid = :aid;
+starting vacuum...end.
+progress: 30.0 s, 19254.8 tps, lat 0.828 ms stddev 3.014, 0 failed
+progress: 60.0 s, 19833.0 tps, lat 0.804 ms stddev 2.967, 0 failed
+progress: 90.0 s, 19604.3 tps, lat 0.813 ms stddev 3.005, 0 failed
+progress: 120.0 s, 19523.8 tps, lat 0.816 ms stddev 3.025, 0 failed
+progress: 150.0 s, 19401.3 tps, lat 0.822 ms stddev 3.037, 0 failed
+progress: 180.0 s, 19633.9 tps, lat 0.812 ms stddev 3.011, 0 failed
+
+== commit rep 1
+pgbench (18.6 (Debian 18.6-1.pgdg13+2))
+transaction type: /tmp/commit.sql
+scaling factor: 1
+query mode: simple
+number of clients: 1
+number of threads: 1
+maximum number of tries: 1
+duration: 60 s
+number of transactions actually processed: 227719
+number of failed transactions: 0 (0.000%)
+latency average = 0.261 ms
+latency stddev = 0.123 ms
+initial connection time = 2.927 ms
+tps = 3795.485692 (without initial connection time)
+statement latencies in milliseconds and failures:
+         0.261           0 INSERT INTO bench_commit(pad) VALUES (md5(random()::text));
+starting vacuum...end.
+progress: 30.0 s, 3806.6 tps, lat 0.260 ms stddev 0.119, 0 failed
+progress: 60.0 s, 3784.0 tps, lat 0.262 ms stddev 0.127, 0 failed
+
+== commit rep 2
+pgbench (18.6 (Debian 18.6-1.pgdg13+2))
+transaction type: /tmp/commit.sql
+scaling factor: 1
+query mode: simple
+number of clients: 1
+number of threads: 1
+maximum number of tries: 1
+duration: 60 s
+number of transactions actually processed: 229203
+number of failed transactions: 0 (0.000%)
+latency average = 0.259 ms
+latency stddev = 0.125 ms
+initial connection time = 2.901 ms
+tps = 3820.224584 (without initial connection time)
+statement latencies in milliseconds and failures:
+         0.259           0 INSERT INTO bench_commit(pad) VALUES (md5(random()::text));
+starting vacuum...end.
+progress: 30.0 s, 3817.5 tps, lat 0.259 ms stddev 0.124, 0 failed
+progress: 60.0 s, 3822.6 tps, lat 0.259 ms stddev 0.126, 0 failed
+
+== commit rep 3
+pgbench (18.6 (Debian 18.6-1.pgdg13+2))
+transaction type: /tmp/commit.sql
+scaling factor: 1
+query mode: simple
+number of clients: 1
+number of threads: 1
+maximum number of tries: 1
+duration: 60 s
+number of transactions actually processed: 216652
+number of failed transactions: 0 (0.000%)
+latency average = 0.274 ms
+latency stddev = 0.165 ms
+initial connection time = 2.705 ms
+tps = 3611.010626 (without initial connection time)
+statement latencies in milliseconds and failures:
+         0.274           0 INSERT INTO bench_commit(pad) VALUES (md5(random()::text));
+starting vacuum...end.
+progress: 30.0 s, 3673.8 tps, lat 0.270 ms stddev 0.162, 0 failed
+progress: 60.0 s, 3547.9 tps, lat 0.279 ms stddev 0.167, 0 failed
+

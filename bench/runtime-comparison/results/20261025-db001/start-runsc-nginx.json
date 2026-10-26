@@ -1,0 +1,11 @@
+{
+ "runtime": "runsc",
+ "pg_first_query_s": [],
+ "nginx_first_200_s": [
+  0.49,
+  0.49,
+  0.48,
+  0.48,
+  0.47
+ ]
+}

@@ -1,0 +1,281 @@
+== 1k.html c=50 rep 1
+Running 1m test @ http://172.29.0.4/1k.html
+  2 threads and 50 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     6.54ms    1.95ms 153.39ms   98.59%
+    Req/Sec     3.86k   363.85     4.89k    59.48%
+  Latency Distribution
+     50%    6.43ms
+     75%    6.85ms
+     90%    7.49ms
+     99%    8.57ms
+  462240 requests in 1.00m, 546.18MB read
+Requests/sec:   7691.17
+Transfer/sec:      9.09MB
+
+== 1k.html c=50 rep 2
+Running 1m test @ http://172.29.0.4/1k.html
+  2 threads and 50 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     6.86ms    2.39ms 171.60ms   99.66%
+    Req/Sec     3.70k   266.76     4.20k    64.67%
+  Latency Distribution
+     50%    6.71ms
+     75%    7.17ms
+     90%    7.51ms
+     99%    8.41ms
+  441565 requests in 1.00m, 521.75MB read
+Requests/sec:   7358.32
+Transfer/sec:      8.69MB
+
+== 1k.html c=50 rep 3
+Running 1m test @ http://172.29.0.4/1k.html
+  2 threads and 50 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     6.73ms    2.25ms 155.20ms   99.45%
+    Req/Sec     3.77k   271.70     4.26k    67.25%
+  Latency Distribution
+     50%    6.49ms
+     75%    6.97ms
+     90%    7.45ms
+     99%    8.51ms
+  449818 requests in 1.00m, 531.50MB read
+Requests/sec:   7496.49
+Transfer/sec:      8.86MB
+
+== 1k.html c=200 rep 1
+Running 1m test @ http://172.29.0.4/1k.html
+  2 threads and 200 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    34.61ms   84.19ms   2.00s    98.81%
+    Req/Sec     3.67k   281.03     4.36k    64.25%
+  Latency Distribution
+     50%   26.84ms
+     75%   29.13ms
+     90%   30.49ms
+     99%  236.19ms
+  438740 requests in 1.00m, 518.41MB read
+  Socket errors: connect 0, read 0, write 0, timeout 22
+Requests/sec:   7303.54
+Transfer/sec:      8.63MB
+
+== 1k.html c=200 rep 2
+Running 1m test @ http://172.29.0.4/1k.html
+  2 threads and 200 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    32.53ms   76.82ms   1.99s    98.98%
+    Req/Sec     3.79k   343.41     4.49k    59.33%
+  Latency Distribution
+     50%   26.30ms
+     75%   28.42ms
+     90%   30.22ms
+     99%  115.47ms
+  452148 requests in 1.00m, 534.26MB read
+  Socket errors: connect 0, read 0, write 0, timeout 25
+Requests/sec:   7526.22
+Transfer/sec:      8.89MB
+
+== 1k.html c=200 rep 3
+Running 1m test @ http://172.29.0.4/1k.html
+  2 threads and 200 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    34.90ms   94.87ms   1.99s    98.58%
+    Req/Sec     3.90k   344.65     4.51k    63.08%
+  Latency Distribution
+     50%   25.57ms
+     75%   27.14ms
+     90%   29.32ms
+     99%  386.38ms
+  465413 requests in 1.00m, 549.93MB read
+  Socket errors: connect 0, read 0, write 0, timeout 31
+Requests/sec:   7749.10
+Transfer/sec:      9.16MB
+
+== 100k.bin c=50 rep 1
+Running 1m test @ http://172.29.0.4/100k.bin
+  2 threads and 50 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    28.82ms   15.28ms 383.35ms   95.12%
+    Req/Sec     0.91k    96.99     1.72k    68.11%
+  Latency Distribution
+     50%   26.02ms
+     75%   28.96ms
+     90%   34.30ms
+     99%   87.51ms
+  108439 requests in 1.00m, 10.13GB read
+Requests/sec:   1804.32
+Transfer/sec:    172.55MB
+
+== 100k.bin c=50 rep 2
+Running 1m test @ http://172.29.0.4/100k.bin
+  2 threads and 50 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    29.55ms   22.13ms   1.30s    96.41%
+    Req/Sec     0.90k    88.81     1.17k    70.08%
+  Latency Distribution
+     50%   26.47ms
+     75%   28.84ms
+     90%   34.78ms
+     99%   94.06ms
+  106964 requests in 1.00m, 9.99GB read
+Requests/sec:   1782.68
+Transfer/sec:    170.48MB
+
+== 100k.bin c=50 rep 3
+Running 1m test @ http://172.29.0.4/100k.bin
+  2 threads and 50 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency    29.12ms   15.09ms 314.05ms   92.44%
+    Req/Sec     0.90k    87.20     1.18k    75.25%
+  Latency Distribution
+     50%   26.31ms
+     75%   30.09ms
+     90%   36.33ms
+     99%   86.43ms
+  106932 requests in 1.00m, 9.99GB read
+Requests/sec:   1782.13
+Transfer/sec:    170.43MB
+
+== 100k.bin c=200 rep 1
+Running 1m test @ http://172.29.0.4/100k.bin
+  2 threads and 200 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   130.34ms   76.18ms   1.85s    88.25%
+    Req/Sec   810.60     91.46     1.07k    69.53%
+  Latency Distribution
+     50%  108.80ms
+     75%  132.62ms
+     90%  213.65ms
+     99%  420.82ms
+  96750 requests in 1.00m, 9.04GB read
+  Socket errors: connect 0, read 0, write 0, timeout 1
+Requests/sec:   1610.06
+Transfer/sec:    154.12MB
+
+== 100k.bin c=200 rep 2
+Running 1m test @ http://172.29.0.4/100k.bin
+  2 threads and 200 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   128.14ms   72.83ms   1.99s    87.93%
+    Req/Sec   822.42     91.97     1.09k    72.33%
+  Latency Distribution
+     50%  106.86ms
+     75%  130.20ms
+     90%  210.06ms
+     99%  407.97ms
+  98227 requests in 1.00m, 9.18GB read
+Requests/sec:   1635.02
+Transfer/sec:    156.49MB
+
+== 100k.bin c=200 rep 3
+Running 1m test @ http://172.29.0.4/100k.bin
+  2 threads and 200 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   129.09ms   71.97ms   1.93s    88.42%
+    Req/Sec   815.10     94.89     1.05k    69.89%
+  Latency Distribution
+     50%  108.90ms
+     75%  128.30ms
+     90%  207.09ms
+     99%  405.13ms
+  97282 requests in 1.00m, 9.09GB read
+  Socket errors: connect 0, read 0, write 0, timeout 3
+Requests/sec:   1618.92
+Transfer/sec:    154.96MB
+
+== 10m.bin c=50 rep 1
+Running 1m test @ http://172.29.0.4/10m.bin
+  2 threads and 50 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.78s   108.29ms   1.99s    66.67%
+    Req/Sec    28.35     37.46   200.00     87.01%
+  Latency Distribution
+     50%    1.79s 
+     75%    1.83s 
+     90%    1.99s 
+     99%    1.99s 
+  998 requests in 1.00m, 9.86GB read
+  Socket errors: connect 0, read 0, write 0, timeout 989
+Requests/sec:     16.63
+Transfer/sec:    168.23MB
+
+== 10m.bin c=50 rep 2
+Running 1m test @ http://172.29.0.4/10m.bin
+  2 threads and 50 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.81s    44.46ms   1.84s   100.00%
+    Req/Sec    26.28     40.29   181.00     88.41%
+  Latency Distribution
+     50%    1.84s 
+     75%    1.84s 
+     90%    1.84s 
+     99%    1.84s 
+  995 requests in 1.00m, 10.08GB read
+  Socket errors: connect 0, read 0, write 0, timeout 993
+Requests/sec:     16.58
+Transfer/sec:    172.06MB
+
+== 10m.bin c=50 rep 3
+Running 1m test @ http://172.29.0.4/10m.bin
+  2 threads and 50 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     1.68s   392.85ms   1.97s    83.33%
+    Req/Sec    21.36     33.74   242.00     91.38%
+  Latency Distribution
+     50%    1.86s 
+     75%    1.90s 
+     90%    1.97s 
+     99%    1.97s 
+  951 requests in 1.00m, 9.55GB read
+  Socket errors: connect 0, read 0, write 0, timeout 945
+Requests/sec:     15.85
+Transfer/sec:    162.96MB
+
+== 10m.bin c=200 rep 1
+Running 1m test @ http://172.29.0.4/10m.bin
+  2 threads and 200 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     0.00us    0.00us   0.00us    -nan%
+    Req/Sec    18.90     16.69    90.00     80.11%
+  Latency Distribution
+     50%    0.00us
+     75%    0.00us
+     90%    0.00us
+     99%    0.00us
+  792 requests in 1.00m, 8.49GB read
+  Socket errors: connect 0, read 0, write 0, timeout 792
+Requests/sec:     13.19
+Transfer/sec:    144.81MB
+
+== 10m.bin c=200 rep 2
+Running 1m test @ http://172.29.0.4/10m.bin
+  2 threads and 200 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     0.00us    0.00us   0.00us    -nan%
+    Req/Sec    16.60     16.52   121.00     86.28%
+  Latency Distribution
+     50%    0.00us
+     75%    0.00us
+     90%    0.00us
+     99%    0.00us
+  818 requests in 1.00m, 9.19GB read
+  Socket errors: connect 0, read 0, write 0, timeout 818
+Requests/sec:     13.62
+Transfer/sec:    156.74MB
+
+== 10m.bin c=200 rep 3
+Running 1m test @ http://172.29.0.4/10m.bin
+  2 threads and 200 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency     0.00us    0.00us   0.00us    -nan%
+    Req/Sec    16.77     16.74   101.00     86.93%
+  Latency Distribution
+     50%    0.00us
+     75%    0.00us
+     90%    0.00us
+     99%    0.00us
+  829 requests in 1.00m, 9.29GB read
+  Socket errors: connect 0, read 0, write 0, timeout 829
+Requests/sec:     13.80
+Transfer/sec:    158.25MB
+

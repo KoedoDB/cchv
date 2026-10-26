@@ -1,0 +1,48 @@
+=== 21:20:08 python3 rtbench_blk.py pg --direct
+21:20:15 kata-clh-blk-direct start
+21:20:35 kata-clh-blk-direct first query after 2.73 s
+21:21:40 kata-clh-blk-direct pgbench init scale 100
+21:21:57 kata-clh-blk-direct tpcb rep 1
+21:26:58 kata-clh-blk-direct tpcb rep 2
+21:31:59 kata-clh-blk-direct tpcb rep 3
+21:37:00 kata-clh-blk-direct select rep 1
+21:40:03 kata-clh-blk-direct select rep 2
+21:43:07 kata-clh-blk-direct select rep 3
+21:46:10 kata-clh-blk-direct commit rep 1
+21:47:10 kata-clh-blk-direct commit rep 2
+21:48:11 kata-clh-blk-direct commit rep 3
+21:49:11 kata-clh-blk-direct pg_test_fsync
+=== 21:50:32 python3 rtbench_blk.py nginx --direct
+Traceback (most recent call last):
+  File "/home/ops/rtbench-src/rtbench_blk.py", line 156, in <module>
+    nginx_blk("--direct" in sys.argv)
+    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ops/rtbench-src/rtbench_blk.py", line 133, in nginx_blk
+    print("prepared:", prep_www())
+                       ~~~~~~~~^^
+  File "/home/ops/rtbench-src/rtbench_blk.py", line 104, in prep_www
+    out = r.dk("run", "--rm", *common, "-v", f"{src}:/src:ro", "--entrypoint", "/bin/sh", IMAGE, "-c",
+          ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+               "mkfs.ext4 -q -F /dev/kblk && mount /dev/kblk /mnt && cp -a /src/. /mnt/ && sync && umount /mnt && echo prepared").stdout.strip()
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ops/rtbench-src/rtbench.py", line 47, in dk
+    return sh(DOCKER + list(args), check=check, timeout=timeout, input=input)
+  File "/home/ops/rtbench-src/rtbench.py", line 42, in sh
+    raise RuntimeError(f"{cmd!r} failed ({r.returncode}): {(r.stderr or r.stdout).strip()[:400]}")
+RuntimeError: ['sudo', '/opt/rtbench/docker/docker', '-H', 'unix:///run/rtbench/docker.sock', 'run', '--rm', '--runtime', 'kata-clh', '--device', '/dev/vg/rtbench-kblkwww:/dev/kblk', '--cap-add', 'SYS_ADMIN', '--security-opt', 'seccomp=unconfined', '--security-opt', 'apparmor=unconfined', '-v', '/data/rtbench/www-src:/src:ro', '--entrypoint', '/bin/sh', 'rtbench-pg-e2fs', '-c', 'mkfs.ext4 -q -F /dev/kblk && mount /dev/kblk /mnt && cp -a /src/. /mnt/ && sync && umount /mnt && echo prepared'] failed (125): docker: Error response from daemon: failed to create task for container: failed to create shim task: Others("failed to handle message start sandbox in task handler\n\nCaused by:\n    0: connect to address \"hvsock:///run/kata/0fbd707e062c24e43a34d5402aaa6a8cd32ede6ad21b37e81e70515d16ed1521/ch-vm.sock\"\n    1: connect agent server\n    2: connect\n    3: hybrid vsock: failed to connect to HybridVs
+!!! failed: python3 rtbench_blk.py nginx --direct
+=== 21:50:55 python3 rtbench_blk.py pg
+21:51:03 kata-clh-blk start
+21:51:19 kata-clh-blk first query after 2.92 s
+21:52:24 kata-clh-blk pgbench init scale 100
+21:52:42 kata-clh-blk tpcb rep 1
+21:57:43 kata-clh-blk tpcb rep 2
+22:02:44 kata-clh-blk tpcb rep 3
+22:07:45 kata-clh-blk select rep 1
+22:10:48 kata-clh-blk select rep 2
+22:13:52 kata-clh-blk select rep 3
+22:16:55 kata-clh-blk commit rep 1
+22:17:55 kata-clh-blk commit rep 2
+22:18:55 kata-clh-blk commit rep 3
+22:19:56 kata-clh-blk pg_test_fsync
+=== 22:21:18 done

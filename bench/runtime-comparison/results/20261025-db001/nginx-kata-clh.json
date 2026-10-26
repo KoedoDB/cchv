@@ -1,0 +1,518 @@
+{
+ "runtime": "kata-clh",
+ "settings": {
+  "seconds": 60,
+  "reps": 3,
+  "limits": "1 / 288m (--cpus / -m); the VM of Kata and cchv is 2 vCPUs, 320 MiB",
+  "files": [
+   "1k.html",
+   "100k.bin",
+   "10m.bin"
+  ],
+  "connections": [
+   50,
+   200
+  ]
+ },
+ "host": {
+  "loadavg1": 2.1,
+  "host_docker_running_containers": "0"
+ },
+ "mem_baseline": {
+  "rss_mib": 229.93359375,
+  "pss_mib": 201.333984375,
+  "cpu_ticks": 256,
+  "processes": 13,
+  "by_comm": {
+   "bash": [
+    1,
+    0.6
+   ],
+   "cloudhv-sandbox": [
+    1,
+    2.3
+   ],
+   "containerd": [
+    1,
+    53.2
+   ],
+   "containerd-shim": [
+    2,
+    22.4
+   ],
+   "dockerd": [
+    1,
+    97.6
+   ],
+   "python3": [
+    2,
+    18.7
+   ],
+   "run-all.sh": [
+    1,
+    0.7
+   ],
+   "sleep": [
+    2,
+    2.8
+   ],
+   "sudo": [
+    1,
+    2.9
+   ],
+   "tee": [
+    1,
+    0.2
+   ]
+  }
+ },
+ "first_200_s": 0.96,
+ "vm_sizes": [
+  [
+   2,
+   320
+  ]
+ ],
+ "mem_idle": {
+  "rss_mib": 425.19140625,
+  "pss_mib": 384.013671875,
+  "cpu_ticks": 481,
+  "processes": 17,
+  "by_comm": {
+   "bash": [
+    1,
+    0.6
+   ],
+   "cloud-hyperviso": [
+    1,
+    140.9
+   ],
+   "cloudhv-sandbox": [
+    1,
+    2.3
+   ],
+   "containerd": [
+    1,
+    62.0
+   ],
+   "containerd-shim": [
+    3,
+    46.9
+   ],
+   "dockerd": [
+    1,
+    97.6
+   ],
+   "python3": [
+    2,
+    18.7
+   ],
+   "run-all.sh": [
+    1,
+    0.7
+   ],
+   "sleep": [
+    2,
+    2.8
+   ],
+   "sudo": [
+    1,
+    2.9
+   ],
+   "tee": [
+    1,
+    0.2
+   ],
+   "virtiofsd": [
+    2,
+    8.3
+   ]
+  }
+ },
+ "1k.html_c50": {
+  "runs": [
+   {
+    "rps": 7691.17,
+    "requests": 462240,
+    "p50_ms": 6.43,
+    "p99_ms": 8.57,
+    "non2xx": 0,
+    "socket_errors": null,
+    "cpu_ms_per_1000_requests": 358.6,
+    "mem_pss_mib_after": 386.9
+   },
+   {
+    "rps": 7358.32,
+    "requests": 441565,
+    "p50_ms": 6.71,
+    "p99_ms": 8.41,
+    "non2xx": 0,
+    "socket_errors": null,
+    "cpu_ms_per_1000_requests": 373.1,
+    "mem_pss_mib_after": 381.5
+   },
+   {
+    "rps": 7496.49,
+    "requests": 449818,
+    "p50_ms": 6.49,
+    "p99_ms": 8.51,
+    "non2xx": 0,
+    "socket_errors": null,
+    "cpu_ms_per_1000_requests": 365.1,
+    "mem_pss_mib_after": 381.5
+   }
+  ],
+  "rps": {
+   "median": 7496.49,
+   "min": 7358.32,
+   "max": 7691.17,
+   "n": 3,
+   "values": [
+    7691.17,
+    7358.32,
+    7496.49
+   ]
+  },
+  "p99_ms": {
+   "median": 8.51,
+   "min": 8.41,
+   "max": 8.57,
+   "n": 3,
+   "values": [
+    8.57,
+    8.41,
+    8.51
+   ]
+  }
+ },
+ "1k.html_c200": {
+  "runs": [
+   {
+    "rps": 7303.54,
+    "requests": 438740,
+    "p50_ms": 26.84,
+    "p99_ms": 236.19,
+    "non2xx": 0,
+    "socket_errors": "connect 0, read 0, write 0, timeout 22",
+    "cpu_ms_per_1000_requests": 374.3,
+    "mem_pss_mib_after": 388.5
+   },
+   {
+    "rps": 7526.22,
+    "requests": 452148,
+    "p50_ms": 26.3,
+    "p99_ms": 115.47,
+    "non2xx": 0,
+    "socket_errors": "connect 0, read 0, write 0, timeout 25",
+    "cpu_ms_per_1000_requests": 363.8,
+    "mem_pss_mib_after": 388.5
+   },
+   {
+    "rps": 7749.1,
+    "requests": 465413,
+    "p50_ms": 25.57,
+    "p99_ms": 386.38,
+    "non2xx": 0,
+    "socket_errors": "connect 0, read 0, write 0, timeout 31",
+    "cpu_ms_per_1000_requests": 354.9,
+    "mem_pss_mib_after": 389.2
+   }
+  ],
+  "rps": {
+   "median": 7526.22,
+   "min": 7303.54,
+   "max": 7749.1,
+   "n": 3,
+   "values": [
+    7303.54,
+    7526.22,
+    7749.1
+   ]
+  },
+  "p99_ms": {
+   "median": 236.19,
+   "min": 115.47,
+   "max": 386.38,
+   "n": 3,
+   "values": [
+    236.19,
+    115.47,
+    386.38
+   ]
+  }
+ },
+ "100k.bin_c50": {
+  "runs": [
+   {
+    "rps": 1804.32,
+    "requests": 108439,
+    "p50_ms": 26.02,
+    "p99_ms": 87.51,
+    "non2xx": 0,
+    "socket_errors": null,
+    "cpu_ms_per_1000_requests": 1329.5,
+    "mem_pss_mib_after": 409.4
+   },
+   {
+    "rps": 1782.68,
+    "requests": 106964,
+    "p50_ms": 26.47,
+    "p99_ms": 94.06,
+    "non2xx": 0,
+    "socket_errors": null,
+    "cpu_ms_per_1000_requests": 1331.9,
+    "mem_pss_mib_after": 412.4
+   },
+   {
+    "rps": 1782.13,
+    "requests": 106932,
+    "p50_ms": 26.31,
+    "p99_ms": 86.43,
+    "non2xx": 0,
+    "socket_errors": null,
+    "cpu_ms_per_1000_requests": 1325.1,
+    "mem_pss_mib_after": 412.4
+   }
+  ],
+  "rps": {
+   "median": 1782.68,
+   "min": 1782.13,
+   "max": 1804.32,
+   "n": 3,
+   "values": [
+    1804.32,
+    1782.68,
+    1782.13
+   ]
+  },
+  "p99_ms": {
+   "median": 87.51,
+   "min": 86.43,
+   "max": 94.06,
+   "n": 3,
+   "values": [
+    87.51,
+    94.06,
+    86.43
+   ]
+  }
+ },
+ "100k.bin_c200": {
+  "runs": [
+   {
+    "rps": 1610.06,
+    "requests": 96750,
+    "p50_ms": 108.8,
+    "p99_ms": 420.82,
+    "non2xx": 0,
+    "socket_errors": "connect 0, read 0, write 0, timeout 1",
+    "cpu_ms_per_1000_requests": 1458.0,
+    "mem_pss_mib_after": 420.1
+   },
+   {
+    "rps": 1635.02,
+    "requests": 98227,
+    "p50_ms": 106.86,
+    "p99_ms": 407.97,
+    "non2xx": 0,
+    "socket_errors": null,
+    "cpu_ms_per_1000_requests": 1468.8,
+    "mem_pss_mib_after": 419.9
+   },
+   {
+    "rps": 1618.92,
+    "requests": 97282,
+    "p50_ms": 108.9,
+    "p99_ms": 405.13,
+    "non2xx": 0,
+    "socket_errors": "connect 0, read 0, write 0, timeout 3",
+    "cpu_ms_per_1000_requests": 1559.9,
+    "mem_pss_mib_after": 420.3
+   }
+  ],
+  "rps": {
+   "median": 1618.92,
+   "min": 1610.06,
+   "max": 1635.02,
+   "n": 3,
+   "values": [
+    1610.06,
+    1635.02,
+    1618.92
+   ]
+  },
+  "p99_ms": {
+   "median": 407.97,
+   "min": 405.13,
+   "max": 420.82,
+   "n": 3,
+   "values": [
+    420.82,
+    407.97,
+    405.13
+   ]
+  }
+ },
+ "10m.bin_c50": {
+  "runs": [
+   {
+    "rps": 16.63,
+    "requests": 998,
+    "p50_ms": 1790.0,
+    "p99_ms": 1990.0,
+    "non2xx": 0,
+    "socket_errors": "connect 0, read 0, write 0, timeout 989",
+    "cpu_ms_per_1000_requests": 117945.9,
+    "mem_pss_mib_after": 422.7
+   },
+   {
+    "rps": 16.58,
+    "requests": 995,
+    "p50_ms": 1840.0,
+    "p99_ms": 1840.0,
+    "non2xx": 0,
+    "socket_errors": "connect 0, read 0, write 0, timeout 993",
+    "cpu_ms_per_1000_requests": 119969.8,
+    "mem_pss_mib_after": 424.9
+   },
+   {
+    "rps": 15.85,
+    "requests": 951,
+    "p50_ms": 1860.0,
+    "p99_ms": 1970.0,
+    "non2xx": 0,
+    "socket_errors": "connect 0, read 0, write 0, timeout 945",
+    "cpu_ms_per_1000_requests": 122891.7,
+    "mem_pss_mib_after": 425.6
+   }
+  ],
+  "rps": {
+   "median": 16.58,
+   "min": 15.85,
+   "max": 16.63,
+   "n": 3,
+   "values": [
+    16.63,
+    16.58,
+    15.85
+   ]
+  },
+  "p99_ms": {
+   "median": 1970.0,
+   "min": 1840.0,
+   "max": 1990.0,
+   "n": 3,
+   "values": [
+    1990.0,
+    1840.0,
+    1970.0
+   ]
+  }
+ },
+ "10m.bin_c200": {
+  "runs": [
+   {
+    "rps": 13.19,
+    "requests": 792,
+    "p50_ms": 0.0,
+    "p99_ms": 0.0,
+    "non2xx": 0,
+    "socket_errors": "connect 0, read 0, write 0, timeout 792",
+    "cpu_ms_per_1000_requests": 164494.9,
+    "mem_pss_mib_after": 425.7
+   },
+   {
+    "rps": 13.62,
+    "requests": 818,
+    "p50_ms": 0.0,
+    "p99_ms": 0.0,
+    "non2xx": 0,
+    "socket_errors": "connect 0, read 0, write 0, timeout 818",
+    "cpu_ms_per_1000_requests": 169755.5,
+    "mem_pss_mib_after": 426.4
+   },
+   {
+    "rps": 13.8,
+    "requests": 829,
+    "p50_ms": 0.0,
+    "p99_ms": 0.0,
+    "non2xx": 0,
+    "socket_errors": "connect 0, read 0, write 0, timeout 829",
+    "cpu_ms_per_1000_requests": 179807.0,
+    "mem_pss_mib_after": 427.1
+   }
+  ],
+  "rps": {
+   "median": 13.62,
+   "min": 13.19,
+   "max": 13.8,
+   "n": 3,
+   "values": [
+    13.19,
+    13.62,
+    13.8
+   ]
+  },
+  "p99_ms": null
+ },
+ "mem_under_load_last": {
+  "rss_mib": 526.1796875,
+  "pss_mib": 427.0849609375,
+  "cpu_ticks": 266794,
+  "processes": 17,
+  "by_comm": {
+   "bash": [
+    1,
+    0.6
+   ],
+   "cloud-hyperviso": [
+    1,
+    164.0
+   ],
+   "cloudhv-sandbox": [
+    1,
+    2.3
+   ],
+   "containerd": [
+    1,
+    53.1
+   ],
+   "containerd-shim": [
+    3,
+    50.9
+   ],
+   "dockerd": [
+    1,
+    93.1
+   ],
+   "python3": [
+    2,
+    19.2
+   ],
+   "run-all.sh": [
+    1,
+    0.7
+   ],
+   "sleep": [
+    2,
+    2.8
+   ],
+   "sudo": [
+    1,
+    2.9
+   ],
+   "tee": [
+    1,
+    0.2
+   ],
+   "virtiofsd": [
+    2,
+    37.3
+   ]
+  }
+ },
+ "host_after": {
+  "loadavg1": 2.8,
+  "host_docker_running_containers": "0"
+ }
+}

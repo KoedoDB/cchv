@@ -1,0 +1,13 @@
+{
+ "runtime": "runsc",
+ "no_sync_file_survives_container_exit": [
+  true,
+  true,
+  true
+ ],
+ "fsync_file_survives_container_exit": [
+  true,
+  true,
+  true
+ ]
+}

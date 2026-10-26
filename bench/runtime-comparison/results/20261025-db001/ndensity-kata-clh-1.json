@@ -1,0 +1,116 @@
+{
+ "runtime": "kata-clh",
+ "n": 1,
+ "vm_sizes": [
+  [
+   2,
+   320
+  ]
+ ],
+ "mem_baseline": {
+  "rss_mib": 226.26953125,
+  "pss_mib": 197.55859375,
+  "cpu_ticks": 138,
+  "processes": 13,
+  "by_comm": {
+   "bash": [
+    1,
+    0.6
+   ],
+   "cloudhv-sandbox": [
+    1,
+    2.3
+   ],
+   "containerd": [
+    1,
+    54.8
+   ],
+   "containerd-shim": [
+    2,
+    21.7
+   ],
+   "dockerd": [
+    1,
+    92.8
+   ],
+   "python3": [
+    2,
+    18.7
+   ],
+   "run-all.sh": [
+    1,
+    0.7
+   ],
+   "sleep": [
+    2,
+    2.9
+   ],
+   "sudo": [
+    1,
+    2.9
+   ],
+   "tee": [
+    1,
+    0.2
+   ]
+  }
+ },
+ "mem_after": {
+  "rss_mib": 423.09765625,
+  "pss_mib": 379.4228515625,
+  "cpu_ticks": 369,
+  "processes": 17,
+  "by_comm": {
+   "bash": [
+    1,
+    0.6
+   ],
+   "cloud-hyperviso": [
+    1,
+    141.7
+   ],
+   "cloudhv-sandbox": [
+    1,
+    2.3
+   ],
+   "containerd": [
+    1,
+    54.9
+   ],
+   "containerd-shim": [
+    3,
+    48.8
+   ],
+   "dockerd": [
+    1,
+    94.8
+   ],
+   "python3": [
+    2,
+    18.6
+   ],
+   "run-all.sh": [
+    1,
+    0.7
+   ],
+   "sleep": [
+    2,
+    2.9
+   ],
+   "sudo": [
+    1,
+    2.9
+   ],
+   "tee": [
+    1,
+    0.3
+   ],
+   "virtiofsd": [
+    2,
+    10.9
+   ]
+  }
+ },
+ "per_instance_pss_mib": 181.9,
+ "per_instance_rss_mib": 196.8
+}

@@ -1,0 +1,11 @@
+{
+ "runtime": "cloudhv",
+ "pg_first_query_s": [],
+ "nginx_first_200_s": [
+  0.94,
+  0.92,
+  0.91,
+  0.95,
+  0.88
+ ]
+}
