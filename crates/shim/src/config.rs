@@ -177,7 +177,10 @@ mod tests {
         assert_eq!(none.max_memory_mb, 16384);
         assert_eq!(none.max_vcpus, 0);
         assert_eq!(none.erofs_cache_max_mib, 4096);
-        assert_eq!(none.erofs_cache_dir, "/var/lib/cloud-hypervisor/erofs-cache");
+        assert_eq!(
+            none.erofs_cache_dir,
+            "/var/lib/cloud-hypervisor/erofs-cache"
+        );
         assert_eq!(none.mkfs_erofs_timeout_secs, 300);
         assert!(none.require_pod_cgroup);
         assert!(none
