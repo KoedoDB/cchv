@@ -90,17 +90,27 @@ pub fn prepare(cfg: &CacheConfig, rootfs: &Path, key: &str) -> Result<(PathBuf, 
         .ok_or_else(|| format!("mkfs.erofs not found in {:?}", cfg.mkfs_candidates))?;
     let tmp = cfg.dir.join(format!("{key}.{}.tmp", std::process::id()));
     let guard = Temporary(tmp.clone());
+    let started = std::time::Instant::now();
     run_mkfs(mkfs, &tmp, rootfs, cfg.mkfs_timeout)?;
+    let mkfs_took = started.elapsed();
     // 0600 already (umask 077 in the build); say it again, then publish a finished file.
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
         .map_err(|e| format!("chmod erofs: {e}"))?;
     // On the disk a rename can reach it before the data does: after a power cut the final name could hold an empty or half-written image,
     // which the next pod would take for a finished one. So the data is flushed first, then published.
+    let synced_from = std::time::Instant::now();
     File::open(&tmp)
         .and_then(|f| f.sync_all())
         .map_err(|e| format!("sync erofs: {e}"))?;
+    let sync_took = synced_from.elapsed();
     std::fs::rename(&tmp, &cache_path).map_err(|e| format!("rename erofs: {e}"))?;
     guard.disarm();
+    info!(
+        "erofs image {key} built: mkfs {} ms, flush to disk {} ms, {} bytes",
+        mkfs_took.as_millis(),
+        sync_took.as_millis(),
+        std::fs::metadata(&cache_path).map(|m| m.len()).unwrap_or(0)
+    );
     Ok((cache_path, lease))
 }
 
