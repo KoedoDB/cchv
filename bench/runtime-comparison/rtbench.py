@@ -71,9 +71,13 @@ def summ(values):
     return {"median": statistics.median(values), "min": min(values), "max": max(values), "n": len(values), "values": values}
 
 
+# The Cloud Hypervisor binaries of the benchmark (cchv's: ROOT/bin; Kata's: /opt/kata/bin). A host that runs cchv for real has another one.
+VMM_BINARIES = f"({ROOT}|/opt/kata)/bin/cloud-hypervisor"
+
+
 def kill_stale_vms():
-    """After a daemon that was stopped with VMs left to their pods: kill the VMMs of that run (the benchmark host runs no other Cloud Hypervisor)."""
-    sh("sudo pkill -x cloud-hyperviso; sleep 1", check=False)
+    """After a daemon that was stopped with VMs left to their pods: kill the VMMs of that run. Only the benchmark's own binaries (VMM_BINARIES): a host that runs cchv for real (stg-db-001) has VMs of its own."""
+    sh(f"sudo pkill -f '^{VMM_BINARIES} '; sleep 1", check=False)
 
 
 def services(rtname):
@@ -238,13 +242,15 @@ def vm_limits(rtname, kind):
 
 
 def vm_sizes():
-    """The VMs that are running now, as [vCPUs, memory MiB]: asked of every Cloud Hypervisor process through its API socket (vm.info; the size is not on the command line)."""
+    """The VMs of the benchmark that are running now, as [vCPUs, memory MiB]: asked of every one of its Cloud Hypervisor processes through its API socket (vm.info; the size is not on the command line)."""
     out = []
-    for line in sh("pgrep -a cloud-hyperviso || true", check=False).stdout.splitlines():
+    for line in sh(f"pgrep -af '^{VMM_BINARIES} ' || true", check=False).stdout.splitlines():
         m = re.search(r"--api-socket (\S+)", line)
         if not m:
             continue
-        r = sh(f"sudo curl -s --max-time 5 --unix-socket {m.group(1)} http://localhost/api/v1/vm.info", check=False)
+        # The daemon sees RT_CRUN as /run/cloudhv (BindPaths=, see env.sh), so that is the path on the command line; from here the socket is under RT_CRUN.
+        sock = re.sub(r"^/run/cloudhv/", CRUN.rstrip("/") + "/", m.group(1))
+        r = sh(f"sudo curl -s --max-time 5 --unix-socket {sock} http://localhost/api/v1/vm.info", check=False)
         try:
             cfg = json.loads(r.stdout)["config"]
             out.append([cfg["cpus"]["boot_vcpus"], cfg["memory"]["size"] // 1048576])
