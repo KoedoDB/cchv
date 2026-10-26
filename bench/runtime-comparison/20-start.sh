@@ -48,7 +48,8 @@ sudo tee "$RT_CONF/daemon.json" >/dev/null <<JSON
   "socket_path": "/run/cloudhv/daemon.sock", "state_dir": "/run/cloudhv/state",
   "ch_rootless": true, "allow_proc_netns": true,
   "emptydir_dir": "$RT_DATA/cchv-emptydir",
-  "volume_block_prefixes": ["${RT_VG}-${RT_LVP//-/--}"], "volume_block_format_if_blank": true
+  "volume_block_prefixes": ["${RT_VG}-${RT_LVP//-/--}"], "volume_block_format_if_blank": true,
+  "erofs_cache_dir": "/run/cloudhv/erofs-cache"
 }
 JSON
 sudo tee "$RT_CONF/config.json" >/dev/null <<JSON
@@ -57,11 +58,13 @@ sudo tee "$RT_CONF/config.json" >/dev/null <<JSON
   "kernel_path": "/opt/cloudhv/vmlinux", "rootfs_path": "/opt/cloudhv/rootfs.erofs",
   "default_vcpus": ${RT_CCHV_VCPUS:-2}, "default_memory_mb": 320,
   "daemon_socket": "/run/cloudhv/daemon.sock", "mkfs_erofs_path": "/usr/bin/mkfs.erofs",
-  "require_pod_cgroup": false, "erofs_cache_max_mib": 20480,
+  "require_pod_cgroup": false, "erofs_cache_max_mib": 20480, "erofs_cache_dir": "/run/cloudhv/erofs-cache",
   "volume_source_roots": ["$RT_DATA/docker/containers", "$RT_DATA/docker/volumes"]
 }
 JSON
 sudo mkdir -p "$RT_DATA/cchv-emptydir" "$RT_CRUN/state" "$RT_DATA/erofs-cache" "$RT_CRUN/erofs-cache"
+# erofs_cache_dir (cchv v0.4: the images are on the disk by default, /var/lib/cloud-hypervisor/erofs-cache, which on stg-db-001 is the host's own cache) is set to the
+# directory below, so that the benchmark keeps its own: bind-mounted from $RT_DATA, i.e. on the disk as well.
 # Under Docker the shim builds one erofs image of the container's root file system per container (the key is the directory of the container's own mount; under Kubernetes the key is the image's, so
 # pods of one image share it). /run is a small tmpfs (3.2 GB here) and a PostgreSQL image is 538 MiB, so the cache is a directory on the disk, bind-mounted over /run/cloudhv/erofs-cache.
 # (with RT_CONF moved the units get this directory by BindPaths= and the host's /run/cloudhv is not touched)
