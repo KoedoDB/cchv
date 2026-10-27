@@ -71,6 +71,8 @@ sudo mkdir -p "$RT_DATA/cchv-emptydir" "$RT_CRUN/state" "$RT_DATA/erofs-cache" "
 [ -n "$RT_BINDS" ] || mountpoint -q "$RT_CRUN/erofs-cache" || sudo mount --bind "$RT_DATA/erofs-cache" "$RT_CRUN/erofs-cache"
 PATHS="$RT_ROOT/bin:$RT_ROOT/docker:/usr/sbin:/usr/bin:/sbin:/bin"
 if ! systemctl is-active --quiet rtbench-cchv-daemon; then
+  # Two cchv daemons side by side only work with their own /run/cloudhv (RT_BINDS, from RT_CONF): without it this one would replace the socket of the host's daemon.
+  if [ -z "$RT_BINDS" ] && systemctl is-active --quiet cloudhv-sandbox-daemon; then echo "refusing: the host's own cloudhv-sandbox-daemon is running and RT_CONF is not set (see env.sh)"; exit 1; fi
   sudo systemd-run --unit=rtbench-cchv-daemon --property=Restart=no $RT_BINDS -E CLOUDHV_MEMORY_RESTORE_MODE=Copy -E RUST_LOG=info \
     "$RT_ROOT/bin/cloudhv-sandbox-daemon" /opt/cloudhv/daemon.json >/dev/null
 fi
