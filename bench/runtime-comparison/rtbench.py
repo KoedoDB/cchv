@@ -17,7 +17,10 @@ VG = os.environ.get("RT_VG", "rtvg")         # the volume group of the database 
 LVP = os.environ.get("RT_LVP", "")
 CRUN = os.environ.get("RT_CRUN", "/run/cloudhv")
 BINDS = os.environ.get("RT_BINDS", "")
-DATA = os.environ.get("RT_DATA", "/var/lib/rtbench")
+# env.sh makes RT_BINDS from RT_CONF; run without it, the benchmark's cchv daemon would start in the host's mount namespace, on the host's own /run/cloudhv, and replace the socket of the host's daemon.
+if os.environ.get("RT_CONF", "/opt/cloudhv") != "/opt/cloudhv" and not BINDS:
+    sys.exit("RT_CONF is set but RT_BINDS is not: run `. ./env.sh` first (without the bind mounts the benchmark's cchv daemon would take the host's /run/cloudhv)")
+DATA =os.environ.get("RT_DATA", "/var/lib/rtbench")
 SOCK = "unix:///run/rtbench/docker.sock"
 DOCKER = ["sudo", f"{ROOT}/docker/docker", "-H", SOCK]
 RESULTS = os.environ.get("RT_RESULTS") or os.path.expanduser("~/rtbench-results/" + time.strftime("%Y%m%d"))
@@ -84,6 +87,9 @@ def services(rtname):
     """The cchv daemon (and its pool of ready VMs) runs only for the cchv runs: the other runtimes are measured without it."""
     active = sh("systemctl is-active rtbench-cchv-daemon", check=False).stdout.strip() == "active"
     if rtname == "cloudhv" and not active:
+        # Two cchv daemons side by side only work when the benchmark's has its own /run/cloudhv (BindPaths=): without them it replaces the socket of the host's daemon.
+        if not BINDS and sh("systemctl is-active cloudhv-sandbox-daemon", check=False).stdout.strip() == "active":
+            raise RuntimeError("refusing to start the benchmark's cchv daemon: the host's own cloudhv-sandbox-daemon is running and RT_BINDS is empty (run `. ./env.sh` with RT_CONF set)")
         kill_stale_vms()
         sh(f"sudo find {CRUN}/state -mindepth 1 -delete", check=False)
         sh(f"sudo systemctl reset-failed rtbench-cchv-daemon 2>/dev/null; sudo systemd-run --unit=rtbench-cchv-daemon --property=Restart=no {BINDS} -E CLOUDHV_MEMORY_RESTORE_MODE=Copy -E RUST_LOG=info "
