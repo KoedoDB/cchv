@@ -493,7 +493,7 @@ fn hand_over_fd(
         if !kept {
             warn!("snapshot hand-over: removing {name:?}, which is not a plain file or directory (or is too deep)");
             let st = fsutil::fstatat_nofollow(fd, &name).unwrap_or(st);
-            fsutil::remove_entry(fd, &name, &st).with_context(|| format!("remove {name}"))?;
+            fsutil::remove_entry(fd, &name, &st).with_context(|| format!("remove {name:?}"))?;
         }
     }
     Ok(())
