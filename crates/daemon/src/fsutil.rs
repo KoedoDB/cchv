@@ -5,13 +5,21 @@
 //! with a *path* in such a directory (`chown`, `chmod`, `open` for writing) follows the link. So root works here on descriptors:
 //! it opens with `O_NOFOLLOW` (or `openat2` with `RESOLVE_NO_SYMLINKS`), looks at what it got with `fstat`, and changes that.
 
+use std::ffi::{OsStr, OsString};
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::Path;
 
 fn cstr(path: &Path) -> io::Result<std::ffi::CString> {
     std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL"))
+}
+
+/// A name in a directory as a C string, from its bytes: a name need not be UTF-8 (a VM that has been compromised can make any).
+fn name_cstr(name: &OsStr) -> io::Result<std::ffi::CString> {
+    std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name contains a NUL"))
 }
 
 fn cvt(rc: libc::c_int) -> io::Result<libc::c_int> {
@@ -102,16 +110,14 @@ pub fn is_dir(st: &libc::stat) -> bool {
     st.st_mode & libc::S_IFMT == libc::S_IFDIR
 }
 
-pub fn openat(dir: RawFd, name: &str, flags: i32) -> io::Result<OwnedFd> {
-    let c = std::ffi::CString::new(name)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name contains a NUL"))?;
+pub fn openat(dir: RawFd, name: impl AsRef<OsStr>, flags: i32) -> io::Result<OwnedFd> {
+    let c = name_cstr(name.as_ref())?;
     owned(unsafe { libc::openat(dir, c.as_ptr(), flags | libc::O_CLOEXEC) })
 }
 
 /// `lstat` of `name` in the directory `dir` (a link is not followed).
-pub fn fstatat_nofollow(dir: RawFd, name: &str) -> io::Result<libc::stat> {
-    let c = std::ffi::CString::new(name)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name contains a NUL"))?;
+pub fn fstatat_nofollow(dir: RawFd, name: impl AsRef<OsStr>) -> io::Result<libc::stat> {
+    let c = name_cstr(name.as_ref())?;
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     cvt(unsafe { libc::fstatat(dir, c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) })?;
     Ok(st)
@@ -125,20 +131,19 @@ const REMOVE_MAX_ENTRIES: usize = 200_000;
 /// Remove an entry of the directory `dir` whatever it is (a directory with everything below it too). Does not follow links. A tree
 /// deeper than `REMOVE_MAX_DEPTH` or with more than `REMOVE_MAX_ENTRIES` entries is not removed (an error, and what could be removed is
 /// removed): the caller must treat that as a failure and not reuse the place.
-pub fn remove_entry(dir: RawFd, name: &str, st: &libc::stat) -> io::Result<()> {
+pub fn remove_entry(dir: RawFd, name: impl AsRef<OsStr>, st: &libc::stat) -> io::Result<()> {
     let mut budget = REMOVE_MAX_ENTRIES;
-    remove_entry_bounded(dir, name, st, 0, &mut budget)
+    remove_entry_bounded(dir, name.as_ref(), st, 0, &mut budget)
 }
 
 fn remove_entry_bounded(
     dir: RawFd,
-    name: &str,
+    name: &OsStr,
     st: &libc::stat,
     depth: usize,
     budget: &mut usize,
 ) -> io::Result<()> {
-    let c = std::ffi::CString::new(name)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name contains a NUL"))?;
+    let c = name_cstr(name)?;
     if is_dir(st) {
         if depth >= REMOVE_MAX_DEPTH {
             return Err(io::Error::other(
@@ -180,11 +185,12 @@ fn remove_entry_bounded(
     }
 }
 
-/// The names in the directory `fd` (not `.` and `..`).
-pub fn list(fd: RawFd) -> io::Result<Vec<String>> {
+/// The names in the directory `fd` (not `.` and `..`), as the bytes they are: a name that is not UTF-8 stays what it is, so that `fstatat_nofollow`
+/// and `unlinkat` find it again (as a `String` it would become U+FFFD, not be found, and the directory could never be removed).
+pub fn list(fd: RawFd) -> io::Result<Vec<OsString>> {
     let mut names = Vec::new();
     for entry in std::fs::read_dir(format!("/proc/self/fd/{fd}"))? {
-        names.push(entry?.file_name().to_string_lossy().to_string());
+        names.push(entry?.file_name());
     }
     Ok(names)
 }
@@ -266,6 +272,31 @@ mod tests {
         remove_entry(top.as_raw_fd(), "a", &st).unwrap();
         assert!(!e.join("a").exists());
         let _ = std::fs::remove_dir_all(&e);
+    }
+
+    #[test]
+    fn a_name_that_is_not_utf8_is_listed_and_removed() {
+        // The bytes 0xff and 0xfe are not UTF-8. Made by a compromised VM, such a name used to turn into U+FFFD, not be found, and keep the directory from being removed.
+        let d = tmp("nonutf8");
+        let bad = OsStr::from_bytes(b"f\xff\xfeo");
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        std::fs::write(d.join("sub").join(bad), b"x").unwrap();
+        std::fs::write(d.join("sub/plain"), b"x").unwrap();
+        let dir = open_nosymlinks(&d, libc::O_RDONLY | libc::O_DIRECTORY).unwrap();
+        let sub = openat(dir.as_raw_fd(), "sub", libc::O_RDONLY | libc::O_DIRECTORY).unwrap();
+        let names = list(sub.as_raw_fd()).unwrap();
+        assert!(
+            names.iter().any(|n| n.as_os_str() == bad),
+            "the name is listed as it is"
+        );
+        assert!(
+            fstatat_nofollow(sub.as_raw_fd(), bad).is_ok(),
+            "and found again"
+        );
+        let st = fstatat_nofollow(dir.as_raw_fd(), "sub").unwrap();
+        remove_entry(dir.as_raw_fd(), "sub", &st).unwrap();
+        assert!(!d.join("sub").exists(), "the directory is gone");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -29,23 +29,34 @@ pub fn check_id(what: &str, s: &str) -> Result<()> {
 }
 
 /// The annotation that asks for a delegated cgroup subtree is refused unless the configuration allows it. The OCI spec is the one the
-/// shim read from the bundle (base64 in the request); a spec that cannot be read has no annotation to act on, and the guest agent
-/// would not find one either.
+/// shim read from the bundle (base64 in the request, standard alphabet, as the shim writes it). A spec that cannot be read is refused: the shim
+/// sends a spec it has parsed, so there is no honest reason for one that does not parse, and "the guest agent would not find an annotation either"
+/// holds only if the agent reads it the way this does (another base64 alphabet, a repeated key in the JSON). The name of the annotation anywhere in the
+/// bytes is a request as well, so that a spec that this parser reads differently from the agent's cannot hide it.
 pub fn check_cgroup_delegate(config: &DaemonConfig, config_json_b64: &str) -> Result<()> {
     use base64::Engine;
     if config.allow_cgroup_delegate || config_json_b64.is_empty() {
         return Ok(());
     }
     let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(config_json_b64) else {
-        return Ok(());
+        anyhow::bail!(
+            "the OCI spec is not valid base64, so it cannot be checked for the annotation {}",
+            cloudhv_common::CGROUP_DELEGATE_ANNOTATION
+        );
     };
     let Ok(spec) = serde_json::from_slice::<serde_json::Value>(&raw) else {
-        return Ok(());
+        anyhow::bail!(
+            "the OCI spec is not valid JSON, so it cannot be checked for the annotation {}",
+            cloudhv_common::CGROUP_DELEGATE_ANNOTATION
+        );
     };
-    if spec
-        .pointer("/annotations")
-        .and_then(|a| a.get(cloudhv_common::CGROUP_DELEGATE_ANNOTATION))
-        .is_some()
+    let name = cloudhv_common::CGROUP_DELEGATE_ANNOTATION.as_bytes();
+    let named = raw.windows(name.len()).any(|w| w == name);
+    if named
+        || spec
+            .pointer("/annotations")
+            .and_then(|a| a.get(cloudhv_common::CGROUP_DELEGATE_ANNOTATION))
+            .is_some()
     {
         anyhow::bail!(
             "the annotation {} needs allow_cgroup_delegate in the daemon's configuration",
@@ -448,6 +459,30 @@ mod tests {
             assert!(check_cgroup_delegate(&off, &fine).is_ok());
         }
         assert!(!config().allow_cgroup_delegate, "off by default");
+    }
+
+    #[test]
+    fn a_spec_that_cannot_be_read_is_refused() {
+        use base64::Engine;
+        let off = config();
+        let mut on = config();
+        on.allow_cgroup_delegate = true;
+        let std = base64::engine::general_purpose::STANDARD;
+        // Not base64, not JSON, and base64 of another alphabet: nothing to check against, so no.
+        assert!(check_cgroup_delegate(&off, "!!not base64!!").is_err());
+        assert!(check_cgroup_delegate(&off, &std.encode("{not json")).is_err());
+        assert!(check_cgroup_delegate(
+            &off,
+            &base64::engine::general_purpose::URL_SAFE.encode([0xfbu8, 0xff, 0xfe])
+        )
+        .is_err());
+        // A repeated key: whichever one a parser keeps, the name is in the bytes.
+        let twice = std.encode(
+            r#"{"annotations":{"cloudhv.koedodb.com/cgroup-delegate":"x"},"annotations":{}}"#,
+        );
+        assert!(check_cgroup_delegate(&off, &twice).is_err());
+        // Allowed: nothing is looked at.
+        assert!(check_cgroup_delegate(&on, "!!not base64!!").is_ok());
     }
 
     #[test]
