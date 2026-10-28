@@ -231,9 +231,13 @@ def volume_args(kind, rt, tag):
 # The VM of a Kata or a cchv container is the same size in every test: PostgreSQL 3 vCPUs and 2080 MiB, nginx 2 vCPUs and 320 MiB.
 # Kata makes its VM from the container's limits (+1 vCPU, +32 MiB) and cannot be told otherwise; cchv makes it from the limits (+64 MiB) and
 # never gives it fewer vCPUs than its pool's default (RT_CCHV_VCPUS in 20-start.sh: 3 for PostgreSQL, 2 for nginx). So the limits are chosen
-# per runtime so that both end in the same VM; runc and gVisor get the VM's own numbers as their limits (--cpus and -m), so that all four have the same CPUs and memory to use.
-# (Kata also sets a cgroup of its own limits inside the guest: 2 CPUs for PostgreSQL, 1 for nginx; cchv sets none. Seen with `cat /sys/fs/cgroup/cpu.max` in the guest.)
+# per runtime so that both end in the same VM; runc, gVisor and cchv get the VM's own numbers as their limits (--cpus and -m), so that they have the same CPUs and memory to use.
+# Kata makes its VM one vCPU larger than the container's limit and holds the container to the limit by a cgroup in the guest (2 CPUs for PostgreSQL with a 3 vCPU VM).
+# To give the container as many CPUs as in the others, Kata gets --cpus = the usable CPUs and so a VM with one vCPU more (4 for PostgreSQL, 3 for nginx), the same memory.
+# That is the one difference in VM size, on purpose and recorded (vm_sizes in the results). CPUs usable by the workload: PostgreSQL 3, nginx 2, in all four.
+# cchv passes --cpus into the guest as a quota too (crates/agent container.rs sanitize_resources): a limit below the VM's vCPUs leaves vCPUs unused.
 VM_SIZE = {"pg": (3, 2080), "nginx": (2, 320)}
+KATA_SAME_VM = 1 if os.environ.get("RT_KATA_SAME_VM") == "1" else 0   # 1: Kata with the same VM size as cchv (3 vCPUs; PostgreSQL gets 2 usable CPUs, nginx 1), the variant of the first run
 PLAIN_LIMITS = {"pg": (str(VM_SIZE["pg"][0]), VM_SIZE["pg"][1]), "nginx": (str(VM_SIZE["nginx"][0]), VM_SIZE["nginx"][1])}
 
 
@@ -241,9 +245,9 @@ def vm_limits(rtname, kind):
     cpus, mem = PLAIN_LIMITS[kind]
     runtime = RUNTIMES[rtname]["runtime"]
     if runtime == "kata-clh":
-        cpus, mem = str(VM_SIZE[kind][0] - 1), VM_SIZE[kind][1] - 32   # Kata adds 1 vCPU and 32 MiB
+        cpus, mem = str(VM_SIZE[kind][0] - KATA_SAME_VM), VM_SIZE[kind][1] - 32   # Kata adds 1 vCPU (its VM has one more than the others, see expected_vm; with RT_KATA_SAME_VM=1 the limit is one lower so that the VM is the same size and the container has one CPU less) and 32 MiB
     elif runtime == "cloudhv":
-        cpus, mem = str(VM_SIZE[kind][0] - 1), VM_SIZE[kind][1] - int(os.environ.get("RT_CCHV_OVERHEAD", "64"))   # cchv adds 64 MiB (guest_overhead_mb; 0 in a run that sets it so in the config); the vCPUs come from the pool's default_vcpus (>= the limit)
+        cpus, mem = str(VM_SIZE[kind][0]), VM_SIZE[kind][1] - int(os.environ.get("RT_CCHV_OVERHEAD", "64"))   # cchv adds 64 MiB (guest_overhead_mb; 0 in a run that sets it so in the config); the vCPUs come from the pool's default_vcpus (= the VM's size); --cpus also reaches the guest as a quota, so it is the whole VM
     return cpus, f"{mem}m"
 
 
@@ -265,11 +269,17 @@ def vm_sizes():
     return sorted(out)
 
 
+def expected_vm(rtname, kind):
+    """(vCPUs, MiB) of the VM the runtime must have: cchv VM_SIZE; Kata the same memory and one vCPU more (its own +1), so that the container can use as many CPUs as in the others."""
+    cpus, mem = VM_SIZE[kind]
+    return [cpus + 1 - KATA_SAME_VM, mem] if RUNTIMES[rtname]["runtime"] == "kata-clh" else [cpus, mem]
+
+
 def check_vm(rtname, kind):
     """The VM that was just started must be the size VM_SIZE says (Kata and cchv; the pool's idle VMs of cchv are in the list as well). Raises when it is not: a result with VMs of different sizes is not a result."""
     sizes = vm_sizes()
-    if RUNTIMES[rtname]["runtime"] in ("kata-clh", "cloudhv") and list(VM_SIZE[kind]) not in sizes:
-        raise RuntimeError(f"{rtname}: no VM of {VM_SIZE[kind]} (vCPUs, MiB) is running; the VMs are {sizes}")
+    if RUNTIMES[rtname]["runtime"] in ("kata-clh", "cloudhv") and expected_vm(rtname, kind) not in sizes:
+        raise RuntimeError(f"{rtname}: no VM of {expected_vm(rtname, kind)} (vCPUs, MiB) is running; the VMs are {sizes}")
     return sizes
 
 
@@ -331,7 +341,7 @@ def pg(rtname, quick=False):
     tag = "pgdata" if RUNTIMES[rtname]["vol"] == "block" else rtname
     scale, t_tpcb, t_sel, t_com, reps = (100, 300, 180, 60, 3) if not quick else (10, 20, 15, 10, 1)
     result = {"runtime": rtname, "settings": {"scale": scale, "clients": 16, "jobs": 4, "tpcb_s": t_tpcb, "select_only_s": t_sel, "commit_s": t_com, "reps": reps,
-                                              "pg_args": PG_ARGS, "limits": " / ".join(vm_limits(rtname, "pg")) + " (--cpus / -m); the VM of Kata and cchv is %d vCPUs, %d MiB" % VM_SIZE["pg"]}, "host": host_state()}
+                                              "pg_args": PG_ARGS, "limits": " / ".join(vm_limits(rtname, "pg")) + " (--cpus / -m); the VM of cchv is %d vCPUs, %d MiB (Kata: one vCPU more)" % VM_SIZE["pg"]}, "host": host_state()}
     rm("pgsrv")
     time.sleep(3)
     base = memsnap_remote()
@@ -452,7 +462,7 @@ def wrk(ip, path, conns, secs):
 def nginx(rtname, quick=False):
     services(rtname)
     secs, reps = (60, 3) if not quick else (8, 1)
-    result = {"runtime": rtname, "settings": {"seconds": secs, "reps": reps, "limits": " / ".join(vm_limits(rtname, "nginx")) + " (--cpus / -m); the VM of Kata and cchv is %d vCPUs, %d MiB" % VM_SIZE["nginx"], "files": ["1k.html", "100k.bin", "10m.bin"], "connections": [50, 200]}, "host": host_state()}
+    result = {"runtime": rtname, "settings": {"seconds": secs, "reps": reps, "limits": " / ".join(vm_limits(rtname, "nginx")) + " (--cpus / -m); the VM of cchv is %d vCPUs, %d MiB (Kata: one vCPU more)" % VM_SIZE["nginx"], "files": ["1k.html", "100k.bin", "10m.bin"], "connections": [50, 200]}, "host": host_state()}
     rm("nginxsrv")
     time.sleep(3)
     result["mem_baseline"] = memsnap_remote()
