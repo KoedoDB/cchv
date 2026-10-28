@@ -21,6 +21,7 @@ def med(x, d=0):
 
 
 print("## PostgreSQL 18.6 (16 clients, 4 jobs, scale 100; median of 3 runs, min–max in brackets)\n")
+print("**Same CPUs to use in all four** (PostgreSQL 3, nginx 2: `--cpus` for runc, gVisor, Kata, cchv). **Kata's VM has one vCPU more than cchv's** (PostgreSQL 4 vs 3, nginx 3 vs 2; same memory): Kata always adds one vCPU to the container's limit and cannot be told otherwise. The extra vCPU is outside the container's limit and may be used by the guest kernel (network, I/O); it can favour Kata.\n")
 print("| runtime | tpcb-like tps | tpcb p99 ms | select-only tps | select p99 ms | commit (1 client) tps | commit p99 ms | pgbench -i s | first query s | restart s |")
 print("|---|---|---|---|---|---|---|---|---|---|")
 for rt in ORDER:
@@ -53,7 +54,7 @@ for rt in ORDER:
     load_ = d["mem_under_load"]["pss_mib"] - b if d.get("mem_under_load") else None
     print(f"| {LABEL[rt]} | {f(idle, 0)} | {f(load_, 0)} | {f(d.get('cgroup_idle_mib'), 0)} / {f(d.get('cgroup_under_load_mib'), 0)} |")
 
-print("\n## Density: N idle PostgreSQL containers (2 CPUs, 2 GiB limit each), host memory per instance (PSS, MiB)\n")
+print("\n## Density: N idle PostgreSQL containers (3 CPUs, 2 GiB limit each), host memory per instance (PSS, MiB)\n")
 print("| runtime | N=1 | N=8 | N=16 | all N=16 ready after s |")
 print("|---|---|---|---|---|")
 for rt in ORDER:
@@ -66,7 +67,7 @@ for rt in ORDER:
     if any(c != "-" for c in cells):
         print(f"| {LABEL[rt]} | " + " | ".join(cells) + f" | {ready} |")
 
-print("\n## Density: N idle nginx containers (1 CPU, 256 MiB limit each), host memory per instance (PSS, MiB) - the fixed cost of a runtime\n")
+print("\n## Density: N idle nginx containers (2 CPUs, 256 MiB limit each), host memory per instance (PSS, MiB) - the fixed cost of a runtime\n")
 print("| runtime | N=1 | N=8 | N=16 |")
 print("|---|---|---|---|")
 for rt in ORDER:
@@ -77,7 +78,8 @@ for rt in ORDER:
     if any(c != "-" for c in cells):
         print(f"| {LABEL[rt]} | " + " | ".join(cells) + " |")
 
-print("\n## nginx (1 CPU, 256 MiB, worker_processes 1, files in the image; wrk 2 threads, 60 s, median of 3 runs)\n")
+print("\n## nginx (2 CPUs, 256 MiB, worker_processes 1, files in the image; wrk 2 threads, 60 s, median of 3 runs)\n")
+print("**Same CPUs to use in all four** (PostgreSQL 3, nginx 2: `--cpus` for runc, gVisor, Kata, cchv). **Kata's VM has one vCPU more than cchv's** (PostgreSQL 4 vs 3, nginx 3 vs 2; same memory): Kata always adds one vCPU to the container's limit and cannot be told otherwise. The extra vCPU is outside the container's limit and may be used by the guest kernel (network, I/O); it can favour Kata.\n")
 print("| runtime | first 200 s | idle MiB | under load MiB (after the last 10 MB run) | 1 KB c50 rps | 1 KB c200 rps | 100 KB c50 rps | 100 KB c200 rps | 10 MB c50 rps | 10 MB c200 rps |")
 print("|---|---|---|---|---|---|---|---|---|---|")
 for rt in ORDER:
