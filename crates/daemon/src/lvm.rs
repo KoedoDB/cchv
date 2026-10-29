@@ -3,10 +3,11 @@
 //! The daemon (`blockvol.rs`) does not run LVM. Making a logical volume needs the device-mapper control device, write access to LVM's own
 //! directories and a tool that parses a lot, none of which the confined daemon has or should have. So the work is done by a small second
 //! process, `cloudhv-sandbox-daemon --volume-helper`, a unit of its own (`cloudhv-volume-helper.service`), which listens on a Unix socket
-//! (0600, root's) and understands two requests:
+//! (0600, root's) and understands three requests:
 //!
 //! - `ensure {namespace, volume, size_mib}`: the logical volume of that Kubernetes namespace and volume name, made if it is not there.
 //! - `tags {major, minor}`: what the helper knows of the logical volume with those device numbers (its volume group, name, size and tags).
+//! - `remove {namespace, volume}`: the logical volume of that namespace and volume name, zeroed whole (thick) and removed. See below.
 //!
 //! What it guarantees:
 //!
@@ -18,17 +19,27 @@
 //! - **It is zeroed whole before it is ready.** LVM does not zero a new volume: it holds what the extents held before, which may be another
 //!   customer's data. After `lvcreate` the helper writes zeros over all of it and only then adds `cloudhv-ready`. A volume with the namespace
 //!   tag and without `cloudhv-ready` is a creation that did not finish (a crash, a full disk): it is zeroed again, and nothing sees it before.
-//! - **Never shrunk, never deleted, never formatted.** A larger `size_mib` extends the logical volume (the file system is not grown: follow-up),
+//! - **Never shrunk, never formatted; deleted only by `remove`.** A larger `size_mib` extends the logical volume (the file system is not grown: follow-up),
 //!   and the new extents are zeroed as well (LVM does not zero them either, and the guest can read the whole device): `cloudhv-extending=<old MiB>`
 //!   is on the volume from before `lvextend` until the new part is zeroed, so a crash in between is finished by the next request, and it is
-//!   the new part only that is zeroed again, never the data. Deleting a Project's volume is an operator's action. **`cloudhv-ready` must
+//!   the new part only that is zeroed again, never the data. **`cloudhv-ready` must
 //!   not be removed by hand**: a volume without it is zeroed whole.
 //! - **A cap**: `volume_block_max_mib` is the most any one volume may be, made or extended to. 0 (the default) refuses every creation.
+//!
+//! **Removing a volume** (`remove {namespace, volume}`): the Project or the branch is gone, and so must its data be (the disks are not encrypted, so the
+//! erasure is the only thing that makes "we deleted your data" true). The name is derived as for `ensure`, never given. The helper removes a logical
+//! volume only if it carries this namespace's tag and no other (a volume of another namespace, one without an owner, or one in another volume group is
+//! refused), and only if no VM has it: the helper takes the same exclusive `flock` the daemon takes for a VM (`<state_dir>/block-locks/<major>:<minor>`)
+//! and `lvremove` itself refuses a volume that is open. Then, in this order: `cloudhv-removing` is added (from then on `ensure` refuses the volume, so
+//! nothing is given it again), a thick volume is zeroed whole, and the volume is removed. A crash in between leaves the tag, and the next `remove`
+//! finishes (a thick volume is zeroed again, from the start). A volume that is not there is not an error (`removed: false`), so the request can be repeated.
+//! A thin volume is not zeroed: `lvremove` gives its blocks back to the pool, which zeroes what it provisions (`check_pool` insists on it), so the next
+//! volume cannot read them. Every removal is logged with the uid and pid of the process that asked (`SO_PEERCRED`).
 //!
 //! **Thin volumes** (a branch is an empty database, so the disk may be over-committed; the main database keeps a thick volume): `ensure` with
 //! `thin: true` makes the logical volume in the thin pool `volume_thin_pool` of the same volume group (`lvcreate -T vg/pool -V <size>`; the
 //! helper never makes the pool: Ansible does). The rules above stay: the derived name, the owner tag (and `cloudhv-thin`), ready only at the
-//! end, never shrunk, never deleted. What differs:
+//! end, never shrunk, deleted only by `remove`. What differs:
 //!
 //! - **No zeroing.** A block of a thin volume that has not been written is not backed by anything and reads as zeros, so a new thin volume cannot
 //!   show another customer's data. That holds only if the pool zeroes the blocks it provisions (`lvcreate --zero y`, the default): with zeroing off
@@ -56,6 +67,8 @@ pub const READY_TAG: &str = "cloudhv-ready";
 pub const EXTENDING_KEY: &str = "cloudhv-extending=";
 /// The tag of a thin volume the helper made (the truth is `LvInfo::is_thin`, which is LVM's; the tag is for the operator reading `lvs`).
 pub const THIN_TAG: &str = "cloudhv-thin";
+/// The tag of a volume that is being removed: `ensure` refuses it from then on, and the next `remove` finishes the job.
+pub const REMOVING_TAG: &str = "cloudhv-removing";
 /// The longest a device-mapper name may be (`DM_NAME_LEN` is 128, with the terminator).
 const DM_NAME_MAX: usize = 127;
 
@@ -170,6 +183,10 @@ pub trait Backend {
     fn activate(&self, vg: &str, lv: &str) -> Result<()>;
     /// Write zeros over the volume from `from_mib` to its end.
     fn zero(&self, info: &LvInfo, from_mib: u64) -> Result<()>;
+    /// The exclusive lock a VM takes on the device, held until the returned value is dropped. An error if a VM holds it.
+    fn hold(&self, info: &LvInfo) -> Result<Box<dyn std::any::Any>>;
+    /// `lvremove` of the volume (LVM refuses one that is open).
+    fn remove(&self, vg: &str, lv: &str) -> Result<()>;
 }
 
 /// What LVM says of a thin pool.
@@ -308,6 +325,12 @@ pub fn ensure(
                     p.vg
                 );
             }
+            if i.has_tag(REMOVING_TAG) {
+                anyhow::bail!(
+                    "the logical volume {}/{lv} is being removed: it is not given out",
+                    p.vg
+                );
+            }
             if i.is_thin() != thin {
                 anyhow::bail!(
                     "the logical volume {}/{lv} is a {} volume and was asked for as a {} one: a volume is thick or thin for good",
@@ -388,6 +411,64 @@ pub fn ensure(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Removed {
+    /// False: there was no such volume (nothing to do; the request can be repeated).
+    pub removed: bool,
+    pub thin: bool,
+    pub size_mib: u64,
+}
+
+/// Zero (thick) and remove the logical volume of `namespace`'s `volume`. An error is a refusal or a failure; a volume that is not there is `removed: false`.
+pub fn remove(b: &dyn Backend, p: &Policy, namespace: &str, volume: &str) -> Result<Removed> {
+    let lv = lv_name(namespace, volume).map_err(|e| anyhow::anyhow!(e))?;
+    dm_name(&p.vg, &lv).map_err(|e| anyhow::anyhow!(e))?;
+    let Some(info) = b.find(&p.vg, &lv).context("look for the volume")? else {
+        return Ok(Removed {
+            removed: false,
+            thin: false,
+            size_mib: 0,
+        });
+    };
+    let owners = info.namespaces();
+    if owners.is_empty() {
+        anyhow::bail!(
+            "the logical volume {}/{lv} has no owner tag: it is not removed",
+            p.vg
+        );
+    }
+    if owners != [namespace] {
+        anyhow::bail!(
+            "the logical volume {}/{lv} belongs to another namespace: it is not removed",
+            p.vg
+        );
+    }
+    // The device numbers are needed for the lock, and a volume that is not active has none.
+    b.activate(&p.vg, &lv).context("activate the volume")?;
+    let info = b.find(&p.vg, &lv)?.context("the volume is gone")?;
+    if info.major == 0 && info.minor == 0 {
+        anyhow::bail!("the logical volume {}/{lv} is not active", p.vg);
+    }
+    let thin = info.is_thin();
+    // A VM that has the volume holds this lock; nothing is done to a volume in use.
+    let _lock = b
+        .hold(&info)
+        .with_context(|| format!("the volume {}/{lv} is in use", p.vg))?;
+    if !info.has_tag(REMOVING_TAG) {
+        b.add_tag(&p.vg, &lv, REMOVING_TAG)
+            .context("mark the volume as being removed")?;
+    }
+    if !thin {
+        b.zero(&info, 0).context("zero the volume")?;
+    }
+    b.remove(&p.vg, &lv).context("remove the volume")?;
+    Ok(Removed {
+        removed: true,
+        thin,
+        size_mib: info.size_mib,
+    })
+}
+
 // ---- the protocol -------------------------------------------------------------------------------------------------------------------------
 
 /// A request is one line of JSON; the answer is one line.
@@ -406,6 +487,10 @@ pub enum Request {
         major: u32,
         minor: u32,
     },
+    Remove {
+        namespace: String,
+        volume: String,
+    },
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -420,6 +505,9 @@ pub struct Response {
     pub created: bool,
     #[serde(default)]
     pub extended: bool,
+    /// For `remove`: whether a volume was removed (false: there was none).
+    #[serde(default)]
+    pub removed: bool,
 }
 
 /// The longest request line the helper reads.
@@ -446,6 +534,26 @@ pub fn handle(b: &dyn Backend, p: &Policy, req: &Request) -> Response {
                 ..Default::default()
             },
         },
+        Request::Remove { namespace, volume } => match remove(b, p, namespace, volume) {
+            Ok(r) => {
+                info!(
+                    "removed: namespace {namespace} volume {volume} ({}, {} MiB): {}",
+                    if r.thin { "thin" } else { "thick, zeroed" },
+                    r.size_mib,
+                    if r.removed { "done" } else { "there was none" }
+                );
+                Response {
+                    ok: true,
+                    removed: r.removed,
+                    ..Default::default()
+                }
+            }
+            Err(e) => Response {
+                ok: false,
+                error: Some(format!("{e:#}")),
+                ..Default::default()
+            },
+        },
         Request::Tags { major, minor } => match b.find_dev(*major, *minor) {
             // Only the volume group of the configuration: the helper says nothing of other volumes of the host.
             Ok(Some(i)) if i.vg == p.vg => Response {
@@ -463,6 +571,27 @@ pub fn handle(b: &dyn Backend, p: &Policy, req: &Request) -> Response {
                 ..Default::default()
             },
         },
+    }
+}
+
+/// The uid and pid of the process on the other side of the socket (`SO_PEERCRED`), for the log.
+fn peer(conn: &UnixStream) -> String {
+    use std::os::fd::AsRawFd;
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let r = unsafe {
+        libc::getsockopt(
+            conn.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut cred as *mut libc::ucred).cast(),
+            &mut len,
+        )
+    };
+    if r == 0 {
+        format!("uid {} pid {}", cred.uid, cred.pid)
+    } else {
+        "an unknown process".to_string()
     }
 }
 
@@ -485,7 +614,7 @@ pub fn serve(listener: UnixListener, b: &dyn Backend, p: &Policy) -> ! {
             Ok(n) if n > 0 && line.ends_with('\n') => {
                 match serde_json::from_str::<Request>(&line) {
                     Ok(req) => {
-                        info!("request: {}", line.trim());
+                        info!("request from {}: {}", peer(&conn), line.trim());
                         handle(b, p, &req)
                     }
                     Err(e) => Response {
@@ -571,6 +700,24 @@ impl Client {
         })
     }
 
+    /// How long to wait for `remove`: a thick volume is zeroed whole first.
+    pub fn remove_timeout(size_mib: u64) -> Duration {
+        Duration::from_secs((120 + size_mib / 50).min(7200))
+    }
+
+    /// Zero and remove the volume of `namespace`'s `volume`. `Ok(false)`: there was none.
+    pub fn remove(&self, namespace: &str, volume: &str, size_hint_mib: u64) -> Result<bool> {
+        Ok(self
+            .call(
+                &Request::Remove {
+                    namespace: namespace.to_string(),
+                    volume: volume.to_string(),
+                },
+                Self::remove_timeout(size_hint_mib),
+            )?
+            .removed)
+    }
+
     /// The logical volume with these device numbers, if the helper knows one (in its volume group).
     pub fn tags(&self, major: u32, minor: u32) -> Result<Option<LvInfo>> {
         Ok(self
@@ -599,6 +746,7 @@ pub fn run_helper(config: &crate::config::DaemonConfig) -> Result<()> {
             .parent()
             .unwrap_or(Path::new("/run/cloudhv"))
             .join("volume-helper-nodes"),
+        lock_dir: Path::new(&config.state_dir).join("block-locks"),
     };
     let policy = Policy {
         vg: config.volume_block_vg.clone(),
@@ -627,6 +775,8 @@ pub struct Lvm {
     pub bin_dir: PathBuf,
     /// Where a node is made for a volume that has none in `/dev/mapper` (no udev, or not yet).
     pub node_dir: PathBuf,
+    /// The daemon's `block-locks` directory: a VM holds an exclusive `flock` on `<major>:<minor>` in it for as long as it has the device.
+    pub lock_dir: PathBuf,
 }
 
 const LV_FIELDS: &str = "vg_name,lv_name,lv_size,lv_tags,lv_kernel_major,lv_kernel_minor,pool_lv";
@@ -882,6 +1032,36 @@ impl Backend for Lvm {
             .map(|_| ())
     }
 
+    fn hold(&self, info: &LvInfo) -> Result<Box<dyn std::any::Any>> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::create_dir_all(&self.lock_dir)?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(self.lock_dir.join(format!("{}:{}", info.major, info.minor)))
+            .context("open the lock of the device")?;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                anyhow::bail!("a VM has the block device {}:{}", info.major, info.minor);
+            }
+            return Err(e).context("lock the device");
+        }
+        Ok(Box::new(file))
+    }
+
+    fn remove(&self, vg: &str, lv: &str) -> Result<()> {
+        // No `-f`: LVM refuses a volume that is open.
+        let target = format!("{vg}/{lv}");
+        self.run("lvremove", &["--yes", &target], Duration::from_secs(120))
+            .map(|_| ())
+    }
+
     fn zero(&self, info: &LvInfo, from_mib: u64) -> Result<()> {
         if from_mib >= info.size_mib {
             return Ok(());
@@ -938,6 +1118,8 @@ mod tests {
         log: RefCell<Vec<String>>,
         /// `zero` fails
         zero_fails: bool,
+        /// `hold` fails: a VM has the volume.
+        busy: bool,
         /// The thin pool, if there is one.
         pool: RefCell<Option<PoolState>>,
     }
@@ -1027,6 +1209,18 @@ mod tests {
         }
         fn activate(&self, _vg: &str, lv: &str) -> Result<()> {
             self.log.borrow_mut().push(format!("activate {lv}"));
+            Ok(())
+        }
+        fn hold(&self, info: &LvInfo) -> Result<Box<dyn std::any::Any>> {
+            if self.busy {
+                anyhow::bail!("a VM has the block device {}:{}", info.major, info.minor);
+            }
+            self.log.borrow_mut().push(format!("hold {}", info.lv));
+            Ok(Box::new(()))
+        }
+        fn remove(&self, _vg: &str, lv: &str) -> Result<()> {
+            self.log.borrow_mut().push(format!("remove {lv}"));
+            self.lvs.borrow_mut().retain(|i| i.lv != lv);
             Ok(())
         }
         fn zero(&self, info: &LvInfo, from_mib: u64) -> Result<()> {
@@ -1620,5 +1814,180 @@ mod tests {
             },
         );
         assert!(!refused.ok && refused.error.unwrap().contains("thin volumes are off"));
+    }
+
+    fn mine(lv: &str, ns: &str, thin: bool, extra: &[&str]) -> LvInfo {
+        let mut tags = vec![format!("cloudhv-ns={ns}"), READY_TAG.to_string()];
+        tags.extend(extra.iter().map(|t| t.to_string()));
+        LvInfo {
+            vg: "vg".into(),
+            lv: lv.into(),
+            size_mib: 2048,
+            tags,
+            major: 252,
+            minor: 7,
+            pool: if thin {
+                "branches".into()
+            } else {
+                String::new()
+            },
+        }
+    }
+
+    #[test]
+    fn a_thick_volume_is_marked_zeroed_whole_and_only_then_removed() {
+        let f = Fake::default();
+        f.lvs
+            .borrow_mut()
+            .push(mine("pv-p-x-db_data", "p-x-db", false, &[]));
+        let r = remove(&f, &policy(), "p-x-db", "data").unwrap();
+        assert_eq!(
+            r,
+            Removed {
+                removed: true,
+                thin: false,
+                size_mib: 2048
+            }
+        );
+        let log = f.log.borrow().clone();
+        assert_eq!(
+            log,
+            vec![
+                "activate pv-p-x-db_data",
+                "hold pv-p-x-db_data",
+                "tag pv-p-x-db_data cloudhv-removing",
+                "zero pv-p-x-db_data from 0",
+                "remove pv-p-x-db_data",
+            ]
+        );
+        assert!(f.lvs.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_thin_volume_is_not_zeroed_the_pool_zeroes_what_it_provisions() {
+        let f = Fake::default();
+        f.lvs
+            .borrow_mut()
+            .push(mine("pv-p-x-br_data", "p-x-br", true, &[THIN_TAG]));
+        let r = remove(&f, &thin_policy(), "p-x-br", "data").unwrap();
+        assert!(r.removed && r.thin);
+        let log = f.log.borrow().join("\n");
+        assert!(!log.contains("zero"), "{log}");
+        assert!(log.contains("remove pv-p-x-br_data"));
+    }
+
+    #[test]
+    fn a_volume_that_is_not_there_is_not_an_error_so_the_request_can_be_repeated() {
+        let f = Fake::default();
+        let r = remove(&f, &policy(), "p-x-db", "data").unwrap();
+        assert!(!r.removed);
+        assert!(f.log.borrow().is_empty());
+    }
+
+    #[test]
+    fn another_namespaces_volume_and_one_without_an_owner_are_never_removed() {
+        for lv in [
+            mine("pv-p-x-db_data", "p-y-db", false, &[]),
+            other("pv-p-x-db_data", &[]),
+            other("pv-p-x-db_data", &[READY_TAG]),
+        ] {
+            let f = Fake::default();
+            f.lvs.borrow_mut().push(lv);
+            assert!(remove(&f, &policy(), "p-x-db", "data").is_err());
+            assert!(f.log.borrow().is_empty(), "{:?}", f.log.borrow());
+            assert_eq!(f.lvs.borrow().len(), 1);
+        }
+        // two owners: also refused
+        let f = Fake::default();
+        f.lvs.borrow_mut().push(mine(
+            "pv-p-x-db_data",
+            "p-x-db",
+            false,
+            &["cloudhv-ns=p-y-db"],
+        ));
+        assert!(remove(&f, &policy(), "p-x-db", "data").is_err());
+        assert_eq!(f.lvs.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_volume_a_vm_has_is_not_touched() {
+        let f = Fake {
+            busy: true,
+            ..Default::default()
+        };
+        f.lvs
+            .borrow_mut()
+            .push(mine("pv-p-x-db_data", "p-x-db", false, &[]));
+        let e = remove(&f, &policy(), "p-x-db", "data").unwrap_err();
+        assert!(format!("{e:#}").contains("in use"), "{e:#}");
+        // not tagged, not zeroed, not removed
+        let log = f.log.borrow().join("\n");
+        assert!(
+            !log.contains("tag") && !log.contains("zero") && !log.contains("remove"),
+            "{log}"
+        );
+        assert_eq!(f.lvs.borrow().len(), 1);
+    }
+
+    #[test]
+    fn a_removal_that_did_not_end_is_finished_by_the_next_request_zeroing_again() {
+        let f = Fake::default();
+        f.lvs
+            .borrow_mut()
+            .push(mine("pv-p-x-db_data", "p-x-db", false, &[REMOVING_TAG]));
+        let r = remove(&f, &policy(), "p-x-db", "data").unwrap();
+        assert!(r.removed);
+        let log = f.log.borrow().join("\n");
+        assert!(
+            !log.contains("cloudhv-removing"),
+            "the tag is on already: {log}"
+        );
+        assert!(log.contains("zero pv-p-x-db_data from 0"));
+        assert!(log.contains("remove pv-p-x-db_data"));
+    }
+
+    #[test]
+    fn a_failed_zeroing_leaves_the_volume_in_place_and_marked() {
+        let f = Fake {
+            zero_fails: true,
+            ..Default::default()
+        };
+        f.lvs
+            .borrow_mut()
+            .push(mine("pv-p-x-db_data", "p-x-db", false, &[]));
+        assert!(remove(&f, &policy(), "p-x-db", "data").is_err());
+        let lvs = f.lvs.borrow();
+        assert_eq!(lvs.len(), 1, "an unzeroed volume is never removed");
+        assert!(lvs[0].has_tag(REMOVING_TAG));
+    }
+
+    #[test]
+    fn a_volume_being_removed_is_not_given_out() {
+        let f = Fake::default();
+        f.lvs
+            .borrow_mut()
+            .push(mine("pv-p-x-db_data", "p-x-db", false, &[REMOVING_TAG]));
+        let e = ensure(&f, &policy(), "p-x-db", "data", 2048, false).unwrap_err();
+        assert!(format!("{e:#}").contains("being removed"), "{e:#}");
+    }
+
+    #[test]
+    fn the_remove_request_is_read_and_has_no_name_to_give() {
+        let r: Request =
+            serde_json::from_str(r#"{"op":"remove","namespace":"p-x-db","volume":"data"}"#)
+                .unwrap();
+        assert!(matches!(r, Request::Remove { .. }));
+        // a logical volume cannot be named, only a namespace and a volume
+        assert!(
+            serde_json::from_str::<Request>(r#"{"op":"remove","name":"pv-p-x-db_data"}"#).is_err()
+        );
+        let f = Fake::default();
+        let resp = handle(&f, &policy(), &r);
+        assert!(resp.ok && !resp.removed);
+        let bad = Request::Remove {
+            namespace: "A_b".into(),
+            volume: "data".into(),
+        };
+        assert!(!handle(&f, &policy(), &bad).ok);
     }
 }
