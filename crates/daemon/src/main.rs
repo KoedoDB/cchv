@@ -49,6 +49,33 @@ fn main() -> Result<()> {
         let config = config::DaemonConfig::load(&PathBuf::from(path))?;
         return lvm::run_helper(&config);
     }
+    // `--volume-remove <namespace> <volume> [daemon.json]`: asks the helper to zero and remove the volume of a Project or branch that is gone (root's, on the host).
+    if std::env::args().nth(1).as_deref() == Some("--volume-remove") {
+        let mut args = std::env::args().skip(2);
+        let (Some(namespace), Some(volume)) = (args.next(), args.next()) else {
+            anyhow::bail!(
+                "usage: cloudhv-sandbox-daemon --volume-remove <namespace> <volume> [daemon.json]"
+            );
+        };
+        let path = args
+            .next()
+            .unwrap_or_else(|| "/opt/cloudhv/daemon.json".to_string());
+        let config = config::DaemonConfig::load(&PathBuf::from(path))?;
+        let client = lvm::Client {
+            socket: PathBuf::from(&config.volume_helper_socket),
+        };
+        // The wait is the one for the largest volume the helper makes; the helper zeroes the volume whole.
+        let removed = client.remove(&namespace, &volume, config.volume_block_max_mib)?;
+        println!(
+            "{}",
+            if removed {
+                "removed"
+            } else {
+                "there was no such volume"
+            }
+        );
+        return Ok(());
+    }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?

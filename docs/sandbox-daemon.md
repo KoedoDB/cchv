@@ -946,7 +946,7 @@ spec:
 - **The daemon never runs LVM.** It would need the device-mapper control device, write access to `/etc/lvm` and `/run/lvm`, and a tool that parses a great deal, in the
   process that also reads every request and starts every Cloud Hypervisor. A second process does it: `cloudhv-sandbox-daemon --volume-helper`, the unit
   `cloudhv-volume-helper.service` (installed by the installer and in the system extension, **not enabled**: enable it on a host that has `volume_block_vg`). It listens on
-  `volume_helper_socket` and understands two requests, `ensure {namespace, volume, size_mib}` and `tags {major, minor}`, one line of JSON each. The daemon's own unit does not
+  `volume_helper_socket` and understands three requests, `ensure {namespace, volume, size_mib}`, `tags {major, minor}` and `remove {namespace, volume}`, one line of JSON each. The daemon's own unit does not
   change (it only connects to the socket).
 - **The name is derived, never given.** The logical volume is `pv-<namespace>_<volume>` in `volume_block_vg`. The namespace is the pod's Kubernetes namespace, which the
   shim reads from `io.kubernetes.cri.sandbox-namespace` in the OCI spec (containerd writes it; a pod can only pass `cloudhv.koedodb.com/*` annotations to the spec, see the
@@ -962,9 +962,14 @@ spec:
   from before `lvextend` until the new part is zeroed, so a crash in between is finished by the next request, from the old size on, never over the data. The file system is not grown
   (follow-up: `resize2fs` in the guest, or by the agent). A smaller size does nothing.
 - **A cap and a single writer.** `volume_block_max_mib` limits any one volume (made or extended to); 0 makes none. The helper answers one request at a time. The daemon's per-device `flock` still keeps a volume to one VM.
-- **Never deleted.** Nothing removes a logical volume: deleting a Project's volume is an operator's action (`lvremove`), taken together with the Project's backups. The helper's `tags` request
-  answers only for volumes of its own volume group.
-- **Not covered here (follow-ups)**: growing the file system after an extension; a backup of the volume; removing the volume of a deleted Project. Thin volumes are below.
+- **Removed only by `remove`.** `remove {namespace, volume}` zeroes a thick volume whole and removes it; the name is derived, as for `ensure`, so a request cannot name a logical volume. It removes only
+  a volume that carries this namespace's tag and no other (another namespace's, one without an owner, one in another volume group: refused). It does nothing to a volume a VM has: the helper takes
+  the same exclusive `flock` as the daemon (`<state_dir>/block-locks/<major>:<minor>`), and `lvremove` (without `-f`) refuses an open volume. Order: add `cloudhv-removing` (from then on `ensure` refuses
+  the volume), zero it whole (thick), `lvremove`. A crash in between leaves the tag, and the next `remove` finishes (zeroing again from the start). A volume that is not there is `removed: false`, not an
+  error, so the request can be repeated. A thin volume is not zeroed: `lvremove` gives its blocks back to the pool, which zeroes what it provisions. Every request is logged with the uid and pid of the
+  caller (`SO_PEERCRED`). **Nothing in a Pod can send it**: the socket is root's (0600), and the daemon never asks. From the host: `cloudhv-sandbox-daemon --volume-remove <namespace> <volume> [daemon.json]`
+  (prints `removed` or `there was no such volume`). The disks are not encrypted, so this erasure is what makes "the data is deleted" true.
+- **Not covered here (follow-ups)**: growing the file system after an extension; a backup of the volume; **calling `remove` when a Project or branch is deleted** (the caller is the platform's: the helper only offers the operation). Thin volumes are below.
 - **What the helper's unit allows**: `CAP_SYS_ADMIN` (the device-mapper ioctls) and `CAP_MKNOD` (a node of its own for a volume that udev has not made, to zero it), `ProtectSystem=strict` with write access to
   `/run/cloudhv`, `/etc/lvm`, `/run/lvm` and `/run/lock/lvm` only, no network, `DevicePolicy=closed` with `/dev/mapper/control`, device-mapper and the disk classes of a host. The host needs `lvm2`
   and `util-linux` (`blkdiscard`). **The unit has not been run under systemd on a node yet**; the helper has been run against the real LVM tools in a throw-away container

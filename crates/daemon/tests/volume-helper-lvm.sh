@@ -286,6 +286,87 @@ R="$(call '{"op":"ensure","namespace":"p-main-db","volume":"data","size_mib":32}
 cmp -n $((32*1024*1024)) "/dev/$VG/pv-p-main-db_data" /dev/zero || fail "the thick volume next to the pool is not zero"
 [ -z "$(lvs --noheadings -o pool_lv "$VG/pv-p-main-db_data" | tr -d ' ')" ] || fail "the thick volume is in a pool"
 
+echo "== remove: a thick volume with data is zeroed whole and removed; the next volume that takes its extents reads zeros"
+STATE="/run/cloudhv/daemon"   # the default state_dir: the helper keeps the daemon's block-locks there
+R="$(call '{"op":"ensure","namespace":"p-rm-db","volume":"data","size_mib":32}')"
+[ "$(field "$R" "d['ok']")" = True ] || fail "ensure before remove: $R"
+tr '\0' '\377' < /dev/zero | dd of="/dev/$VG/pv-p-rm-db_data" bs=1M count=32 iflag=fullblock oflag=direct 2>/dev/null
+R="$(call '{"op":"remove","namespace":"p-rm-db","volume":"data"}')"
+[ "$(field "$R" "d['ok'] and d['removed']")" = True ] || fail "remove: $R"
+lvs "$VG/pv-p-rm-db_data" >/dev/null 2>&1 && fail "the volume is still there after remove"
+lvcreate -y -Zn -L 32m -n probe "$VG" >/dev/null
+cmp -n $((32*1024*1024)) "/dev/$VG/probe" /dev/zero || fail "the extents of a removed volume still held its data"
+lvremove -f "$VG/probe" >/dev/null
+
+echo "== remove: again is not an error (nothing to remove), and a name that is not a volume is refused"
+R="$(call '{"op":"remove","namespace":"p-rm-db","volume":"data"}')"
+[ "$(field "$R" "d['ok'] and not d['removed']")" = True ] || fail "remove of nothing: $R"
+R="$(call '{"op":"remove","namespace":"P_x","volume":"data"}')"
+[ "$(field "$R" "d['ok']")" = False ] || fail "a bad namespace was accepted: $R"
+
+echo "== remove: a volume of another namespace, and one without an owner, are refused and untouched"
+LV2=pv-p-rm2-db_data
+R="$(call '{"op":"ensure","namespace":"p-rm2-db","volume":"data","size_mib":16}')"
+[ "$(field "$R" "d['ok']")" = True ] || fail "ensure: $R"
+printf MARKER | dd of="/dev/$VG/$LV2" bs=512 oflag=direct conv=sync 2>/dev/null
+lvchange --deltag cloudhv-ns=p-rm2-db --addtag cloudhv-ns=p-zzz-db "$VG/$LV2" >/dev/null
+R="$(call '{"op":"remove","namespace":"p-rm2-db","volume":"data"}')"
+[ "$(field "$R" "d['ok']")" = False ] || fail "another namespace's volume was removed: $R"
+lvchange --deltag cloudhv-ns=p-zzz-db "$VG/$LV2" >/dev/null
+R="$(call '{"op":"remove","namespace":"p-rm2-db","volume":"data"}')"
+[ "$(field "$R" "d['ok']")" = False ] || fail "a volume without an owner was removed: $R"
+[ "$(marker "$LV2")" = MARKER ] || fail "a refused volume was touched"
+lvchange --addtag cloudhv-ns=p-rm2-db "$VG/$LV2" >/dev/null
+
+echo "== remove: a volume a VM holds (the daemon's flock) is not touched"
+DEV="$(lvs --noheadings -o lv_kernel_major,lv_kernel_minor "$VG/$LV2" | tr -s ' ' | sed 's/^ //; s/ /:/')"
+mkdir -p "$STATE/block-locks"
+# exec: the process that holds the lock is the one that is killed (a `flock file sleep` leaves the sleep, which keeps the lock, after the flock is killed).
+( flock -x 9; exec sleep 30 ) 9>"$STATE/block-locks/$DEV" &
+HOLD_PID=$!
+sleep 1
+R="$(call '{"op":"remove","namespace":"p-rm2-db","volume":"data"}')"
+[ "$(field "$R" "d['ok']")" = False ] || fail "a volume a VM holds was removed: $R"
+case "$(field "$R" "d['error']")" in *"in use"*) ;; *) fail "the refusal does not say why: $R";; esac
+[ "$(marker "$LV2")" = MARKER ] || fail "a volume a VM holds was zeroed"
+lvs -o lv_tags --noheadings "$VG/$LV2" | grep -q cloudhv-removing && fail "a volume a VM holds was marked"
+kill "$HOLD_PID" 2>/dev/null || true; wait "$HOLD_PID" 2>/dev/null || true
+
+echo "== remove: a volume that is being removed is not given out, and a removal that did not end is finished"
+lvchange --addtag cloudhv-removing "$VG/$LV2" >/dev/null
+R="$(call '{"op":"ensure","namespace":"p-rm2-db","volume":"data","size_mib":16}')"
+[ "$(field "$R" "d['ok']")" = False ] || fail "a volume being removed was given out: $R"
+R="$(call '{"op":"remove","namespace":"p-rm2-db","volume":"data"}')"
+[ "$(field "$R" "d['ok'] and d['removed']")" = True ] || fail "the unfinished removal was not finished: $R"
+lvs "$VG/$LV2" >/dev/null 2>&1 && fail "the volume is still there"
+
+echo "== remove: a volume that is open (not by a VM) is zeroed but LVM does not remove it; closed, the next request removes it"
+R="$(call '{"op":"ensure","namespace":"p-rm3-db","volume":"data","size_mib":16}')"
+[ "$(field "$R" "d['ok']")" = True ] || fail "ensure: $R"
+sleep 30 < "/dev/$VG/pv-p-rm3-db_data" &
+OPEN_PID=$!
+sleep 1
+R="$(call '{"op":"remove","namespace":"p-rm3-db","volume":"data"}')"
+[ "$(field "$R" "d['ok']")" = False ] || fail "an open volume was removed: $R"
+lvs "$VG/pv-p-rm3-db_data" >/dev/null 2>&1 || fail "an open volume is gone"
+kill "$OPEN_PID" 2>/dev/null || true; wait "$OPEN_PID" 2>/dev/null || true
+R="$(call '{"op":"remove","namespace":"p-rm3-db","volume":"data"}')"
+[ "$(field "$R" "d['ok'] and d['removed']")" = True ] || fail "the volume was not removed once closed: $R"
+
+echo "== remove: a thin volume is removed, and its space goes back to the pool"
+start_helper branches 0 90
+R="$(call '{"op":"ensure","namespace":"p-rm4-br","volume":"data","size_mib":64,"thin":true}')"
+[ "$(field "$R" "d['ok']")" = True ] || fail "thin ensure: $R"
+tr '\0' '\377' < /dev/zero | dd of="/dev/$VG/pv-p-rm4-br_data" bs=1M count=32 iflag=fullblock oflag=direct 2>/dev/null
+R="$(call '{"op":"remove","namespace":"p-rm4-br","volume":"data"}')"
+[ "$(field "$R" "d['ok'] and d['removed']")" = True ] || fail "thin remove: $R"
+lvs "$VG/pv-p-rm4-br_data" >/dev/null 2>&1 && fail "the thin volume is still there"
+R="$(call '{"op":"ensure","namespace":"p-rm5-br","volume":"data","size_mib":64,"thin":true}')"
+[ "$(field "$R" "d['ok']")" = True ] || fail "thin ensure after remove: $R"
+cmp -n $((64*1024*1024)) "/dev/$VG/pv-p-rm5-br_data" /dev/zero || fail "a new thin volume reads the data of a removed one"
+R="$(call '{"op":"remove","namespace":"p-rm5-br","volume":"data"}')"
+[ "$(field "$R" "d['ok'] and d['removed']")" = True ] || fail "thin remove 2: $R"
+
 echo "== the volume helper survives all of it"
 kill -0 "$HELPER_PID" || fail "the helper died"
 echo "ALL OK"
