@@ -166,6 +166,16 @@ pub struct DaemonConfig {
     #[serde(default = "default_true")]
     pub disk_direct: bool,
 
+    /// The most I/O requests per second each hot-plugged disk of a VM may do (Cloud Hypervisor's rate limiter on the virtio-blk disk, reads and writes together), so that one
+    /// VM with a runaway database cannot take the host's disk from the others: the VMs of a host share its drives. 0 (the default): no limit. A disk that does more waits, so
+    /// the guest sees a slower disk, nothing breaks. A request is what the guest sent (its block layer merges neighbouring blocks into one), not a 4 KiB block.
+    #[serde(default)]
+    pub disk_iops_limit: u32,
+    /// How many seconds of `disk_iops_limit` a disk may do at once after it has been quiet (the size of the bucket; it refills in that time). 2 lets a checkpoint's burst through
+    /// at four times the rate for a second or two and then holds the sustained rate. At least 1.
+    #[serde(default = "default_disk_iops_burst_secs")]
+    pub disk_iops_burst_secs: u32,
+
     /// The most shadow VMs (the ones that make warm snapshots) that may run at once; each takes a pool VM for its warm-up.
     #[serde(default = "default_max_shadow_vms")]
     pub max_shadow_vms: usize,
@@ -329,6 +339,9 @@ fn default_guest_check_failures() -> u32 {
 fn default_keep_vms_on_stop() -> bool {
     true
 }
+fn default_disk_iops_burst_secs() -> u32 {
+    2
+}
 fn default_max_shadow_vms() -> usize {
     2
 }
@@ -423,5 +436,46 @@ impl DaemonConfig {
     /// Path to the workload snapshot cache directory.
     pub fn snapshot_cache_dir(&self) -> PathBuf {
         PathBuf::from(&self.state_dir).join("snapshot-cache")
+    }
+}
+
+/// Put the rate limiter of `disk_iops_limit` into the body of a `vm.add-disk` request (nothing with a limit of 0). The bucket holds `iops * burst_secs` requests and refills in
+/// `burst_secs` seconds, so the sustained rate is `iops`.
+pub fn limit_disk_iops(body: &mut serde_json::Value, iops: u32, burst_secs: u32) {
+    if iops == 0 {
+        return;
+    }
+    let burst_secs = u64::from(burst_secs.max(1));
+    body["rate_limiter_config"] = serde_json::json!({
+        "ops": { "size": u64::from(iops) * burst_secs, "refill_time": burst_secs * 1000 },
+    });
+}
+
+#[cfg(test)]
+mod disk_iops_tests {
+    use super::limit_disk_iops;
+
+    #[test]
+    fn a_limit_of_zero_leaves_the_disk_alone() {
+        let mut body = serde_json::json!({"path": "/x"});
+        limit_disk_iops(&mut body, 0, 2);
+        assert!(body.get("rate_limiter_config").is_none());
+    }
+
+    #[test]
+    fn the_bucket_holds_the_burst_and_refills_in_that_time() {
+        let mut body = serde_json::json!({"path": "/x"});
+        limit_disk_iops(&mut body, 200, 2);
+        assert_eq!(body["rate_limiter_config"]["ops"]["size"], 400);
+        assert_eq!(body["rate_limiter_config"]["ops"]["refill_time"], 2000);
+        assert!(body["rate_limiter_config"].get("bandwidth").is_none());
+    }
+
+    #[test]
+    fn a_burst_of_zero_seconds_is_one() {
+        let mut body = serde_json::json!({});
+        limit_disk_iops(&mut body, 200, 0);
+        assert_eq!(body["rate_limiter_config"]["ops"]["size"], 200);
+        assert_eq!(body["rate_limiter_config"]["ops"]["refill_time"], 1000);
     }
 }

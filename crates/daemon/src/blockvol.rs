@@ -107,6 +107,9 @@ struct Settings {
     mke2fs: PathBuf,
     /// Whether the disks are opened with O_DIRECT (`disk_direct`).
     direct: bool,
+    /// `disk_iops_limit` and `disk_iops_burst_secs`.
+    iops: u32,
+    iops_burst_secs: u32,
 }
 
 static SETTINGS: OnceLock<Option<Settings>> = OnceLock::new();
@@ -148,6 +151,8 @@ pub fn init(config: &DaemonConfig) {
                 locks,
                 mke2fs: crate::emptydir::find_mke2fs(&config.mke2fs_path),
                 direct: config.disk_direct,
+                iops: config.disk_iops_limit,
+                iops_burst_secs: config.disk_iops_burst_secs,
             }),
             Err(e) => {
                 warn!("persistent block volumes are off: {e:#}");
@@ -692,11 +697,13 @@ async fn plug(
     }
     // Only now the VM's user owns the node: root made the file system, and the VM could not have opened the node before.
     crate::rootless::give(node, state_dir).context("give the node to the VM")?;
+    let mut body = disk_body(node, b, s.direct);
+    crate::config::limit_disk_iops(&mut body, s.iops, s.iops_burst_secs);
     crate::vm_lifecycle::api_request_with_body(
         api_socket,
         "PUT",
         "/api/v1/vm.add-disk",
-        &disk_body(node, b, s.direct).to_string(),
+        &body.to_string(),
     )
     .await
     .context("hot-plug the device")

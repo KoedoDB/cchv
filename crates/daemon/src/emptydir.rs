@@ -39,6 +39,9 @@ struct Settings {
     mke2fs: PathBuf,
     /// Whether the disks are opened with O_DIRECT (`disk_direct`).
     direct: bool,
+    /// `disk_iops_limit` and `disk_iops_burst_secs`.
+    iops: u32,
+    iops_burst_secs: u32,
 }
 
 static SETTINGS: OnceLock<Option<Settings>> = OnceLock::new();
@@ -60,6 +63,8 @@ pub fn init(config: &DaemonConfig, keep: &std::collections::HashSet<String>) {
                 max_mib: config.emptydir_max_mib,
                 reserve_mib: config.emptydir_reserve_mib,
                 direct: config.disk_direct,
+                iops: config.disk_iops_limit,
+                iops_burst_secs: config.disk_iops_burst_secs,
                 mke2fs: find_mke2fs(&config.mke2fs_path),
             }),
             Err(e) => {
@@ -413,7 +418,8 @@ async fn make_and_plug(
     make_image(s, path, d.size_mb).await?;
     // Only now the VM's user owns it: the file system was made by root, and the VM could not have touched the file before.
     crate::rootless::give(path, state_dir).context("give the disk to the VM")?;
-    let body = disk_body(path, d, s.direct);
+    let mut body = disk_body(path, d, s.direct);
+    crate::config::limit_disk_iops(&mut body, s.iops, s.iops_burst_secs);
     crate::vm_lifecycle::api_request_with_body(
         api_socket,
         "PUT",
@@ -590,6 +596,8 @@ mod tests {
             reserve_mib: 0,
             mke2fs,
             direct: true,
+            iops: 0,
+            iops_burst_secs: 2,
         };
         let path = root.join(format!("{ID}.img"));
         make_image(&s, &path, 64).await.unwrap();
