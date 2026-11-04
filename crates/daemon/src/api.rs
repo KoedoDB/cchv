@@ -314,7 +314,8 @@ async fn handle_connection(
         writer.write_all(resp_str.as_bytes()).await?;
         writer.flush().await?;
         // Only the size: an answer can hold a container's output (ReadLogs), which is the customer's and may hold secrets.
-        log::info!("responded: {} ({} bytes)", method, resp_str.len());
+        // DEBUG, not INFO: every request is answered, and a host with many Pods and exec probes wrote 370 MB of these an hour (2026-11-03).
+        log::debug!("responded: {} ({} bytes)", method, resp_str.len());
     }
 
     Ok(())

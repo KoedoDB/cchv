@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use containerd_shimkit::sandbox::instance::{ExecConfig, Instance, InstanceConfig};
 use containerd_shimkit::sandbox::sync::WaitableCell;
 use containerd_shimkit::sandbox::Error;
-use log::info;
+use log::{debug, info};
 
 use crate::config::{load_config, load_shim_limits};
 use crate::daemon_client::{AcquireRequest, DaemonClient};
@@ -454,7 +454,8 @@ impl Instance for CloudHvInstance {
 
     async fn wait(&self) -> (u32, DateTime<Utc>) {
         let t0 = std::time::Instant::now();
-        info!("TIMING wait_enter {} @{}", self.id, epoch_ms());
+        // DEBUG: one line for every exec (a probe) of every container.
+        debug!("TIMING wait_enter {} @{}", self.id, epoch_ms());
         {
             let result = *self.exit.wait().await;
             info!(

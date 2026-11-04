@@ -16,7 +16,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use containerd_shimkit::sandbox::sync::WaitableCell;
 use containerd_shimkit::sandbox::{Error, ExecConfig};
-use log::{info, warn};
+use log::{debug, warn};
 use tokio::io::unix::AsyncFd;
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::watch;
@@ -140,7 +140,8 @@ impl ExecProc {
             .await
             .map_err(Self::err)?;
         self.started.store(true, Ordering::SeqCst);
-        info!(
+        // DEBUG: a probe is an exec, and it runs every few seconds for every container.
+        debug!(
             "exec {} of {} started in the guest (pid {pid})",
             self.id(),
             self.container_id
