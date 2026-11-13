@@ -8,11 +8,13 @@
 #                        checksum autosigner key B8868C80BA62A1FFFAF5FDA9632D3A06589DA6B1
 #   crun-*               the release's detached .asc signature verifies against the maintainer's key
 #                        AC404C1C0BF735C63FF4D562263D6DF2E163E1EA (signing subkey AF60FCA3CDAA6DEAD157EA3A67E38F7A8BA21772);
-#                        the key itself was fetched from a key server: trust on first use
+#                        the key itself was fetched from a key server: trust on first use.
+#                        crun 1.31 (2026-11-12) is signed by another key: Kir Kolyshkin, C2428CD75720FACDCF76B6EA17DE5ECB75A1100E (RSA 2048, expires 2028-04-18),
+#                        fetched from keyserver.ubuntu.com (not on keys.openpgp.org): trust on first use too; he made 76 of the last 100 commits of containers/crun
 4f4f98a3d661a40f3e5272627cc895a1b2e525f2f6bedf5f895f9cd21ba5c65b  cloud-hypervisor-v54.0-static
 e8a6d9786ea678e739f1a386682846e93742dcb9c7b6e3e0c62e3bda6cff0ef3  cloud-hypervisor-v54.0-static-aarch64
 b98f74a0f8522f0a83867178729c1aa70f2158f90c45a2ca8fa791db1c76b303  cni-plugins-linux-amd64-v1.9.1.tgz
 56171987d3947707c3563db2f4001bccaf50fd63468611b9f3cbecb1375ee7ec  cni-plugins-linux-arm64-v1.9.1.tgz
-3c2f44ef6acc021a7ad444d9a2e6ec1ef488ff09368793d0004a6080f69d621e  linux-6.18.60.tar.xz
-e7b059390e27d0f283e1debbe89d9c5847870f3d8325f31ccd954533fdd6ea78  crun-1.30.1-linux-amd64-disable-systemd
-6ac05ea41343cf91b12832c69f9a2a8c6dc5380032f4c0e02a46cc6aba8804f5  crun-1.30.1-linux-arm64-disable-systemd
+81764a545072d160748beff4d9de2e7d95aa9f16e8261110288f067a2cc61d71  linux-6.18.63.tar.xz
+44d493d4b00914ea2f153631ad825c7653aacfa09c373c50dfe08c61258ede9d  crun-1.31-linux-amd64-disable-systemd
+2fd023c8a110edd31a2eb2617a3d7633d2615364938250c89cb13fffd9f0ed38  crun-1.31-linux-arm64-disable-systemd

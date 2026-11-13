@@ -37,11 +37,15 @@ A download whose name is not in `hacks/checksums.txt`, or whose SHA-256 differs,
 | `CH_COMMIT`, `EROFS_UTILS_COMMIT` | `git ls-remote <repo> 'refs/tags/<tag>^{}'` | the tag as the upstream repository has it now |
 
 The first value of each entry was computed by downloading the file once and was equal to the upstream value on 2026-10-16. crun was
-raised from 1.20 to 1.30.1 on 2026-10-16: both `.asc` signatures verified (key `AC40 4C1C 0BF7 35C6 3FF4 D562 263D 6DF2 E163 E1EA`, signing
+raised from 1.20 to 1.30.1 on 2026-10-16 (and to 1.31 on 2026-11-14, see below): both `.asc` signatures verified (key `AC40 4C1C 0BF7 35C6 3FF4 D562 263D 6DF2 E163 E1EA`, signing
 subkey `AF60 FCA3 CDAA 6DEA D157 EA3A 67E3 8F7A 8BA2 1772`), the amd64 binary was downloaded twice with the same hash, both are static ELF.
 What remains trust-on-first-use: the crun signing key (its fingerprint is recorded in `checksums.txt`, and the script fails if
 the signature stops verifying), and the fact that GitHub's digests and the `.sha256` files are published by the same account
 that publishes the binaries.
+
+crun 1.31 (2026-11-12) is signed by a different key than 1.30.1: Kir Kolyshkin, `C242 8CD7 5720 FACD CF76 B6EA 17DE 5ECB 75A1 100E` (RSA 2048, expires 2028-04-18;
+not on keys.openpgp.org, fetched from keyserver.ubuntu.com). He made 76 of the last 100 commits of containers/crun. Nothing else vouches for the key, so it is
+trust on first use too; `hacks/check-upstream.sh` accepts both keys. 1.31 also fixes CVE-2026-115520 and CVE-2026-115521 (GHSA-2mxx-58qc-p466, high).
 
 ## Updating a pin
 

@@ -66,7 +66,9 @@ d="$(awk -v n="linux-${KERNEL_VERSION}.tar.xz" '$2 == n { print $1 }' "${work}/s
 listed "linux-${KERNEL_VERSION}.tar.xz" "$d"
 
 echo "crun ${CRUN_VERSION}: detached signatures of the release assets"
+# Two signers: Giuseppe Scrivano (<= 1.30.1) and Kir Kolyshkin (1.31, 2026-11-12; the main committer of crun in 2026). A release is good if either key verifies it.
 gpg --quiet --keyserver hkps://keys.openpgp.org --recv-keys AF60FCA3CDAA6DEAD157EA3A67E38F7A8BA21772 >/dev/null 2>&1 || true
+gpg --quiet --keyserver hkps://keyserver.ubuntu.com --recv-keys C2428CD75720FACDCF76B6EA17DE5ECB75A1100E >/dev/null 2>&1 || true
 for a in amd64 arm64; do
   n="crun-${CRUN_VERSION}-linux-${a}-disable-systemd"
   curl -fsSL -o "${work}/${n}" "https://github.com/containers/crun/releases/download/${CRUN_VERSION}/${n}"
