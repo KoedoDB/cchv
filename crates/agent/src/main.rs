@@ -18,6 +18,7 @@ mod cgdelegate;
 mod container;
 mod disks;
 mod exec;
+mod limits;
 mod mount;
 mod reaper;
 mod seccomp;
@@ -80,6 +81,8 @@ fn init_setup() {
         std::process::exit(1);
     }
     mount::apply_sysctls();
+    // Before the agent starts anything: every container (and exec) inherits the limit it has now.
+    limits::raise_nofile();
 
     reaper::set_child_subreaper();
 

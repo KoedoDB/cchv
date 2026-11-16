@@ -75,6 +75,10 @@ Thin containerd shim v2 (~1,300 lines). When `daemon_socket` is configured, the 
 
 PID 1 in the VM. Discovers hot-plugged disks via inotify, adapts OCI specs, delegates to crun. Built as a separate workspace with its own ttrpc 0.9 dependency.
 
+**Open files.** The kernel gives PID 1 `RLIMIT_NOFILE` soft 1024 / hard 4096 and every container inherits it (Kubernetes has no way to ask for more, and containerd puts no `rlimits` in the spec).
+At start the agent raises its own limit to soft 65536 / hard 1048576 (the kernel's default `fs.nr_open`; lower if the kernel's is lower), before it starts anything (`crates/agent/src/limits.rs`).
+A container that asks for more in its OCI spec is capped at 1048576 (`spec.rs`). A program that raises its own soft limit (an image's `ulimit -Sn 65536`) can go up to the hard limit.
+
 ### Communication
 
 - **vsock + ttrpc** — no network stack, no shared filesystem.

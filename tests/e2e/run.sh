@@ -355,6 +355,11 @@ if want security; then
     kubectl exec e2e-sec2 -- unshare -r true >/dev/null 2>&1 && fail "security: unshare -r is allowed" || pass "security: unshare (new user namespace) is denied"
     k=$(kubectl exec e2e-sec2 -- sh -c 'cat /proc/self/status | grep -E "^(NoNewPrivs|Seccomp|CapEff)"' 2>&1 | tr '\n' ' ')
     case "$k" in *"Seccomp:"*"2"*) pass "security: the container runs under a seccomp filter ($k)" ;; *) fail "security: seccomp" "$k" ;; esac
+    # The open-files limit (crates/agent/src/limits.rs): the guest agent raises its own, every container inherits it. The kernel's default for PID 1 is 1024 / 4096, which stopped
+    # Realtime (its image does `ulimit -Sn 65536`) on stg, 2026-11-16.
+    k=$(kubectl exec e2e-sec2 -- sh -c 'grep "^Max open files" /proc/self/limits' 2>&1)
+    case "$k" in *"65536"*"1048576"*) pass "limits: open files are soft 65536 / hard 1048576 ($k)" ;; *) fail "limits: open files" "$k" ;; esac
+    kubectl exec e2e-sec2 -- sh -c 'ulimit -Sn 65536 && [ "$(ulimit -Sn)" = 65536 ]' >/dev/null 2>&1 && pass "limits: a container can raise its own soft limit to 65536" || fail "limits: ulimit -Sn 65536 is refused"
     kubectl exec e2e-sec2 -- sh -c 'mknod /tmp/x c 1 3' >/dev/null 2>&1 && fail "security: mknod is allowed" || pass "security: mknod is denied"
     kubectl exec e2e-sec2 -- sh -c 'mount -t tmpfs none /mnt' >/dev/null 2>&1 && fail "security: mount is allowed" || pass "security: mount is denied"
     kubectl exec e2e-sec2 -- sh -c 'ls /dev/kvm /dev/mem /dev/sda 2>&1 | grep -vq "No such"' >/dev/null 2>&1 && fail "security: host-like devices are visible" || pass "security: no /dev/kvm, /dev/mem or disk device nodes in the container"
