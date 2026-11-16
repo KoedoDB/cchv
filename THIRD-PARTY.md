@@ -16,7 +16,7 @@ Each release attaches:
 
 | Component | Where it ends up | License | Source |
 |---|---|---|---|
-| Cloud Hypervisor v54.0 | the system extension (`containerd-cloudhypervisor-*.raw`) and the installer image | Apache-2.0 (the main program), BSD-3-Clause for some files; see `LICENSES/` in its repository | https://github.com/cloud-hypervisor/cloud-hypervisor/tree/v54.0 |
+| Cloud Hypervisor v54.1 | the system extension (`containerd-cloudhypervisor-*.raw`) and the installer image | Apache-2.0 (the main program), BSD-3-Clause for some files; see `LICENSES/` in its repository | https://github.com/cloud-hypervisor/cloud-hypervisor/tree/v54.0 |
 | CNI plugins v1.9.1 | the system extension | Apache-2.0 | https://github.com/containernetworking/plugins/tree/v1.9.1 |
 | **crun 1.31** | the guest root file system (`rootfs-*.erofs`), as a static binary | **GPL-2.0-or-later** (`COPYING`); libcrun under LGPL-2.1 (`COPYING.libcrun`) | see below |
 | **Linux 6.18.63** | the guest kernel (`vmlinux-*`) | **GPL-2.0-only** with the Linux-syscall-note | see below |

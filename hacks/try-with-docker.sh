@@ -10,7 +10,7 @@
 # waits until its pool of VMs is ready, and runs one VM container as a check. Run it again to restart the daemon with a fresh state.
 #
 #   --artifacts DIR   a directory with your own build of: containerd-shim-cloudhv-v1, cloudhv-sandbox-daemon (static x86_64 binaries),
-#                     and optionally cloud-hypervisor (a static v54.0 binary), vmlinux, rootfs.erofs. Anything missing is downloaded
+#                     and optionally cloud-hypervisor (a static v54.1 binary), vmlinux, rootfs.erofs. Anything missing is downloaded
 #                     (see --tag). Docker support is in the shim and the daemon of a build from after 2026-10-16: the binaries of the
 #                     release v0.15.0-koedodb.1 do not have it, so build the two yourself (docs/try-with-docker.md says how).
 #   --tag TAG         the release of KoedoDB/cchv to take missing files from (default: v0.15.0-koedodb.1)
@@ -27,9 +27,9 @@ ARTIFACTS=""
 TAG="v0.15.0-koedodb.1"
 FEATURE_TEST=0
 CLEAN=0
-CH_VERSION="v54.0"
-# sha256 of cloud-hypervisor-static of v54.0 (the same as hacks/checksums.txt)
-CH_SHA256="4f4f98a3d661a40f3e5272627cc895a1b2e525f2f6bedf5f895f9cd21ba5c65b"
+CH_VERSION="v54.1"
+# sha256 of cloud-hypervisor-static of v54.1 (the same as hacks/checksums.txt)
+CH_SHA256="f9ffb9646783233d1f0fb09e77db1fca66499d1041e63bc011b90683c0d49933"
 REPO="KoedoDB/cchv"
 
 while [ $# -gt 0 ]; do

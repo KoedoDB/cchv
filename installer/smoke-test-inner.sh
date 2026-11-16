@@ -43,7 +43,7 @@ version = 3
   runtime_type = "io.containerd.runc.v2"
 T
 for f in containerd-shim-cloudhv-v1 cloudhv-sandbox-daemon vmlinux rootfs.erofs; do echo "$f" > "/artifacts/$f"; done
-printf '#!/bin/sh\necho cloud-hypervisor 54.0\n' > /artifacts/cloud-hypervisor
+printf '#!/bin/sh\necho cloud-hypervisor 54.1\n' > /artifacts/cloud-hypervisor
 
 run_install() { HOST=/ ARTIFACTS=/artifacts bash /installer/install.sh; }
 

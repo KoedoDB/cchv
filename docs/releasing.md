@@ -73,7 +73,7 @@ aarch64 block of "Prepare release assets"), and the rows below.
    writes `checksums-sha256.txt` (so that it covers every file, the chart too) and signs it with cosign (keyless;
    `checksums-sha256.txt.sigstore.json`), writes the notes (with the GPL source offer), and creates the GitHub Release.
 
-Cloud Hypervisor's version is the one in `hacks/versions.env` (v54.0 at the time of writing).
+Cloud Hypervisor's version is the one in `hacks/versions.env` (v54.1 at the time of writing).
 
 ## What gets published
 

@@ -13,10 +13,10 @@ FROM rust:1.89-trixie@sha256:57407b378b2b6e07b48a6135a20c87cc22ea6e249c0acf6cb18
 
 ARG TARGETARCH
 ARG CH_REPO=https://github.com/cloud-hypervisor/cloud-hypervisor.git
-# Pinned to the commit of the v54.0 tag, never a branch: this image runs privileged on the host, so what it
+# Pinned to the commit of the v54.1 tag, never a branch: this image runs privileged on the host, so what it
 # builds must not change with the repository. To update, change the SHA to the commit of a release tag
 # (`git ls-remote <repo> 'refs/tags/vN.M^{}'`), after reading that release's notes and advisories.
-ARG CH_COMMIT=038ce5a72d761380a02f714a4eb4ca63e0ea073d
+ARG CH_COMMIT=74aeae19cb1ee2c44d33796b0e4e95e1a68e94dd
 
 # Package versions are those of the pinned Debian release (signed index); they are not pinned one by one.
 RUN apt-get update && apt-get install -y --no-install-recommends \
