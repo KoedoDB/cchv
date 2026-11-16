@@ -22,13 +22,15 @@ jobs:
     permissions:
       contents: read
     strategy:
+      # One architecture failing must not cancel the other (a git.kernel.org timeout in the aarch64 job cancelled x86_64 in v0.6.2 and v0.6.3):
+      # both run to the end, so a failure is seen and a re-run of the failed job is enough.
+      fail-fast: false
       matrix:
-        # x86_64 only (2026-11-16): nobody runs the aarch64 build (the OCI plans do not use cchv), and its job failed on git.kernel.org and cancelled
-        # the x86_64 one in v0.6.2 and v0.6.3. To bring it back: add `- runner: ubuntu-24.04-arm` / `arch: aarch64` here and restore the arm64 steps of
-        # build-installer-image and release (git history: the commit that removed them; docs/releasing.md).
         include:
           - runner: ubuntu-latest
             arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -137,6 +139,12 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Download build artifacts (arm64)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: build-aarch64
+          path: /tmp/artifacts/arm64
+
       - name: Download build artifacts (amd64)
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -158,6 +166,21 @@ jobs:
           chmod +x /tmp/image-root-amd64/opt/cloudhv/cloudhv-sandbox-daemon
           chmod +x /tmp/image-root-amd64/opt/cloudhv/install.sh
           ls -lh /tmp/image-root-amd64/opt/cloudhv/
+
+      - name: Prepare image contents (arm64)
+        run: |
+          mkdir -p /tmp/image-root-arm64/opt/cloudhv
+          cp /tmp/artifacts/arm64/containerd-shim-cloudhv-v1 \
+              /tmp/artifacts/arm64/cloudhv-sandbox-daemon \
+              /tmp/artifacts/arm64/vmlinux \
+              /tmp/artifacts/arm64/rootfs.erofs \
+              installer/install.sh \
+            /tmp/image-root-arm64/opt/cloudhv/
+
+          chmod +x /tmp/image-root-arm64/opt/cloudhv/containerd-shim-cloudhv-v1
+          chmod +x /tmp/image-root-arm64/opt/cloudhv/cloudhv-sandbox-daemon
+          chmod +x /tmp/image-root-arm64/opt/cloudhv/install.sh
+          ls -lh /tmp/image-root-arm64/opt/cloudhv/
 
       - name: Name of the image (GHCR names are lower case)
         run: echo "IMAGE_NAME=${GITHUB_REPOSITORY_OWNER,,}/cloudhv-installer" >> "$GITHUB_ENV"
@@ -191,13 +214,25 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.version=${{ steps.version.outputs.VERSION }}
 
+      - name: Build and push installer image (arm64)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: /tmp/image-root-arm64
+          file: installer/Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}-arm64
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.version.outputs.VERSION }}
+
       # No ":latest": a tag that moves must not be what a node's privileged installer runs. The digest is what is signed and
       # what the Helm chart and the release notes point to.
-      - name: Create and push the manifest (amd64 only)
+      - name: Create and push multi-arch manifest
         id: manifest
         run: |
           REF="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}"
-          docker buildx imagetools create -t "$REF" "$REF-amd64"
+          docker buildx imagetools create -t "$REF" "$REF-amd64" "$REF-arm64"
           DIGEST="$(docker buildx imagetools inspect "$REF" --format '{{json .Manifest}}' | jq -r .digest)"
           case "$DIGEST" in sha256:????????????????????????????????????????????????????????????????) ;; *) echo "bad digest: $DIGEST"; exit 1 ;; esac
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
@@ -217,6 +252,8 @@ jobs:
   release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
+    # Rule: all or nothing. `needs` runs this job only if EVERY job above succeeded, so a release never carries one architecture only
+    # (the manifest of the installer image and the checksums cover both). If one architecture fails, re-run the failed jobs.
     needs: [build-everything, build-installer-image, sbom-and-licenses]
     # The only job that writes. It runs no build code: the checkout is only read by shell commands written in this file.
     permissions:
@@ -228,6 +265,12 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Download build artifacts (arm64)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: build-aarch64
+          path: /tmp/artifacts/arm64
 
       - name: Download build artifacts (amd64)
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -258,6 +301,20 @@ jobs:
           chmod +x /tmp/release/containerd-shim-cloudhv-v1-linux-amd64
           chmod +x /tmp/release/cloudhv-agent-linux-amd64
           chmod +x /tmp/release/cloudhv-sandbox-daemon-linux-amd64
+
+          # aarch64
+          cd /tmp/artifacts/arm64
+          cp -v cloudhv-agent /tmp/release/cloudhv-agent-linux-arm64 
+          cp -v cloudhv-sandbox-daemon /tmp/release/cloudhv-sandbox-daemon-linux-arm64
+          cp -v containerd-shim-cloudhv-v1 /tmp/release/containerd-shim-cloudhv-v1-linux-arm64 
+          cp -v rootfs.erofs /tmp/release/rootfs-arm64.erofs 
+          cp -v vmlinux /tmp/release/vmlinux-arm64
+          cp -v vmlinux.kconfig /tmp/release/vmlinux-arm64.kconfig
+          cp -v containerd-cloudhypervisor.raw /tmp/release/containerd-cloudhypervisor-${{ github.ref_name }}-arm64.raw
+
+          chmod +x /tmp/release/containerd-shim-cloudhv-v1-linux-arm64
+          chmod +x /tmp/release/cloudhv-agent-linux-arm64
+          chmod +x /tmp/release/cloudhv-sandbox-daemon-linux-arm64
 
           # Licenses and SBOMs (made by the sbom-and-licenses job)
           cp -v /tmp/artifacts/sbom/* /tmp/release/
@@ -355,7 +412,7 @@ jobs:
 
           Use the following Butane config to automatically install the sysext at provisioning time on distros that support Ignition / Butane provisioning (Fedora CoreOS, SUSE MicroOS, Flatcar, etc.).
           Adjust `variant:` and `version:` in accordance with your distro's requirements.
-          Releases are for `x86-64` only.
+          The example is for `x86-64`; replace with `arm64` in the sysext file name to provision for `arm64`.
           ```yaml
           variant: flatcar
           version: 1.0.0

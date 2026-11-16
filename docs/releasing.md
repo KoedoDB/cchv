@@ -48,16 +48,13 @@ a one-time confirmation in the *Actions* tab), and the organization must allow i
 
 ## What the workflow does
 
-**Releases are x86_64 only** (since 2026-11-16, v0.6.4 onwards). Nobody here runs cchv on aarch64, and the aarch64 build job failed on its own (it clones
-erofs-utils from `git.kernel.org`, which timed out in v0.6.2 and v0.6.3) and cancelled the x86_64 job with it. The source still builds for aarch64
-(`guest/kernel/configs/microvm-aarch64.config`, the arm64 branches of the build scripts and of `installer/Dockerfile`, the aarch64 and arm64 pins in
-`hacks/checksums.txt` are all still there): to bring it back, add `- runner: ubuntu-24.04-arm` / `arch: aarch64` to the matrix of `build-everything`
-in `.github/workflows/release.yml`, and restore from git history (`git log -S"build-aarch64" -- .github/workflows/release.yml`) the arm64 steps of
-`build-installer-image` (download, image contents, build and push, and `$REF-arm64` in the manifest) and of `release` (the download and the
-aarch64 block of "Prepare release assets"), and the rows below.
+**aarch64 artifacts are built but never booted in CI**: nothing in the workflow runs the arm64 guest kernel, root file system or installer. They are
+unverified until tried on real Arm hardware. **A release is all or nothing**: the build jobs of the two architectures do not cancel each other
+(`fail-fast: false`), but the Release job needs all of them, so if one fails nothing is published; re-run the failed jobs (downloads from
+kernel.org are retried 5 times with backoff, and are still checked against `hacks/checksums.txt`).
 
 0. Every job below that runs code is read-only. The first step of the build is `BUILD-INFO` (the tag and the commit, for `--version`).
-1. **Build** (one job per architecture: x86_64 only for now, read-only token): the guest kernel (a pinned, checksum-verified kernel.org
+1. **Build** (one job per architecture, x86_64 and aarch64, read-only token): the guest kernel (a pinned, checksum-verified kernel.org
    tarball, 6.18 LTS) and the guest root file system with the agent and a pinned `crun`, the shim and the daemon, and the Flatcar system
    extension. All downloads are checked against `hacks/checksums.txt`.
    **SBOMs and licenses** (one job, read-only): `cargo about` writes `THIRD-PARTY-LICENSES.txt` for the crates of the workspace and of
@@ -65,8 +62,8 @@ aarch64 block of "Prepare release assets"), and the rows below.
    CycloneDX SBOM per shipped binary from `Cargo.lock`, and `hacks/gen-bundled-sbom.py` writes the SBOM of what is bundled and is not a
    crate (Cloud Hypervisor, CNI plugins, crun, the kernel, with the SHA-256 of what was downloaded). Both tools are installed from
    source at a pinned version with `--locked`; no binary is downloaded.
-2. **Installer image** (needs `packages: write` and `id-token: write`): an amd64 image, pushed to GHCR as
-   `ghcr.io/koedodb/cloudhv-installer:<tag>-amd64`, and a manifest of it; the **digest** of the manifest is signed with cosign
+2. **Installer image** (needs `packages: write` and `id-token: write`): a multi-architecture image, pushed to GHCR as
+   `ghcr.io/koedodb/cloudhv-installer:<tag>-amd64`, `-arm64`, and a manifest; the **digest** of the manifest is signed with cosign
    (keyless). There is **no `:latest`**: a tag that moves must not be what a privileged installer on every node runs.
 3. **Release** (needs `contents: write`, `packages: write` and `id-token: write`; runs no code from the checkout): collects the artifacts
    (with the licenses, SBOMs and `THIRD-PARTY.md`), pushes the Helm chart to `oci://ghcr.io/koedodb/charts/cloudhv-installer`, **then**
@@ -79,9 +76,9 @@ Cloud Hypervisor's version is the one in `hacks/versions.env` (v54.1 at the time
 
 | Asset | |
 |---|---|
-| `containerd-shim-cloudhv-v1-linux-amd64`, `cloudhv-sandbox-daemon-linux-amd64`, `cloudhv-agent-linux-amd64` | host and guest binaries (`--version` prints the tag) |
-| `vmlinux-amd64`, `vmlinux-amd64.kconfig`, `rootfs-amd64.erofs` | guest kernel (with its configuration) and root file system |
-| `containerd-cloudhypervisor-<tag>-x86-64.raw` | Flatcar system extension |
+| `containerd-shim-cloudhv-v1-linux-{amd64,arm64}`, `cloudhv-sandbox-daemon-linux-{amd64,arm64}`, `cloudhv-agent-linux-{amd64,arm64}` | host and guest binaries (`--version` prints the tag) |
+| `vmlinux-{amd64,arm64}`, `vmlinux-{amd64,arm64}.kconfig`, `rootfs-{amd64,arm64}.erofs` | guest kernel (with its configuration) and root file system |
+| `containerd-cloudhypervisor-<tag>-x86-64.raw` and `-arm64.raw` | Flatcar system extension |
 | `cloudhv-installer-<version>.tgz` | Helm chart |
 | `THIRD-PARTY-LICENSES.txt`, `THIRD-PARTY.md` | licenses of the crates; what is bundled, its licenses and the source of the GPL parts |
 | `sbom-containerd-shim-cloudhv-v1.cdx.json`, `sbom-cloudhv-sandbox-daemon.cdx.json`, `sbom-cloudhv-agent.cdx.json`, `sbom-bundled-components.cdx.json` | CycloneDX SBOMs |

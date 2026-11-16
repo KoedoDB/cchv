@@ -43,11 +43,19 @@ verify_sha256() {
 # download_verified URL DEST NAME: downloads to a temporary file, checks it, and only then moves it to DEST.
 download_verified() {
   _vd_tmp="$(mktemp "$2.XXXXXX")"
-  if ! wget -q -O "$_vd_tmp" "$1"; then
-    rm -f "$_vd_tmp"
-    echo "ERROR: download failed: $1" >&2
-    return 1
-  fi
+  # Only the transfer is retried (5 tries, 10/20/40/80 s apart: kernel.org times out now and then). What was fetched is still checked
+  # against the pinned SHA-256 below, exactly as before.
+  _vd_try=1
+  until wget -q -T 60 -t 1 -O "$_vd_tmp" "$1"; do
+    if [ "$_vd_try" -ge 5 ]; then
+      rm -f "$_vd_tmp"
+      echo "ERROR: download failed after $_vd_try tries: $1" >&2
+      return 1
+    fi
+    echo "download failed (try $_vd_try), retrying: $1" >&2
+    sleep $((10 * (1 << (_vd_try - 1))))
+    _vd_try=$((_vd_try + 1))
+  done
   if ! verify_sha256 "$_vd_tmp" "$3"; then
     rm -f "$_vd_tmp"
     return 1

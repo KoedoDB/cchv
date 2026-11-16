@@ -78,7 +78,7 @@ for a in amd64 arm64; do
 done
 
 echo "erofs-utils ${EROFS_UTILS_VERSION}: the commit of the tag"
-c="$(git ls-remote https://git.kernel.org/pub/scm/linux/kernel/git/xiang/erofs-utils.git "refs/tags/v${EROFS_UTILS_VERSION}^{}" | cut -f1)"
+c="$(git ls-remote https://github.com/erofs/erofs-utils.git "refs/tags/v${EROFS_UTILS_VERSION}^{}" | cut -f1)"
 [ "$c" = "$EROFS_UTILS_COMMIT" ] && ok "EROFS_UTILS_COMMIT is the commit of v${EROFS_UTILS_VERSION}" || bad "EROFS_UTILS_COMMIT is ${EROFS_UTILS_COMMIT}, the tag points to ${c}"
 
 echo
